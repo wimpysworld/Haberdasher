@@ -35,6 +35,7 @@
             "rpm"
             "apk-tools"
             "abuild"
+            "getopt"
             "pacman"
             "flatpak"
             "ostree"
@@ -46,6 +47,9 @@
             mkdir -p just/project
             cp ${./just/project/tools.sh} just/project/tools.sh
             bash ${./just/project/test.sh}
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              test "$(${pkgs.getopt}/bin/getopt --options h --longoptions help -- --help)" = " --help --"
+            ''}
             touch "$out"
           '';
         }

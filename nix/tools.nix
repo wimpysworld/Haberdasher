@@ -27,6 +27,7 @@ with pkgs;
   rpm
   apk-tools
   abuild
+  getopt
   pacman
   flatpak
   ostree

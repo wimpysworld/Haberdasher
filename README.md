@@ -29,13 +29,13 @@ just test
 
 `just check-tools` reports executable paths from the declared Nix packages, without using inherited host tools. It fails if a required executable is missing. It makes no network requests and does not create keys, configuration, or repositories. Nix can download packages when you enter the shell.
 
-Common tools include Bash, GNU utilities, archive tools, jq, curl, OpenSSL, GnuPG, rclone, ShellCheck, shfmt, and nixfmt. The existing gh, just, and actionlint tools remain available.
+Common tools include Bash, GNU utilities, archive tools, jq, curl, OpenSSL, GnuPG (including `gpgsm`), rclone, ShellCheck, shfmt, and nixfmt. The existing gh, just, and actionlint tools remain available.
 
-Linux also supplies `apt-ftparchive`, `dpkg-deb`, `createrepo_c`, `modifyrepo_c`, `rpm`, `rpmsign`, `apk`, `abuild-sign`, `repo-add`, `repo-remove`, `flatpak`, and `ostree`.
+Linux also supplies `apt-ftparchive`, `dpkg-deb`, `createrepo_c`, `modifyrepo_c`, `rpm`, `rpmsign`, `apk`, `abuild-sign`, `getopt`, `repo-add`, `repo-remove`, `flatpak`, and `ostree`.
 
 The executable check, lint, and local tests passed on `x86_64-linux`. The `aarch64-linux` and `aarch64-darwin` shells passed evaluation only. Darwin supplies common development tools, not repository tools. Publishing requires Linux because the complete native tool set requires Linux. Tool availability does not prove signing or client installation.
 
-`just test` checks platform selection and missing-tool failures without running package tools. `nix flake check` also checks the Nix package selection for each evaluated system.
+`just test` checks platform selection and missing-tool failures without running package tools. `nix flake check` also checks the Nix package selection for each evaluated system and GNU long-option handling on Linux.
 
 ## Planned flow
 

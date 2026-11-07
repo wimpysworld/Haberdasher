@@ -9,7 +9,7 @@ printf '#!/bin/sh\nexit 99\n' >"$fixture/tool"
 chmod +x "$fixture/tool"
 for tool in bash cat cp mv rm mkdir mktemp sha256sum sort \
     find xargs grep sed tar gzip xz zstd bsdtar \
-    jq curl openssl gpg gpgv shellcheck shfmt nixfmt rclone gh just actionlint; do
+    jq curl openssl gpg gpgv gpgsm shellcheck shfmt nixfmt rclone gh just actionlint; do
     ln -s "$fixture/tool" "$fixture/bin/$tool"
 done
 
@@ -31,7 +31,7 @@ done
 printf 'PASS: both Linux systems require repository tools.\n'
 
 for tool in apt-ftparchive dpkg dpkg-deb createrepo_c modifyrepo_c \
-    rpm rpmsign apk abuild abuild-sign pacman repo-add repo-remove flatpak ostree; do
+    rpm rpmsign apk abuild abuild-sign getopt pacman repo-add repo-remove flatpak ostree; do
     ln -s "$fixture/tool" "$fixture/bin/$tool"
 done
 for system in x86_64-linux aarch64-linux; do
@@ -39,13 +39,16 @@ for system in x86_64-linux aarch64-linux; do
 done
 printf 'PASS: both Linux systems accept all tools without executing them.\n'
 
-rm "$fixture/bin/bash"
-if check x86_64-linux; then
-    printf 'FAIL: inherited PATH hid a missing project dependency.\n' >&2
-    exit 1
-fi
-grep -q 'Missing tool: bash' "$fixture/output"
-printf 'PASS: inherited PATH cannot hide a missing dependency.\n'
+for tool in bash openssl gpgsm getopt; do
+    rm "$fixture/bin/$tool"
+    if check x86_64-linux; then
+        printf 'FAIL: inherited PATH hid missing %s.\n' "$tool" >&2
+        exit 1
+    fi
+    grep -q "Missing tool: $tool" "$fixture/output"
+    ln -s "$fixture/tool" "$fixture/bin/$tool"
+done
+printf 'PASS: inherited PATH cannot hide missing shell or signing tools.\n'
 
 if check unsupported; then
     printf 'FAIL: unsupported system accepted.\n' >&2

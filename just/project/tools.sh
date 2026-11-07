@@ -10,14 +10,14 @@ export PATH="$HABERDASHER_TOOL_PATH"
 tools=(
     bash cat cp mv rm mkdir mktemp sha256sum sort
     find xargs grep sed tar gzip xz zstd bsdtar
-    jq curl openssl gpg gpgv shellcheck shfmt nixfmt rclone
+    jq curl openssl gpg gpgv gpgsm shellcheck shfmt nixfmt rclone
     gh just actionlint
 )
 case "${HABERDASHER_TOOL_SYSTEM:-}" in
     x86_64-linux | aarch64-linux)
         tools+=(
             apt-ftparchive dpkg dpkg-deb createrepo_c modifyrepo_c
-            rpm rpmsign apk abuild abuild-sign pacman repo-add repo-remove
+            rpm rpmsign apk abuild abuild-sign getopt pacman repo-add repo-remove
             flatpak ostree
         )
         ;;
