@@ -8,8 +8,7 @@ Haberdasher is a personal-use publisher for prebuilt GitHub release assets from 
 - Do not introduce an automatic Go migration or a plugin framework.
 - Consume upstream `.deb`, `.rpm`, `.apk`, `.pkg.tar.zst`, and `.flatpak` assets from tools such as GoReleaser and electron-builder.
 - Reuse native indexing and signing tools, not handwritten package-format encoders.
-- Treat `docs/HANDOVER.md` as design background, not current implementation evidence.
-  Its latest-tag state model and workflow-only serialisation are insufficient.
+- Use WW-370 for the repository proof scope and its linked research for design background.
 - Verify implementation in repository files before documenting commands or claiming capabilities.
 
 ## Setup
