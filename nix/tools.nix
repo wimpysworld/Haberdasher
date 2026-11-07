@@ -25,10 +25,15 @@ with pkgs;
   dpkg
   createrepo_c
   rpm
+  dnf5
+  fakechroot
+  fakeroot
+  python3
   apk-tools
   abuild
   getopt
   pacman
   flatpak
   ostree
+  shared-mime-info
 ]

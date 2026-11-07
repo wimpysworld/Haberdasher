@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-scripts=(just/project/*.sh)
+scripts=(just/project/*.sh tests/proofs/*.sh)
 shellcheck "${scripts[@]}"
 case "${1:-check}" in
     check)

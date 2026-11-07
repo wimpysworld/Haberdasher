@@ -80,7 +80,8 @@ Treat the five package buckets as public:
   Import that certificate, then export the same key with `--armor --export-secret-key-p8`.
   Do not generate another key or require an external certificate authority or certificate service.
 - Configure scoped public-key trust for each native client. Do not require personal keys, keyservers, or the public web of trust.
-- Keep secrets and control state out of these buckets.
+- Permit one public, non-secret `haberdasher.json` package inventory per bucket for package identity, source, published digests, and referenced objects.
+- Keep secrets, credentials, private provenance, locks, pending journals, and other private control state out of these buckets.
 - Read publisher credentials only from the runtime environment:
   `HD_CLOUDFLARE_S3_API_ENDPOINT`, `HD_CLOUDFLARE_ACCESS_KEY_ID`, and `HD_CLOUDFLARE_SECRET_ACCESS_KEY`.
   Local credentials use SOPS in `~/Zero/nix-config`. GitHub Secrets use the same variable names.

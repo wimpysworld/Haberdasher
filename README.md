@@ -4,7 +4,7 @@ Haberdasher is Martin's personal tool for publishing prebuilt GitHub Release pac
 
 ## Status
 
-The pinned Nix environment supplies common development tools and Linux tools for all five planned repository formats. Package collection, signing, publication, and automation are not implemented.
+The pinned Nix environment supplies common development tools and Linux tools for all five planned repository formats. Local repository proofs are separate from the production publisher. Production package collection, signing, publication, and automation are not implemented.
 
 Five R2 buckets exist with custom domains enabled. Domain activation is unverified. Local read-only requests succeeded for all buckets. Writes and access from GitHub Actions are untested. Client installation instructions are not ready.
 
@@ -35,7 +35,18 @@ Linux also supplies `apt-ftparchive`, `dpkg-deb`, `createrepo_c`, `modifyrepo_c`
 
 The executable check, lint, and local tests passed on `x86_64-linux`. The `aarch64-linux` and `aarch64-darwin` shells passed evaluation only. Darwin supplies common development tools, not repository tools. Publishing requires Linux because the complete native tool set requires Linux. Tool availability does not prove signing or client installation.
 
-`just test` checks platform selection and missing-tool failures without running package tools. `nix flake check` also checks the Nix package selection for each evaluated system and GNU long-option handling on Linux.
+`just test` stays fast: it checks tool selection, proof routing, isolation, and cleanup with test doubles, without running native package proofs. `nix flake check` also checks the Nix package selection for each evaluated system and GNU long-option handling on Linux.
+
+Run local proofs separately in the Linux Nix shell, with the native tools above. Use an ordinary user account. The Arch proof currently requires `x86_64`.
+
+```sh
+just proof
+just proof apt
+```
+
+`just proof` defaults to `all`. To select one format, replace `apt` with `rpm`, `arch`, `apk`, or `flatpak`.
+
+See the [local proof guide](docs/proofs/README.md) for scope, isolation, per-format evidence, and the proposed production contract. Local proof results do not establish production publisher support.
 
 ## Source configuration
 
@@ -57,7 +68,7 @@ Upstream projects build packages with tools such as GoReleaser and electron-buil
 
 Repository signatures establish publisher identity and integrity, not payload safety.
 
-Shell scripts will use native repository tools where possible. The incremental metadata strategy still needs validation for each format. No Go rewrite or generic plugin framework is planned.
+Shell scripts will use native repository tools. The [proof guide](docs/proofs/README.md#production-follow-ons) names bounded production follow-ons. No Go rewrite or generic plugin framework is planned.
 
 The Nix flake and lock file pin tools through Tailor conventions. Local runs use Just recipes. A future Determinate Nix GitHub runner will use the same recipes. Triggers will include manual runs and scheduled reconciliation, with optional cross-repository dispatch after asset uploads.
 

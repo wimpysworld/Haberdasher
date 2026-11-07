@@ -8,17 +8,18 @@ fi
 export PATH="$HABERDASHER_TOOL_PATH"
 
 tools=(
-    bash cat cp mv rm mkdir mktemp sha256sum sort
+    bash env cat cp mv rm mkdir mktemp chmod sha256sum sort timeout id
     find xargs grep sed tar gzip xz zstd bsdtar
-    jq curl openssl gpg gpgv gpgsm shellcheck shfmt nixfmt rclone
+    jq curl openssl gpg gpgv gpgsm gpgconf shellcheck shfmt nixfmt rclone
     gh just actionlint
 )
 case "${HABERDASHER_TOOL_SYSTEM:-}" in
     x86_64-linux | aarch64-linux)
         tools+=(
-            apt-ftparchive dpkg dpkg-deb createrepo_c modifyrepo_c
-            rpm rpmsign apk abuild abuild-sign getopt pacman repo-add repo-remove
-            flatpak ostree
+            apt-ftparchive apt-get apt-config dpkg dpkg-deb dpkg-query createrepo_c modifyrepo_c
+            rpm rpmsign rpmbuild rpmkeys dnf5 fakechroot fakeroot python3
+            apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp
+            flatpak ostree update-mime-database
         )
         ;;
     aarch64-darwin)
