@@ -37,6 +37,15 @@ The executable check, lint, and local tests passed on `x86_64-linux`. The `aarch
 
 `just test` checks platform selection and missing-tool failures without running package tools. `nix flake check` also checks the Nix package selection for each evaluated system and GNU long-option handling on Linux.
 
+## Source configuration
+
+Edit `haberdasher.yaml` in the repository root to list GitHub sources as `owner/repo` strings under the single top-level `sources` key. Tailor is the first source. To add another repository, append another `- owner/repo` entry. Keep credentials, runtime state, and manifest state out of this public file. Haberdasher does not yet read this configuration.
+
+```yaml
+sources:
+  - wimpysworld/tailor
+```
+
 ## Planned flow
 
 Upstream projects build packages with tools such as GoReleaser and electron-builder. Haberdasher will:
