@@ -1,5 +1,6 @@
 # Requires just 1.23.0 or later.
 import 'just/loader.just'
+import 'just/project.just'
 
 # List available recipes
 default:

@@ -22,6 +22,34 @@
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
     in
     {
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          tools = import ./nix/tools.nix { inherit pkgs; };
+          names = map (package: package.pname) tools;
+          linuxTools = [
+            "apt"
+            "dpkg"
+            "createrepo_c"
+            "rpm"
+            "apk-tools"
+            "abuild"
+            "pacman"
+            "flatpak"
+            "ostree"
+          ];
+        in
+        assert builtins.all (name: builtins.elem name names == pkgs.stdenv.hostPlatform.isLinux) linuxTools;
+        {
+          tools = pkgs.runCommand "haberdasher-tools-test" { nativeBuildInputs = [ pkgs.bash ]; } ''
+            mkdir -p just/project
+            cp ${./just/project/tools.sh} just/project/tools.sh
+            bash ${./just/project/test.sh}
+            touch "$out"
+          '';
+        }
+      );
       packages = forAllSystems (
         system:
         let
@@ -37,17 +65,20 @@
           pkgs = import nixpkgs { inherit system; };
           # Keep the development shell available when Tailor has no package for this system.
           tailorPkgs = nix-packages.packages.${system} or { };
+          projectTools = [
+            pkgs.actionlint
+            pkgs.gh
+            pkgs.just
+          ]
+          ++ import ./nix/tools.nix { inherit pkgs; };
         in
         {
           default = pkgs.mkShell {
             shellHook = import ./nix/hooks.nix { inherit pkgs; };
+            HABERDASHER_TOOL_PATH = pkgs.lib.makeBinPath projectTools;
+            HABERDASHER_TOOL_SYSTEM = system;
             packages =
-              with pkgs;
-              [
-                actionlint
-                gh
-                just
-              ]
+              projectTools
               ++ (if tailorPkgs ? tailor then [ tailorPkgs.tailor ] else [ ])
               ++ import ./nix/loader.nix { inherit pkgs; };
           };
