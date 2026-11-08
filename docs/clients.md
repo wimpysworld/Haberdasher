@@ -120,12 +120,25 @@ Approve application refs and a separate runtime origin before setup. Verify each
 
 The current adapter supports an empty collection binding. It rejects unapproved extensions, extra-data, source owners, refs, and signed upstream bundles. Do not add an arbitrary `RuntimeRepo` from an application bundle or descriptor.
 
-Use separate deny-by-default filter files for approved application refs and runtime/extension refs:
+Use separate deny-by-default filter files. Save the approved application filter as `/approved/app.filter`:
 
 ```text
 deny *
 allow app/APP_ID/x86_64/stable
 ```
+
+Save the separately approved runtime and extension filter as `/approved/runtime.filter`:
+
+```text
+deny *
+allow runtime/APPROVED_RUNTIME_ID/APPROVED_ARCH/APPROVED_RUNTIME_BRANCH
+allow runtime/APPROVED_EXTENSION_ID/APPROVED_ARCH/APPROVED_EXTENSION_BRANCH
+```
+
+Replace each ref placeholder with an exact approved value, without wildcards.
+The runtime URL and `/verified/runtime.gpg` are operator-supplied placeholders for the approved provider and its verified public key.
+Verify that key against the provider's independently approved full fingerprint, not the Haberdasher fingerprint.
+This example grants no runtime approval.
 
 After replacing the placeholders with approved values, add the two origins explicitly:
 
