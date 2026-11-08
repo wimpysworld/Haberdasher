@@ -136,7 +136,7 @@ Acquire::Retries "0";
 Acquire::http::Proxy "DIRECT";
 Acquire::Check-Date "true";
 Acquire::Check-Valid-Until "true";
-DPkg::Options {{ "--root={client.root}"; "--admindir={client.root}/var/lib/dpkg"; "--log={client.root}/var/log/dpkg.log"; }};
+DPkg::Options {{ "--log={client.root}/var/log/dpkg.log"; }};
 DPkg::Use-Pty "false";
 ''')
 
@@ -150,6 +150,8 @@ DPkg::Use-Pty "false";
                 "apt-get",
                 "-o",
                 f"Dir::State::status={client.root}/var/lib/dpkg/status",
+                f"-oDPkg::Options::=--root={client.root}",
+                f"-oDPkg::Options::=--admindir={client.root}/var/lib/dpkg",
                 *args,
             ],
             install_root=client.root,

@@ -1,7 +1,7 @@
 """Private roots and command evidence, without package-format policy.
 
-Callers supply native configuration and root options. The mandatory install_root
-argument and an explicit path in argv reject accidental host-root invocations.
+Callers supply trusted native configuration and fixed root-selection prefixes.
+The guard checks those prefixes and rejects later root or configuration overrides.
 This helper is not a sandbox for untrusted programs or package scripts.
 """
 
@@ -60,6 +60,152 @@ class NativeClient:
             raise ValueError("Private installation root is missing")
         return root
 
+    def _guard_command(self, argv: Sequence[str], root: Path) -> None:
+        error = "Native command must select only its private installation root"
+        args = list(argv)
+        setopts: set[str] = set()
+        # Fixed prefixes keep option values and operands from posing as root selectors.
+        match args:
+            case ["apk", *_]:
+                prefix = ["apk", "--root", str(root)]
+                long_options, short_options = ("--root",), "p"
+            case ["fakeroot", "pacman", *_]:
+                prefix = [
+                    "fakeroot",
+                    "pacman",
+                    "--config",
+                    str(self.path("config/pacman.conf")),
+                    "--root",
+                    str(root),
+                ]
+                long_options = ("--root", "--sysroot", "--config", "--dbpath")
+                short_options = "rb"
+            case ["rpm", *_]:
+                prefix = ["rpm", "--define", "_dbpath /var/lib/rpm", "--root", str(root)]
+                long_options = ("--root", "--dbpath", "--rcfile", "--macros", "--define")
+                short_options = "rD"
+            case ["dpkg-query", *_]:
+                prefix = ["dpkg-query", f"--admindir={self.path('root/var/lib/dpkg')}"]
+                long_options, short_options = ("--admindir", "--root", "--instdir"), ""
+            case ["env", _, "fakeroot", "apt-get", *_]:
+                prefix = [
+                    "env",
+                    f"APT_CONFIG={self.path('config/apt.conf')}",
+                    "fakeroot",
+                    "apt-get",
+                    "-o",
+                    f"Dir::State::status={self.path('root/var/lib/dpkg/status')}",
+                    f"-oDPkg::Options::=--root={root}",
+                    f"-oDPkg::Options::=--admindir={self.path('root/var/lib/dpkg')}",
+                ]
+                long_options, short_options = ("--option", "--config-file"), "oc"
+            case [
+                "env",
+                _,
+                data_dirs,
+                _,
+                _,
+                _,
+                "flatpak",
+                "--user",
+                *_,
+            ]:
+                if not data_dirs.startswith("XDG_DATA_DIRS="):
+                    raise ValueError(error)
+                prefix = [
+                    "env",
+                    f"FLATPAK_USER_DIR={root}",
+                    data_dirs,
+                    f"HOME={self.path('config')}",
+                    f"XDG_DATA_HOME={self.path('state')}",
+                    f"XDG_CACHE_HOME={self.path('cache')}",
+                    "flatpak",
+                    "--user",
+                ]
+                long_options, short_options = ("--user", "--system", "--installation"), "u"
+            case [
+                "env",
+                "FAKECHROOT_EXCLUDE_PATH=/nix/store",
+                _,
+                "fakechroot",
+                "-e",
+                "none",
+                "fakeroot",
+                "chroot",
+                _,
+                env,
+                *inner,
+            ]:
+                local = "/" + str(self.base.relative_to(self.runtime.root))
+                home = f"{local}/home"
+                environment = [
+                    f"HOME={home}",
+                    f"GNUPGHOME={local}/gnupg",
+                    "TMPDIR=/tmp",
+                    f"XDG_CONFIG_HOME={home}/.config",
+                    f"XDG_DATA_HOME={home}/.local/share",
+                    f"XDG_CACHE_HOME={home}/.cache",
+                    f"XDG_STATE_HOME={home}/.local/state",
+                    "XDG_RUNTIME_DIR=/run",
+                ]
+                if (
+                    not Path(env).is_absolute()
+                    or Path(env).name != "env"
+                    or len(inner) <= len(environment)
+                    or not Path(inner[len(environment)]).is_absolute()
+                    or Path(inner[len(environment)]).name != "dnf5"
+                ):
+                    raise ValueError(error)
+                # The fake chroot maps logical paths through the workspace, not the install root.
+                prefix = [
+                    "env",
+                    "FAKECHROOT_EXCLUDE_PATH=/nix/store",
+                    f"HD_PRIVATE_INSTALL_ROOT={root}",
+                    "fakechroot",
+                    "-e",
+                    "none",
+                    "fakeroot",
+                    "chroot",
+                    str(self.runtime.root),
+                    env,
+                    *environment,
+                    inner[len(environment)],
+                    "--config",
+                    f"{local}/config/dnf.conf",
+                    "--installroot",
+                    f"{local}/root",
+                ]
+                long_options, short_options = ("--installroot", "--config", "--setopt"), "c"
+                setopts = {
+                    f"--setopt={key}={local}/{value}"
+                    for key, value in (
+                        ("reposdir", "repos"),
+                        ("varsdir", "vars"),
+                        ("cachedir", "cache"),
+                        ("system_cachedir", "cache"),
+                        ("logdir", "log"),
+                        ("persistdir", "state"),
+                    )
+                }
+            case _:
+                raise ValueError(error)
+        if args[: len(prefix)] != prefix:
+            raise ValueError(error)
+        for arg in args[len(prefix) :]:
+            if arg in setopts:
+                continue
+            option = arg.partition("=")[0]
+            if (
+                option.startswith("--")
+                and len(option) > 2
+                and any(name.startswith(option) for name in long_options)
+            ) or (
+                arg.startswith("-")
+                and not arg.startswith("--")
+                and any(letter in arg[1:] for letter in short_options)
+            ):
+                raise ValueError(error)
+
     @property
     def commands(self) -> tuple[CommandRecord, ...]:
         return tuple(self._commands)
@@ -80,14 +226,13 @@ class NativeClient:
         timeout: float = 120,
     ) -> subprocess.CompletedProcess[bytes]:
         root = self.guard_root(install_root)
-        if isinstance(argv, (str, bytes)) or not argv:
-            raise ValueError("Expected an argument sequence")
-        if not any(
-            value == str(root) or value.startswith(str(root) + "/")
-            for arg in argv
-            for value in (arg, arg.partition("=")[2])
+        if (
+            isinstance(argv, (str, bytes))
+            or not argv
+            or any(not isinstance(arg, str) or "\0" in arg for arg in argv)
         ):
-            raise ValueError("Native command must name its private installation root")
+            raise ValueError("Expected an argument sequence")
+        self._guard_command(argv, root)
         if cwd is not None:
             self.path(str(cwd.relative_to(self.base)))
         args = tuple(self.runtime.redact(arg.encode()).decode() for arg in argv)
