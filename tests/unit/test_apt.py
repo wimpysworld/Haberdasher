@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +14,10 @@ import pytest
 from haberdasher.config import FormatPolicy
 from haberdasher.core import (
     AdmittedAsset,
+    InspectedAsset,
+    JSONValue,
     NativeIdentity,
+    ObjectRef,
     PreparedFormat,
     RetainedFormat,
     SourceAsset,
@@ -20,7 +25,11 @@ from haberdasher.core import (
     sha256_file,
 )
 from haberdasher.formats import apt
-from haberdasher.formats.apt import _verify_signatures  # pyright: ignore[reportPrivateUsage]
+from haberdasher.formats.apt import (
+    _indexes,  # pyright: ignore[reportPrivateUsage]
+    _policy,  # pyright: ignore[reportPrivateUsage]
+    _verify_signatures,  # pyright: ignore[reportPrivateUsage]
+)
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
 
@@ -341,6 +350,135 @@ def test_release_verification_requires_one_scoped_sha256_primary(
     assert len(runtime.commands) == (1 if fault is not None and not inline else 2)
     assert all(command[0] == "gpgv" for command in runtime.commands)
     assert not list((runtime.root / "tmp").iterdir())
+
+
+def retained_history(
+    root: Path, identities: tuple[NativeIdentity, ...], config: FormatPolicy
+) -> RetainedFormat:
+    verified = asset(root)
+    history: list[AdmittedAsset] = []
+    refs: list[ObjectRef] = []
+
+    def reference(key: str, data: bytes, kind: str) -> None:
+        refs.append(
+            ObjectRef(
+                "apt",
+                key,
+                kind,
+                len(data),
+                hashlib.sha256(data).hexdigest(),
+                "application/octet-stream",
+                "no-cache",
+            )
+        )
+
+    for index, identity in enumerate(identities):
+        data = f"distinct synthetic DEB {index}".encode()
+        current = replace(
+            verified,
+            source=replace(verified.source, asset_id=index + 1, size=len(data)),
+            local_path=root / f"absent-{index}.deb",
+            sha256=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+        )
+        raw = (
+            record(current, identity.architecture)
+            .decode()
+            .replace("Package: hd-test", f"Package: {identity.name}")
+            .replace("Version: 1.0", f"Version: {identity.version}")
+        )
+        history.append(
+            AdmittedAsset(
+                InspectedAsset(current, identity, {"record": raw}, {}, "unsigned"),
+                "preserve",
+                f"unique-history-{index}",
+                current.sha256,
+            )
+        )
+        reference(f"pool/{current.sha256}.deb", data, "package")
+    indexes = _indexes(history, config)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    expiry = now + timedelta(seconds=config.validity_seconds)
+    release = (
+        f"Suite: {config.suite}\nCodename: {config.suite}\nComponents: {config.component}\n"
+        f"Architectures: {' '.join(config.architectures)}\nAcquire-By-Hash: yes\n"
+        f"Date: {format_datetime(now, usegmt=True)}\n"
+        f"Valid-Until: {format_datetime(expiry, usegmt=True)}\nSHA256:\n"
+    )
+    for key, data in indexes.items():
+        sha = hashlib.sha256(data).hexdigest()
+        release += f" {sha} {len(data)} {key.removeprefix(f'dists/{config.suite}/')}\n"
+        reference(key.rsplit("/", 1)[0] + "/by-hash/SHA256/" + sha, data, "dependency")
+    files: dict[str, JSONValue] = {}
+    for key, data in {
+        **indexes,
+        f"dists/{config.suite}/Release": release.encode(),
+        f"dists/{config.suite}/Release.gpg": b"mock detached signature",
+        f"dists/{config.suite}/InRelease": b"mock inline signature",
+    }.items():
+        path = root / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        files[key] = str(path)
+        reference(key, data, "entry")
+    keyring = root / "trust.gpg"
+    keyring.write_bytes(b"mock public keyring")
+    return RetainedFormat(
+        "apt",
+        "prior",
+        tuple(history),
+        identities,
+        {
+            "policy": _policy(config),
+            "files": files,
+            "etags": {},
+            "keyring": str(keyring),
+            "keyring_sha256": sha256_file(keyring)[0],
+            "fingerprint": "A" * 40,
+            "expires_at": expiry.isoformat(),
+        },
+        tuple(refs),
+    )
+
+
+@pytest.mark.parametrize("version", ["1.0", "0:1.0", "1.0-0"])
+def test_retained_rejects_semantically_duplicate_identities(tmp_path: Path, version: str) -> None:
+    config = FormatPolicy("apt", ("amd64",))
+    left = NativeIdentity("apt", "hd-test", "amd64", "1.0")
+    retained = retained_history(tmp_path, (left, replace(left, version=version)), config)
+    runtime = Commands(tmp_path / "runtime", [(0, b"")] * 2)
+    with (
+        patch.object(apt, "_indexes", side_effect=AssertionError("Indexes must not run")),
+        patch.object(apt, "_verify_signatures", side_effect=AssertionError("No verification")),
+        pytest.raises(apt.AptFailure, match="Duplicate retained Debian identity"),
+    ):
+        apt.validate_retained(retained, policy=config, runtime=runtime)
+    assert runtime.commands == [
+        ("dpkg", "--compare-versions", version, "eq", "1.0"),
+        ("dpkg", "--compare-versions", "1.0", "eq", version),
+    ]
+
+
+@pytest.mark.parametrize("difference", ["version", "name", "architecture"])
+def test_retained_preserves_distinct_identities(tmp_path: Path, difference: str) -> None:
+    config = FormatPolicy("apt", ("amd64", "arm64"))
+    left = NativeIdentity("apt", "hd-test", "amd64", "1.0")
+    right = replace(
+        left,
+        version="2.0" if difference == "version" else left.version,
+        name="hd-other" if difference == "name" else left.name,
+        architecture="arm64" if difference == "architecture" else left.architecture,
+    )
+    retained = retained_history(tmp_path, (right, left), config)
+    runtime = Commands(
+        tmp_path / "runtime",
+        [(code, b"") for code in [1, 0, 1, 0]] if difference == "version" else [],
+    )
+    with patch.object(apt, "_verify_signatures") as signatures:
+        apt.validate_retained(retained, policy=config, runtime=runtime)
+    signatures.assert_called_once_with(retained, policy=config, runtime=runtime)
+    assert not runtime.replies
+    assert all(command[0] == "dpkg" for command in runtime.commands)
 
 
 def test_all_is_not_a_concrete_index_architecture(tmp_path: Path) -> None:

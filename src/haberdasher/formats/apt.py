@@ -17,6 +17,8 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from email.utils import format_datetime, parsedate_to_datetime
+from functools import cmp_to_key
+from itertools import pairwise
 from pathlib import Path
 
 from haberdasher.config import FormatPolicy
@@ -292,6 +294,20 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
             raise AptFailure("Retained DEB reference is missing or changed")
         if asset.published_sha256 != verified.sha256:
             raise AptFailure("Published DEB digest must equal its source digest")
+    groups: dict[tuple[str, str], list[NativeIdentity]] = {}
+    for identity in identities:
+        groups.setdefault((identity.name, identity.architecture), []).append(identity)
+
+    def order(left: NativeIdentity, right: NativeIdentity) -> int:
+        result = compare(left, right, runtime=runtime)
+        if result is None:
+            raise AptFailure("Incomparable retained APT identities")
+        return result
+
+    for group in groups.values():
+        for left, right in pairwise(sorted(group, key=cmp_to_key(order))):
+            if order(left, right) == 0:
+                raise AptFailure("Duplicate retained Debian identity")
     indexes = _indexes(retained.accepted_history, policy)
     if set(files) != set(indexes) | set(_entries(policy)):
         raise AptFailure("Incomplete restored APT metadata")
