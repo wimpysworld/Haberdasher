@@ -261,18 +261,24 @@ class LocalStore:
             ):
                 raise PreconditionFailed("Local object precondition failed")
             _mkdir(path.parent)
-            with _temporary(path.parent) as temporary:
-                _snapshot(ref, source, temporary)
-                try:
+            started = False
+            receipt: WriteReceipt | None = None
+            try:
+                with _temporary(path.parent) as temporary:
+                    _snapshot(ref, source, temporary)
+                    started = True
                     _install(temporary, path)
                     _verify(ref, path)
                     result = self._stat(path)
                     if result is None:
                         raise StorageError("Written object is absent")
-                except OSError, StorageError:
-                    self._uncertain = True
-                    raise UnknownWrite() from None
-            return WriteReceipt(result.etag, ref.sha256, ref.size)
+                    receipt = WriteReceipt(result.etag, ref.sha256, ref.size)
+            except (OSError, StorageError) as error:
+                if not started:
+                    raise
+                self._uncertain = True
+                raise UnknownWrite(receipt) from error
+            return receipt
 
 
 class R2Store:
@@ -470,32 +476,48 @@ class R2Store:
         parameters["IfNoneMatch" if expected is None else "IfMatch"] = (
             "*" if expected is None else expected
         )
-        with _temporary(self._runtime.root / "tmp") as temporary:
-            _snapshot(ref, source, temporary)
-            command = self._aws("put-object", parameters, "--body", str(temporary))
-            try:
-                result = self._runtime.run(command, env_kind="storage")
-            except RuntimeFailure:
-                self._uncertain = True
-                raise UnknownWrite(self._observe(ref)) from None
-            if result.returncode:
-                if re.search(
-                    rb"\((?:412|PreconditionFailed|409|ConditionalRequestConflict)\) when calling the PutObject operation",
-                    result.stderr,
-                ):
-                    raise PreconditionFailed("Remote object precondition failed")
-                self._uncertain = True
-                raise UnknownWrite(self._observe(ref))
-            try:
-                etag = self._response_etag(self._response(result.stdout))
-            except StorageError:
-                self._uncertain = True
-                raise UnknownWrite(self._observe(ref)) from None
-            observed = self._observe(ref)
-            if observed is None or observed.etag != etag:
-                self._uncertain = True
-                raise UnknownWrite(observed)
-            return observed
+        started = False
+        observed: WriteReceipt | None = None
+        failure: PreconditionFailed | UnknownWrite | None = None
+        try:
+            with _temporary(self._runtime.root / "tmp") as temporary:
+                _snapshot(ref, source, temporary)
+                command = self._aws("put-object", parameters, "--body", str(temporary))
+                started = True
+                try:
+                    try:
+                        result = self._runtime.run(command, env_kind="storage")
+                    except RuntimeFailure:
+                        self._uncertain = True
+                        raise UnknownWrite(self._observe(ref)) from None
+                    if result.returncode:
+                        if re.search(
+                            rb"\((?:412|PreconditionFailed|409|ConditionalRequestConflict)\) when calling the PutObject operation",
+                            result.stderr,
+                        ):
+                            raise PreconditionFailed("Remote object precondition failed")
+                        self._uncertain = True
+                        raise UnknownWrite(self._observe(ref))
+                    try:
+                        etag = self._response_etag(self._response(result.stdout))
+                    except StorageError:
+                        self._uncertain = True
+                        raise UnknownWrite(self._observe(ref)) from None
+                    observed = self._observe(ref)
+                    if observed is None or observed.etag != etag:
+                        self._uncertain = True
+                        raise UnknownWrite(observed)
+                except (PreconditionFailed, UnknownWrite) as error:
+                    failure = error
+                    raise
+        except OSError as error:
+            if failure is not None:
+                raise failure from error
+            if not started:
+                raise
+            self._uncertain = True
+            raise UnknownWrite(observed) from error
+        return observed
 
 
 type Store = LocalStore | R2Store

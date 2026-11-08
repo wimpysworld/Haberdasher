@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import stat
 import subprocess
+import tempfile
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from haberdasher import storage
-from haberdasher.core import ObjectStat
+from haberdasher.core import ObjectStat, WriteReceipt
 from haberdasher.runtime import Runtime, RuntimeFailure
 from haberdasher.storage import (
     MAX_OBJECT_SIZE,
@@ -120,6 +121,8 @@ class CommandRuntime(Runtime):
             return subprocess.CompletedProcess(command, 1, b"", b"Lost response")
         if self.failure == "malformed":
             return subprocess.CompletedProcess(command, 0, b"{}", b"")
+        if self.failure == "etag":
+            etag = '"wrong-response"'
         return subprocess.CompletedProcess(command, 0, json.dumps({"ETag": etag}).encode(), b"")
 
 
@@ -132,6 +135,130 @@ def source_file(root: Path, data: bytes = b"fixture") -> Path:
     source = root / "source"
     source.write_bytes(data)
     return source
+
+
+def fail_write_cleanup(monkeypatch: pytest.MonkeyPatch) -> PermissionError:
+    original_mkstemp = tempfile.mkstemp
+    original_unlink = Path.unlink
+    target: Path | None = None
+    failure = PermissionError("Injected temporary cleanup failure")
+
+    def mkstemp(*, prefix: str, dir: Path) -> tuple[int, str]:
+        nonlocal target
+        descriptor, name = original_mkstemp(prefix=prefix, dir=dir)
+        if target is None:
+            target = Path(name)
+        return descriptor, name
+
+    def unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == target:
+            raise failure
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(tempfile, "mkstemp", mkstemp)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    return failure
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("replacement", [False, True])
+@pytest.mark.parametrize("role", ["apt", "private"])
+def test_committed_cleanup_failure_retains_receipt_and_blocks_writes(
+    tmp_path: Path,
+    command_runtime: CommandRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    remote: bool,
+    replacement: bool,
+    role: str,
+) -> None:
+    policy = local_policy(tmp_path / "store")
+    store = R2Store(remote_policy(), runtime=command_runtime) if remote else LocalStore(policy)
+    source = source_file(tmp_path)
+    first = store.create(object_ref(role=role), source) if replacement else None
+    data = b"replacement" if replacement else b"fixture"
+    source.write_bytes(data)
+    ref = object_ref(data, role=role)
+    cleanup = fail_write_cleanup(monkeypatch)
+    with pytest.raises(UnknownWrite) as error:
+        if first is None:
+            store.create(ref, source)
+        else:
+            store.replace(ref, source, expected_etag=first.etag)
+    assert error.value.__cause__ is cleanup
+    current = store.stat(ref)
+    assert current is not None
+    assert error.value.observation == WriteReceipt(current.etag, ref.sha256, ref.size)
+    if first is not None:
+        assert current.etag != first.etag
+    if remote:
+        assert command_runtime.objects[ref.key] == (data, current.etag)
+    else:
+        root = Path(cast(str, policy.private) if role == "private" else policy.public[role])
+        assert (root / ref.key).read_bytes() == data
+    calls = len(command_runtime.calls)
+    next_ref = object_ref(data, key="next-object", role=role)
+    with pytest.raises(UnknownWrite):
+        store.create(next_ref, source)
+    assert len(command_runtime.calls) == calls
+    assert store.stat(next_ref) is None
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("replacement", [False, True])
+def test_cleanup_does_not_change_precondition_rejection(
+    tmp_path: Path,
+    command_runtime: CommandRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    remote: bool,
+    replacement: bool,
+) -> None:
+    store = (
+        R2Store(remote_policy(), runtime=command_runtime)
+        if remote
+        else LocalStore(local_policy(tmp_path / "store"))
+    )
+    source = source_file(tmp_path)
+    ref = object_ref()
+    first = store.create(ref, source)
+    calls = len(command_runtime.calls)
+    with monkeypatch.context() as patch:
+        cleanup = fail_write_cleanup(patch)
+        with pytest.raises(PreconditionFailed) as error:
+            if replacement:
+                store.replace(ref, source, expected_etag="stale")
+            else:
+                store.create(ref, source)
+        assert error.value.__cause__ is (cleanup if remote else None)
+    assert len(command_runtime.calls) == calls + int(remote)
+    assert store.stat(ref) == ObjectStat(first.etag, ref.size)
+    assert store.replace(ref, source, expected_etag=first.etag).etag != first.etag
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_snapshot_failure_does_not_mark_write_uncertain(
+    tmp_path: Path,
+    command_runtime: CommandRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    remote: bool,
+    cleanup_failure: bool,
+) -> None:
+    store = (
+        R2Store(remote_policy(), runtime=command_runtime)
+        if remote
+        else LocalStore(local_policy(tmp_path / "store"))
+    )
+    ref = object_ref()
+    source = source_file(tmp_path, b"changed")
+    with monkeypatch.context() as patch:
+        if cleanup_failure:
+            fail_write_cleanup(patch)
+        with pytest.raises(PermissionError if cleanup_failure else StorageError):
+            store.create(ref, source)
+    assert not command_runtime.calls
+    assert store.stat(ref) is None
+    source.write_bytes(b"fixture")
+    assert store.create(ref, source).sha256 == ref.sha256
 
 
 def test_local_roundtrip_and_fresh_revision(tmp_path: Path) -> None:
@@ -260,7 +387,10 @@ def test_local_process_contention(tmp_path: Path, replacement: bool) -> None:
         queue.join_thread()
 
 
-def test_local_fsync_and_uncertain_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+def test_local_fsync_and_uncertain_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_failure: bool
+) -> None:
     store = LocalStore(local_policy(tmp_path / "store"))
     source = source_file(tmp_path)
     syncs: list[int] = []
@@ -280,8 +410,12 @@ def test_local_fsync_and_uncertain_commit(tmp_path: Path, monkeypatch: pytest.Mo
 
     with monkeypatch.context() as patch:
         patch.setattr(storage, "_sync_directory", fail_sync)
-        with pytest.raises(UnknownWrite):
+        cleanup = fail_write_cleanup(patch) if cleanup_failure else None
+        with pytest.raises(UnknownWrite) as error:
             store.replace(object_ref(), source, expected_etag=receipt.etag)
+        assert error.value.observation is None
+        if cleanup is not None:
+            assert error.value.__cause__ is cleanup
     with pytest.raises(UnknownWrite):
         store.create(object_ref(key="next"), source)
     assert store.stat(object_ref()) != ObjectStat(receipt.etag, len(b"fixture"))
@@ -333,15 +467,29 @@ def test_remote_roundtrip_and_arguments(tmp_path: Path, command_runtime: Command
             assert "--retries=1" in call and "--low-level-retries=1" in call
 
 
-@pytest.mark.parametrize("failure", ["before", "after", "nonzero", "malformed"])
+@pytest.mark.parametrize("failure", ["before", "after", "nonzero", "malformed", "etag"])
+@pytest.mark.parametrize("cleanup_failure", [False, True])
 def test_unknown_response_never_retries_or_claims_success(
-    tmp_path: Path, command_runtime: CommandRuntime, failure: str
+    tmp_path: Path,
+    command_runtime: CommandRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    cleanup_failure: bool,
 ) -> None:
     store = R2Store(remote_policy(), runtime=command_runtime)
     command_runtime.failure = failure
+    source = source_file(tmp_path)
+    ref = object_ref()
+    cleanup = fail_write_cleanup(monkeypatch) if cleanup_failure else None
     with pytest.raises(UnknownWrite) as error:
-        store.create(object_ref(), source_file(tmp_path))
+        store.create(ref, source)
     assert (error.value.observation is None) == (failure == "before")
+    if cleanup is not None:
+        assert error.value.__cause__ is cleanup
+    if failure != "before":
+        data, etag = command_runtime.objects[ref.key]
+        assert data == source.read_bytes()
+        assert error.value.observation == WriteReceipt(etag, ref.sha256, ref.size)
     calls = len(command_runtime.calls)
     with pytest.raises(UnknownWrite):
         store.create(object_ref(key="next-object"), source_file(tmp_path))
@@ -381,13 +529,26 @@ def test_remote_bad_reads_preserve_destination(
     assert destination.read_bytes() == b"preserve"
 
 
+@pytest.mark.parametrize("cleanup_failure", [False, True])
 def test_failed_write_verification_is_unknown(
-    tmp_path: Path, command_runtime: CommandRuntime
+    tmp_path: Path,
+    command_runtime: CommandRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_failure: bool,
 ) -> None:
     command_runtime.bad_download = True
     store = R2Store(remote_policy(), runtime=command_runtime)
+    cleanup = fail_write_cleanup(monkeypatch) if cleanup_failure else None
+    source = source_file(tmp_path)
+    with pytest.raises(UnknownWrite) as error:
+        store.create(object_ref(), source)
+    assert error.value.observation is None
+    if cleanup is not None:
+        assert error.value.__cause__ is cleanup
+    calls = len(command_runtime.calls)
     with pytest.raises(UnknownWrite):
-        store.create(object_ref(), source_file(tmp_path))
+        store.create(object_ref(key="next-object"), source)
+    assert len(command_runtime.calls) == calls
 
 
 def test_access_denied_is_not_absence(command_runtime: CommandRuntime) -> None:
