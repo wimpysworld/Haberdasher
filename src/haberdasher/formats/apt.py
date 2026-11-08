@@ -314,6 +314,7 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
         ):
             raise AptFailure("Retained indexes or by-hash references are incomplete")
     _verify_release(retained, policy)
+    _verify_signatures(retained, policy=policy, runtime=runtime)
 
 
 def prepare(
@@ -552,8 +553,12 @@ def validate_prepared(
         if rank < previous_rank:
             raise AptFailure("Unsafe APT publication order")
         previous_rank = rank
-    metadata = prepared.retained.metadata
+
+
+def _verify_signatures(retained: RetainedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
+    metadata = retained.metadata
     files = _strings(metadata.get("files"), "restored metadata files")
+    entries = _entries(policy)
     with tempfile.TemporaryDirectory(prefix="apt-verify-", dir=runtime.root / "tmp") as directory:
         extracted = Path(directory) / "Release"
         for key in (entries[1], entries[2]):

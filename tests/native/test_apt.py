@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from haberdasher.admission import AdmissionFailure, admit
-from haberdasher.core import AdmittedAsset, RetainedFormat, sha256_file
+from haberdasher.core import AdmittedAsset, JSONValue, RetainedFormat, sha256_file
 from haberdasher.formats import apt
 from haberdasher.runtime import private_workspace
 from haberdasher.signing import SigningFailure, signing_session
@@ -105,7 +105,9 @@ def test_production_apt_install_update_and_rejections() -> None:
                 now=now,
                 out=runtime.root / "generation-one",
             )
-            apt.validate_prepared(initial, policy=config, runtime=runtime, now=now)
+            with patch.object(runtime, "run", wraps=runtime.run) as commands:
+                apt.validate_prepared(initial, policy=config, runtime=runtime, now=now)
+            assert [call.args[0][0] for call in commands.call_args_list] == ["gpgv", "gpgv"]
             assert all(
                 item.published_sha256 == item.inspected.verified.sha256
                 for item in initial.retained.accepted_history
@@ -119,8 +121,11 @@ def test_production_apt_install_update_and_rejections() -> None:
             live = http_root / "live"
             retained = publish(initial, live, 1)
             apt.validate_retained(retained, policy=config, runtime=runtime)
-            with patch.object(
-                runtime, "run", side_effect=AssertionError("Fresh no-op called a native command")
+            with (
+                patch.object(runtime, "run", wraps=runtime.run) as commands,
+                patch.object(
+                    signer, "sign_file", side_effect=AssertionError("Fresh no-op called the signer")
+                ),
             ):
                 unchanged = apt.prepare(
                     [],
@@ -131,6 +136,7 @@ def test_production_apt_install_update_and_rejections() -> None:
                     now=now + timedelta(seconds=1),
                     out=runtime.root / "unused",
                 )
+            assert [call.args[0][0] for call in commands.call_args_list] == ["gpgv", "gpgv"]
             assert not unchanged.outputs and unchanged.retained is retained
             assert not (runtime.root / "unused").exists()
             renewal_time = now + timedelta(seconds=config.validity_seconds - config.renewal_seconds)
@@ -343,6 +349,112 @@ def test_production_apt_install_update_and_rejections() -> None:
             result = runtime.run(command)
             assert result.returncode == 0
             print(result.stdout.decode().splitlines()[0])
+
+
+def test_retained_validation_checks_hash_consistent_signatures() -> None:
+    with private_workspace() as runtime, disposable_key() as key, disposable_key() as wrong:
+        config = policy()
+        now = datetime.now(UTC).replace(microsecond=0)
+        verified = build(runtime, "hd-retained", "1.0", "retained")
+        inspected = apt.inspect(
+            verified, policy=config, runtime=runtime, out=runtime.root / "inspection"
+        )
+        accepted = admit(inspected, [], compare=apt.compare, policy=config, runtime=runtime)
+        original = runtime.root / "original"
+        with signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer:
+            prepared = apt.prepare(
+                [accepted],
+                RetainedFormat("apt", None, (), (), {}, ()),
+                policy=config,
+                runtime=runtime,
+                signer=signer,
+                now=now,
+                out=original,
+            )
+            verified.local_path.unlink()
+            original_files = prepared.retained.metadata["files"]
+            assert isinstance(original_files, dict)
+            for fault in (
+                "valid",
+                "detached",
+                "inline",
+                "keyring",
+                "wrong-key",
+                "fingerprint",
+                "cleartext",
+            ):
+                root = runtime.root / fault
+                shutil.copytree(original, root)
+                release = root / "dists/proof/Release"
+                if fault == "detached":
+                    (root / "dists/proof/Release.gpg").write_bytes(b"invalid detached signature")
+                elif fault == "inline":
+                    inline = root / "dists/proof/InRelease"
+                    inline.write_bytes(
+                        inline.read_bytes().replace(b"Suite: proof", b"Suite: wrong")
+                    )
+                elif fault == "keyring":
+                    (root / "trust.gpg").write_bytes(b"invalid public keyring")
+                elif fault == "wrong-key":
+                    shutil.copyfile(wrong.public_file, root / "trust.gpg")
+                elif fault == "cleartext":
+                    alternate = runtime.root / "alternate-release"
+                    alternate.write_bytes(release.read_bytes() + b"X-Different: signed\n")
+                    inline = root / "dists/proof/InRelease"
+                    inline.unlink()
+                    signer.sign_file(alternate, inline, clear=True)
+                files: dict[str, JSONValue] = {name: str(root / name) for name in original_files}
+                retained = replace(
+                    prepared.retained,
+                    metadata={
+                        **prepared.retained.metadata,
+                        "files": files,
+                        "keyring": str(root / "trust.gpg"),
+                        "keyring_sha256": sha256_file(root / "trust.gpg")[0],
+                        "fingerprint": wrong.fingerprint
+                        if fault == "fingerprint"
+                        else key.fingerprint,
+                    },
+                    objects=tuple(
+                        replace(
+                            ref,
+                            sha256=sha256_file(root / ref.key)[0],
+                            size=(root / ref.key).stat().st_size,
+                        )
+                        if ref.key in files
+                        else ref
+                        for ref in prepared.retained.objects
+                    ),
+                )
+                before = {
+                    path.relative_to(root): path.read_bytes()
+                    for path in root.rglob("*")
+                    if path.is_file()
+                }
+                with patch.object(runtime, "run", wraps=runtime.run) as commands:
+                    if fault == "valid":
+                        apt.validate_retained(retained, policy=config, runtime=runtime)
+                        assert len(commands.call_args_list) == 2
+                    else:
+                        message = (
+                            "differs from detached Release"
+                            if fault == "cleartext"
+                            else "scoped SHA256 primary"
+                            if fault == "fingerprint"
+                            else "native command failed"
+                        )
+                        with pytest.raises(apt.AptFailure, match=message):
+                            apt.validate_retained(retained, policy=config, runtime=runtime)
+                assert commands.call_args_list
+                assert all(call.args[0][0] == "gpgv" for call in commands.call_args_list)
+                assert before == {
+                    path.relative_to(root): path.read_bytes()
+                    for path in root.rglob("*")
+                    if path.is_file()
+                }
+                assert not list((runtime.root / "tmp").glob("apt-verify-*"))
 
 
 def test_deterministic_gzip() -> None:

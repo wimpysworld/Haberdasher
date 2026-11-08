@@ -20,6 +20,7 @@ from haberdasher.core import (
     sha256_file,
 )
 from haberdasher.formats import apt
+from haberdasher.formats.apt import _verify_signatures  # pyright: ignore[reportPrivateUsage]
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
 
@@ -277,6 +278,69 @@ def test_changed_admitted_bytes_do_not_produce_outputs(tmp_path: Path) -> None:
                 now=datetime.now(UTC),
                 out=tmp_path / "output",
             )
+
+
+@pytest.mark.parametrize("inline", [False, True])
+@pytest.mark.parametrize(
+    "fault", [None, "missing", "duplicate", "truncated", "signer", "primary", "algorithm", "digest"]
+)
+def test_release_verification_requires_one_scoped_sha256_primary(
+    tmp_path: Path, inline: bool, fault: str | None
+) -> None:
+    fingerprint = "A" * 40
+    valid = f"[GNUPG:] VALIDSIG {fingerprint} 2026-01-01 1 0 4 0 1 8 00 {fingerprint}\n".encode()
+    statuses = {
+        "missing": b"[GNUPG:] GOODSIG untrusted\n",
+        "duplicate": valid + valid,
+        "truncated": b"[GNUPG:] VALIDSIG A\n",
+        "signer": valid.replace(fingerprint.encode(), b"B" * 40, 1),
+        "primary": valid.rsplit(fingerprint.encode(), 1)[0] + b"B" * 40 + b"\n",
+        "algorithm": valid.replace(b" 1 8 00 ", b" 19 8 00 "),
+        "digest": valid.replace(b" 1 8 00 ", b" 1 10 00 "),
+    }
+    replies = [(0, valid), (0, valid)]
+    if fault is not None:
+        replies[int(inline)] = (0, statuses[fault])
+    runtime = Commands(tmp_path / "runtime", replies)
+    release = tmp_path / "Release"
+    release.write_bytes(b"Suite: stable\n")
+    retained = RetainedFormat(
+        "apt",
+        None,
+        (),
+        (),
+        {
+            "files": {
+                "dists/stable/Release": str(release),
+                "dists/stable/Release.gpg": str(tmp_path / "Release.gpg"),
+                "dists/stable/InRelease": str(tmp_path / "InRelease"),
+            },
+            "keyring": str(tmp_path / "trust.gpg"),
+            "fingerprint": fingerprint,
+        },
+        (),
+    )
+
+    def verify(
+        argv: Sequence[str], *, cwd: Path | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
+        if "--output" in argv:
+            extracted = Path(argv[argv.index("--output") + 1])
+            assert extracted.is_relative_to(runtime.root / "tmp")
+            extracted.write_bytes(release.read_bytes())
+        return Commands.run(runtime, argv, cwd=cwd)
+
+    with patch.object(runtime, "run", side_effect=verify):
+        if fault is None:
+            _verify_signatures(retained, policy=FormatPolicy("apt", ("amd64",)), runtime=runtime)
+        else:
+            with pytest.raises(apt.AptFailure, match="scoped SHA256 primary"):
+                _verify_signatures(
+                    retained, policy=FormatPolicy("apt", ("amd64",)), runtime=runtime
+                )
+    assert len(runtime.commands) == (1 if fault is not None and not inline else 2)
+    assert all(command[0] == "gpgv" for command in runtime.commands)
+    assert not list((runtime.root / "tmp").iterdir())
 
 
 def test_all_is_not_a_concrete_index_architecture(tmp_path: Path) -> None:
