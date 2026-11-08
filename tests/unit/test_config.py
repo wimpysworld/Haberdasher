@@ -263,7 +263,8 @@ def test_remote_rejects_individual_format_approval_omissions(
     assert str(error.value) == message
 
 
-def test_flatpak_runtime_policy(tmp_path: Path) -> None:
+@pytest.mark.parametrize("collection", ["", "world.example.Runtime", " "])
+def test_flatpak_runtime_policy(tmp_path: Path, collection: str) -> None:
     value = f"""clients:
   flatpak:
     source_owner: example
@@ -271,17 +272,34 @@ def test_flatpak_runtime_policy(tmp_path: Path) -> None:
     runtime:
       url: http://127.0.0.1:12345/runtime
       fingerprint: '{"A" * 40}'
-      collection: ''
+      collection: '{collection}'
       branch: stable
       architecture: x86_64
       remote: test-runtime
       refs: [runtime/org.example.Platform/x86_64/stable]
       extensions: []
 """
+    if collection:
+        with pytest.raises(ValueError, match="External runtime collection must be empty"):
+            load_policy(document(tmp_path, value))
+        return
     policy = load_policy(document(tmp_path, value))
     assert policy.clients["flatpak"].runtime is not None
+    assert policy.clients["flatpak"].runtime.collection == ""
+    assert load_policy(document(tmp_path, value.replace("      collection: ''\n", ""))) == policy
     with pytest.raises(ValueError):
         load_policy(document(tmp_path, value.replace("127.0.0.1", "example.invalid")))
+
+
+@pytest.mark.parametrize("collection", ["", "world.example.Runtime", " "])
+def test_direct_runtime_collection_policy(collection: str) -> None:
+    runtime = approved_remote_policy("flatpak").clients["flatpak"].runtime
+    assert runtime is not None
+    if collection:
+        with pytest.raises(ValueError, match="External runtime collection must be empty"):
+            replace(runtime, collection=collection)
+    else:
+        assert replace(runtime, collection=collection).collection == ""
 
 
 def test_direct_policy_validation() -> None:

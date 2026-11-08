@@ -162,7 +162,7 @@ class RuntimePolicy(Record):
         if not isinstance(self.collection, str):
             raise ValueError("Invalid runtime collection")
         if self.collection:
-            text(self.collection, "runtime collection")
+            raise ValueError("External runtime collection must be empty")
         for value in (self.branch, self.architecture, self.remote):
             _token(value)
         if not self.refs:

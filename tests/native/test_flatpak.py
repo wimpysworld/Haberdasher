@@ -534,10 +534,12 @@ def test_native_publication_cold_restore_and_clients() -> None:
                     client_run(negative, "info", APP, success=False)
                 runtime_policy = policy.trust.runtime
                 assert runtime_policy is not None
+                assert runtime_policy.collection == ""
+                with pytest.raises(ValueError, match="External runtime collection must be empty"):
+                    replace(runtime_policy, collection="world.example.Different")
                 for changed_runtime in (
                     replace(runtime_policy, url="https://different.invalid"),
                     replace(runtime_policy, fingerprint="A" * 40),
-                    replace(runtime_policy, collection="world.example.Different"),
                     replace(runtime_policy, remote="different"),
                     replace(runtime_policy, extensions=()),
                 ):
