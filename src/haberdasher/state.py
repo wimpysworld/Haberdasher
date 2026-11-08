@@ -881,7 +881,12 @@ def recover_owner(store: Store, *, expected_nonce: str, evidence: RecoveryEviden
 
 
 def complete(
-    store: Store, ownership: Ownership, frozen: FrozenGeneration, generation: PreparedGeneration
+    store: Store,
+    ownership: Ownership,
+    frozen: FrozenGeneration,
+    generation: PreparedGeneration,
+    *,
+    clock: Callable[[], datetime] | None = None,
 ) -> None:
     check_owner(store, ownership)
     pending = _pending(store)
@@ -910,6 +915,7 @@ def complete(
     previous = (current[0].id, current[1].etag) if current else (None, None)
     if previous != (generation.previous_completion_id, generation.previous_completion_etag):
         raise StateError("Completion precondition changed")
+    check_expiry(generation, (core.utc_now if clock is None else clock)())
     write_control(
         store,
         "completed.json",

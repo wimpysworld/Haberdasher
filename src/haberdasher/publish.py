@@ -6,13 +6,13 @@ import hashlib
 import os
 import tempfile
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from haberdasher import admission, discovery, state
+from haberdasher import admission, core, discovery, state
 from haberdasher.config import Config, FormatPolicy, Policy
 from haberdasher.core import (
     AdmittedAsset,
@@ -156,15 +156,23 @@ def prepare_bootstrap(
 
 
 def replay(
-    frozen: FrozenGeneration, *, store: Store, ownership: Ownership, runtime: Runtime, now: datetime
+    frozen: FrozenGeneration,
+    *,
+    store: Store,
+    ownership: Ownership,
+    runtime: Runtime,
+    now: datetime,
+    clock: Callable[[], datetime] | None = None,
 ) -> RunResult:
+    if clock is None:
+        clock = core.utc_now
     state.check_owner(store, ownership)
     if state.pending_generation(store) != frozen:
         raise StateError("Replay must use the pending private generation")
     with tempfile.TemporaryDirectory(prefix="hd-replay-", dir=runtime.root) as temporary:
         root = Path(temporary)
         generation, manifest = state.load_frozen(store, frozen, out=root / "frozen")
-        state.check_expiry(generation, now)
+        state.check_expiry(generation, clock())
         policies = state.mapping(generation.scan.get("policies"))
         for prepared in generation.formats:
             if prepared.retained.metadata:
@@ -228,6 +236,8 @@ def replay(
                 },
             )
             state.check_owner(store, ownership)
+            if output.ref.bucket_role == "apt" and output.ref.object_class == "entry":
+                state.check_expiry(generation, clock())
             receipt = (
                 store.create(output.ref, output.local_path)
                 if output.mode == "create"
@@ -254,14 +264,20 @@ def replay(
                 },
             )
             count += 1
-        state.check_expiry(generation, now)
-        state.complete(store, ownership, frozen, generation)
+        state.check_expiry(generation, clock())
+        state.complete(store, ownership, frozen, generation, clock=clock)
         state.release(store, ownership)
         return RunResult(generation.id, True, count)
 
 
 def reconcile(
-    config: Config, policy: Policy, *, store: Store, runtime: Runtime, now: datetime
+    config: Config,
+    policy: Policy,
+    *,
+    store: Store,
+    runtime: Runtime,
+    now: datetime,
+    clock: Callable[[], datetime] | None = None,
 ) -> RunResult:
     now = utc_now(lambda: now)
     names = tuple(sorted(policy.storage.public))
@@ -474,5 +490,7 @@ def reconcile(
             policy.expected_signing_fingerprint,
         )
         frozen = state.freeze(store, ownership, generation)
-        result = replay(frozen, store=store, ownership=ownership, runtime=runtime, now=now)
+        result = replay(
+            frozen, store=store, ownership=ownership, runtime=runtime, now=now, clock=clock
+        )
         return replace(result, pending_assets=len(scan.pending))

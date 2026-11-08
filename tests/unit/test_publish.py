@@ -29,7 +29,7 @@ from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
 from haberdasher.storage import LocalStore, PreconditionFailed
 from tests.unit.test_rpm import mock_rpm_commands, retained_rpm
-from tests.unit.test_state import NOW, generation, local_store
+from tests.unit.test_state import NOW, generation, local_store, next_generation
 
 
 class AdapterDouble:
@@ -138,7 +138,9 @@ def test_replay_restores_lost_local_state_without_signers(
     monkeypatch.setattr(discovery, "scan_releases", forbidden)
     runtime = Runtime(tmp_path / "runtime", environ={"HD_SIGNING_KEY": "synthetic sentinel"})
     assert "HD_SIGNING_KEY" not in runtime.environment
-    result = publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    result = publish.replay(
+        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     assert result.published_objects == 4
     public = [ref for ref in store.writes if ref.bucket_role != "private"]
     assert [ref.object_class for ref in public] == ["package", "dependency", "entry", "inventory"]
@@ -166,6 +168,7 @@ def test_committed_public_reference_tampering_stops_restoration(
         ownership=owner,
         runtime=Runtime(tmp_path / "runtime", environ={}),
         now=NOW,
+        clock=lambda: NOW,
     )
     entry = original.formats[0].outputs[-1]
     observed = store.stat(entry.ref)
@@ -188,9 +191,130 @@ def test_expired_replay_does_not_publish(tmp_path: Path, monkeypatch: pytest.Mon
             ownership=owner,
             runtime=Runtime(tmp_path / "runtime", environ={}),
             now=NOW + timedelta(days=8),
+            clock=lambda: NOW + timedelta(days=8),
         )
     assert not any(ref.bucket_role != "private" for ref in store.writes)
     assert state.read_control(store, "completed.json") is None
+
+
+@pytest.mark.parametrize(
+    "boundary", ["admission", "dependency", "entry-intent", "entry", "completion"]
+)
+@pytest.mark.parametrize("overrun", [timedelta(0), timedelta(microseconds=1)])
+def test_replay_checks_live_expiry_at_publication_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    overrun: timedelta,
+) -> None:
+    current = NOW
+    monkeypatch.setattr(core, "utc_now", lambda: current)
+    adapter = AdapterDouble()
+    monkeypatch.setattr(publish, "_adapter", adapter.select)
+    store = CountingStore(tmp_path / "store")
+    runtime = Runtime(tmp_path / "runtime", environ={})
+    owner = state.acquire(store, owner="seed")
+    first = generation(tmp_path / "input", owner)
+    frozen = state.freeze(store, owner, first)
+    publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    previous_completion = state.read_control(store, "completed.json")
+    owner = state.acquire(store, owner="next")
+    committed = state.load_committed(store, owner, out=tmp_path / "committed")
+    original = next_generation(tmp_path / "next", owner, committed)
+    prepared = original.formats[0]
+    entry = prepared.outputs[0]
+    dependency = replace(
+        first.formats[0].outputs[1],
+        ref=replace(first.formats[0].outputs[1].ref, key="metadata/new-dependency"),
+    )
+    last_entry = replace(
+        entry, ref=replace(entry.ref, key="metadata/last-entry"), mode="create", expected_etag=None
+    )
+    refs = (*prepared.referenced_objects, dependency.ref, last_entry.ref)
+    prepared = replace(
+        prepared,
+        retained=replace(prepared.retained, objects=refs),
+        referenced_objects=refs,
+        outputs=tuple(
+            replace(output, ordinal=index)
+            for index, output in enumerate((dependency, entry, last_entry))
+        ),
+    )
+    original = replace(
+        original,
+        formats=(prepared,),
+        public_inventories={"apt": core.public_inventory(prepared.retained.accepted_history, refs)},
+    )
+    frozen = state.freeze(store, owner, original)
+    frozen_root = tmp_path / "store/private/generations" / frozen.id
+    frozen_hashes = {
+        path: core.sha256_file(path)
+        for path in frozen_root.rglob("*")
+        if path.is_file() and path.name != "journal.json"
+    }
+    assert prepared.expires_at is not None
+    expiry = datetime.fromisoformat(prepared.expires_at)
+    current = expiry + overrun if boundary == "admission" else expiry - timedelta(seconds=1)
+    download, replace_object, stat = store.download, store.replace, store.stat
+
+    def timed_download(ref: ObjectRef, destination: Path) -> ObjectStat:
+        nonlocal current
+        observed = download(ref, destination)
+        if boundary == "dependency" and ref == dependency.ref:
+            current = expiry + overrun
+        if boundary == "entry-intent" and ref.key == f"generations/{frozen.id}/journal.json":
+            writes = state.mapping(state.parse(destination.read_bytes())["writes"])
+            if state.mapping(writes.get("1", {})).get("status") == "intent":
+                current = expiry + overrun
+        return observed
+
+    def timed_replace(ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
+        nonlocal current
+        receipt = replace_object(ref, source, expected_etag=expected_etag)
+        if boundary == "entry" and ref == entry.ref:
+            current = expiry + overrun
+        return receipt
+
+    def timed_stat(ref: ObjectRef) -> ObjectStat | None:
+        nonlocal current
+        observed = stat(ref)
+        if boundary == "completion" and ref.object_class == "inventory":
+            current = expiry + overrun
+        return observed
+
+    monkeypatch.setattr(store, "download", timed_download)
+    monkeypatch.setattr(store, "replace", timed_replace)
+    monkeypatch.setattr(store, "stat", timed_stat)
+    store.writes.clear()
+    with pytest.raises(state.StateError, match="expired"):
+        publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    assert current >= expiry
+    public = [ref for ref in store.writes if ref.bucket_role != "private"]
+    expected = {
+        "admission": [],
+        "dependency": ["dependency"],
+        "entry-intent": ["dependency"],
+        "entry": ["dependency", "entry"],
+        "completion": ["dependency", "entry", "entry", "inventory"],
+    }
+    assert [ref.object_class for ref in public] == expected[boundary]
+    assert state.read_control(store, "completed.json") == previous_completion
+    assert state.pending_generation(store) == frozen
+    assert {path: core.sha256_file(path) for path in frozen_hashes} == frozen_hashes
+    assert state.check_owner(store, owner)["status"] == "active"
+    assert adapter.native_calls == 0
+    with pytest.raises(state.StateError, match="already holds"):
+        state.acquire(store, owner="competitor")
+    with pytest.raises(state.StateError, match="pending"):
+        state.release(store, owner)
+    if boundary in {"dependency", "entry-intent", "entry"}:
+        with pytest.raises(state.StateError, match="explicit resolution"):
+            state.recover_owner(
+                store,
+                expected_nonce=owner.owner_nonce,
+                evidence=state.RecoveryEvidence(True, True, "synthetic stopped process", "CI"),
+            )
+    assert state.check_owner(store, owner)["status"] == "active"
 
 
 def test_completion_requires_every_acknowledgement(tmp_path: Path) -> None:
@@ -226,6 +350,7 @@ def test_stale_etag_never_refreshes_to_overwrite(
             ownership=owner,
             runtime=Runtime(tmp_path / "runtime", environ={}),
             now=NOW,
+            clock=lambda: NOW,
         )
     assert store.stat(entry.ref) == ObjectStat(newer.etag, entry.ref.size)
     assert state.read_control(store, "completed.json") is None
@@ -236,6 +361,7 @@ def test_stale_etag_never_refreshes_to_overwrite(
             ownership=owner,
             runtime=Runtime(tmp_path / "runtime-2", environ={}),
             now=NOW,
+            clock=lambda: NOW,
         )
 
 
@@ -323,7 +449,9 @@ def test_reconcile_commits_scan_only_after_publish_and_fresh_noop_is_cheap(
     runtime = Runtime(tmp_path / "runtime", environ={})
     if fail_inventory:
         with pytest.raises(RuntimeError, match="Injected inventory"):
-            publish.reconcile(config, policy, store=store, runtime=runtime, now=NOW)
+            publish.reconcile(
+                config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
+            )
         assert state.read_control(store, "completed.json") is None
         current = state.read_control(store, "ownership.json")
         assert current is not None
@@ -341,13 +469,19 @@ def test_reconcile_commits_scan_only_after_publish_and_fresh_noop_is_cheap(
             ),
         )
         store.blocked = False
-        first = publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+        first = publish.replay(
+            frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+        )
     else:
-        first = publish.reconcile(config, policy, store=store, runtime=runtime, now=NOW)
+        first = publish.reconcile(
+            config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
+        )
     assert first.changed and previous_states == [discovery.DiscoveryState()]
     native = (adapter.validations, adapter.native_calls)
     store.downloads.clear()
-    second = publish.reconcile(config, policy, store=store, runtime=runtime, now=NOW)
+    second = publish.reconcile(
+        config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     assert not second.changed and second.published_objects == 0
     assert previous_states[-1] == scan_state
     assert native == (adapter.validations, adapter.native_calls)
@@ -373,7 +507,7 @@ def test_reconcile_commits_scan_only_after_publish_and_fresh_noop_is_cheap(
     monkeypatch.setattr(publish, "signing_session", forbidden)
     monkeypatch.setattr(discovery, "verify_asset", forbidden)
     with pytest.raises(RuntimeError, match="Interrupted provenance"):
-        publish.reconcile(config, policy, store=store, runtime=runtime, now=NOW)
+        publish.reconcile(config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW)
     assert state.read_control(store, "completed.json") == previous_completion
     assert previous_states[-1] == previous_scan
     assert adapter.native_calls == native[1]
@@ -386,7 +520,7 @@ def test_reconcile_commits_scan_only_after_publish_and_fresh_noop_is_cheap(
         evidence=state.RecoveryEvidence(True, True, "stopped before replay", "CI"),
     )
     monkeypatch.setattr(publish, "replay", replay)
-    replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW)
     owner = state.acquire(store, owner="read-provenance")
     restored = state.load_committed(store, owner, out=tmp_path / "provenance")
     state.release(store, owner)
@@ -404,7 +538,9 @@ def test_reconcile_commits_scan_only_after_publish_and_fresh_noop_is_cheap(
     scan_state = replace(scan_state, records=(record,), assets=(verified.source, checksum_source))
     monkeypatch.setattr(discovery, "verify_asset", verify)
     monkeypatch.setattr(publish, "signing_session", signing)
-    duplicate = publish.reconcile(config, policy, store=store, runtime=runtime, now=NOW)
+    duplicate = publish.reconcile(
+        config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     assert duplicate.changed and adapter.native_calls == native[1] + 2
     owner = state.acquire(store, owner="read-canonical")
     restored = state.load_committed(store, owner, out=tmp_path / "canonical")
@@ -419,7 +555,7 @@ def test_reconcile_commits_scan_only_after_publish_and_fresh_noop_is_cheap(
     scan_state = replace(scan_state, records=(record,))
     previous_completion = state.read_control(store, "completed.json")
     with pytest.raises(ValueError, match="Changed bytes for an accepted native identity"):
-        publish.reconcile(config, policy, store=store, runtime=runtime, now=NOW)
+        publish.reconcile(config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW)
     assert state.read_control(store, "completed.json") == previous_completion
 
 
@@ -436,7 +572,9 @@ def test_committed_bootstrap_changes_fail_before_discovery(
     original = generation(tmp_path / "input", owner, bootstrap=True)
     frozen = state.freeze(store, owner, original)
     monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
-    publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    publish.replay(
+        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     output = original.bootstrap_outputs[0]
     path = tmp_path / "store/apt" / output.ref.key
     if damage == "bytes":
@@ -460,7 +598,14 @@ def test_committed_bootstrap_changes_fail_before_discovery(
         expected_signing_fingerprint="A" * 40,
     )
     with pytest.raises((state.StateError, StorageError, FileNotFoundError)):
-        publish.reconcile(Config(("test/project",)), policy, store=store, runtime=runtime, now=NOW)
+        publish.reconcile(
+            Config(("test/project",)),
+            policy,
+            store=store,
+            runtime=runtime,
+            now=NOW,
+            clock=lambda: NOW,
+        )
 
 
 def test_signing_fingerprint_change_fails_before_discovery(
@@ -473,7 +618,9 @@ def test_signing_fingerprint_change_fails_before_discovery(
     owner = state.acquire(store, owner="local")
     frozen = state.freeze(store, owner, generation(tmp_path / "input", owner, bootstrap=True))
     monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
-    publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    publish.replay(
+        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
 
     def forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("Fingerprint change reached discovery or signing")
@@ -487,7 +634,14 @@ def test_signing_fingerprint_change_fails_before_discovery(
         expected_signing_fingerprint="B" * 40,
     )
     with pytest.raises(state.StateError, match="rotation"):
-        publish.reconcile(Config(("test/project",)), policy, store=store, runtime=runtime, now=NOW)
+        publish.reconcile(
+            Config(("test/project",)),
+            policy,
+            store=store,
+            runtime=runtime,
+            now=NOW,
+            clock=lambda: NOW,
+        )
 
 
 @pytest.mark.parametrize("architecture", ["x86_64", "noarch"])
@@ -537,7 +691,9 @@ def test_rpm_policy_change_validates_unchanged_history_before_freeze(
         },
     )
     frozen = state.freeze(store, owner, original)
-    publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    publish.replay(
+        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     completion = state.read_control(store, "completed.json")
     public_before = {
         path.relative_to(tmp_path / "store/rpm"): path.read_bytes()
@@ -558,7 +714,9 @@ def test_rpm_policy_change_validates_unchanged_history_before_freeze(
     if architecture == "x86_64":
         monkeypatch.setattr(state, "freeze", forbidden)
         with pytest.raises(rpm.RpmFailure, match="architecture is not approved"):
-            publish.reconcile(changed, policy, store=store, runtime=runtime, now=NOW)
+            publish.reconcile(
+                changed, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
+            )
         assert state.read_control(store, "completed.json") == completion
         assert state.pending_generation(store) == frozen
         held = state.read_control(store, "ownership.json")
@@ -570,7 +728,9 @@ def test_rpm_policy_change_validates_unchanged_history_before_freeze(
             str(held[0]["acquired_at"]),
         )
     else:
-        result = publish.reconcile(changed, policy, store=store, runtime=runtime, now=NOW)
+        result = publish.reconcile(
+            changed, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
+        )
         assert result.changed
         owner = state.acquire(store, owner="after")
     after = state.load_committed(store, owner, out=tmp_path / "after")
@@ -592,8 +752,6 @@ def test_rpm_policy_change_validates_unchanged_history_before_freeze(
 def test_adding_selected_format_retains_previous_bootstrap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.unit.test_state import next_generation
-
     class SignerDouble:
         fingerprint = "A" * 40
 
@@ -628,7 +786,9 @@ def test_adding_selected_format_retains_previous_bootstrap(
     )
     monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
     frozen = state.freeze(store, owner, first)
-    publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    publish.replay(
+        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     owner = state.acquire(store, owner="next")
     prior = state.load_committed(store, owner, out=tmp_path / "prior")
     second = next_generation(tmp_path / "next", owner, prior)
@@ -658,7 +818,9 @@ def test_adding_selected_format_retains_previous_bootstrap(
         },
     )
     frozen = state.freeze(store, owner, second)
-    publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    publish.replay(
+        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     owner = state.acquire(store, owner="verify")
     restored = state.load_committed(store, owner, out=tmp_path / "final")
     assert restored.bootstrap_objects == refs

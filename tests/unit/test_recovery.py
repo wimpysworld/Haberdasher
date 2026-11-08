@@ -83,7 +83,9 @@ def test_every_write_and_verification_boundary_recovers(
     owner = state.acquire(baseline, owner="local")
     original = generation(tmp_path / "baseline/input", owner, bootstrap=bootstrap)
     frozen = state.freeze(baseline, owner, original)
-    publish.replay(frozen, store=baseline, ownership=owner, runtime=runtime, now=NOW)
+    publish.replay(
+        frozen, store=baseline, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     assert len(baseline.events) > 70
     for boundary in range(len(baseline.events)):
         root = tmp_path / f"failure-{boundary}"
@@ -93,7 +95,9 @@ def test_every_write_and_verification_boundary_recovers(
             owner = state.acquire(store, owner="local")
             original = generation(root / "input", owner, bootstrap=bootstrap)
             frozen = state.freeze(store, owner, original)
-            publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+            publish.replay(
+                frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+            )
         completed = state.read_control(store, "completed.json")
         if completed is not None:
             for ref in baseline.writes:
@@ -109,20 +113,36 @@ def test_every_write_and_verification_boundary_recovers(
             )
             pending = state.pending_generation(store)
             if pending is not None:
-                publish.replay(pending, store=store, ownership=owner, runtime=runtime, now=NOW)
+                publish.replay(
+                    pending,
+                    store=store,
+                    ownership=owner,
+                    runtime=runtime,
+                    now=NOW,
+                    clock=lambda: NOW,
+                )
             else:
                 original = generation(
                     root / "retry-input", owner, identifier="retry-generation", bootstrap=bootstrap
                 )
                 pending = state.freeze(store, owner, original)
-                publish.replay(pending, store=store, ownership=owner, runtime=runtime, now=NOW)
+                publish.replay(
+                    pending,
+                    store=store,
+                    ownership=owner,
+                    runtime=runtime,
+                    now=NOW,
+                    clock=lambda: NOW,
+                )
         elif completed is None:
             owner = state.acquire(store, owner="CI")
             original = generation(
                 root / "retry-input", owner, identifier="retry-generation", bootstrap=bootstrap
             )
             pending = state.freeze(store, owner, original)
-            publish.replay(pending, store=store, ownership=owner, runtime=runtime, now=NOW)
+            publish.replay(
+                pending, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+            )
         owner = state.acquire(store, owner="verification")
         committed = state.load_committed(store, owner, out=root / "final")
         assert committed.generation_id is not None
@@ -143,7 +163,9 @@ def test_every_replacement_boundary_preserves_prior_completion(
         owner = state.acquire(store, owner="local")
         first = generation(root / "input", owner, bootstrap=bootstrap)
         frozen = state.freeze(store, owner, first)
-        publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+        publish.replay(
+            frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+        )
         owner = state.acquire(store, owner="CI")
         committed = state.load_committed(store, owner, out=root / "prior")
         second = next_generation(root / "second", owner, committed)
@@ -152,7 +174,9 @@ def test_every_replacement_boundary_preserves_prior_completion(
 
     baseline, runtime, owner, second = initial(tmp_path / "baseline")
     frozen = state.freeze(baseline, owner, second)
-    publish.replay(frozen, store=baseline, ownership=owner, runtime=runtime, now=NOW)
+    publish.replay(
+        frozen, store=baseline, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     assert any(
         operation == "replace" and key == "apt/metadata/entry"
         for _, operation, key in baseline.events
@@ -163,7 +187,9 @@ def test_every_replacement_boundary_preserves_prior_completion(
         store.fail_at = boundary
         with pytest.raises(InjectedFailure):
             frozen = state.freeze(store, owner, second)
-            publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+            publish.replay(
+                frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+            )
         completed = state.read_control(store, "completed.json")
         assert completed is not None
         completed_id = state.mapping(completed[0]["generation"])["id"]
@@ -181,14 +207,28 @@ def test_every_replacement_boundary_preserves_prior_completion(
             pending = state.pending_generation(store)
             assert pending is not None
             if pending.id == "generation-two":
-                publish.replay(pending, store=store, ownership=owner, runtime=runtime, now=NOW)
+                publish.replay(
+                    pending,
+                    store=store,
+                    ownership=owner,
+                    runtime=runtime,
+                    now=NOW,
+                    clock=lambda: NOW,
+                )
             else:
                 state.release(store, owner)
                 owner = state.acquire(store, owner="CI")
                 prior = state.load_committed(store, owner, out=root / "prior-retry")
                 retry = next_generation(root / "retry", owner, prior, identifier="generation-retry")
                 pending = state.freeze(store, owner, retry)
-                publish.replay(pending, store=store, ownership=owner, runtime=runtime, now=NOW)
+                publish.replay(
+                    pending,
+                    store=store,
+                    ownership=owner,
+                    runtime=runtime,
+                    now=NOW,
+                    clock=lambda: NOW,
+                )
         owner = state.acquire(store, owner="verification")
         committed = state.load_committed(store, owner, out=root / "final")
         assert committed.generation_id in {"generation-two", "generation-retry"}
@@ -216,11 +256,15 @@ def test_unknown_write_observation_does_not_prove_generation_ownership(
     monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
     runtime = Runtime(tmp_path / "runtime", environ={})
     with pytest.raises(UnknownWrite) as uncertain:
-        publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+        publish.replay(
+            frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+        )
     assert uncertain.value.observation is not None
     assert [ref.object_class for ref in store.writes if ref.bucket_role != "private"] == ["package"]
     with pytest.raises(state.StateError, match="Unresolved"):
-        publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+        publish.replay(
+            frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+        )
     with pytest.raises(state.StateError, match="explicit resolution"):
         state.recover_owner(
             store,
@@ -238,7 +282,9 @@ def test_unknown_write_observation_does_not_prove_generation_ownership(
             (state.WriteResolution(0, "written", uncertain.value.observation.etag),),
         ),
     )
-    publish.replay(frozen, store=store, ownership=recovered, runtime=runtime, now=NOW)
+    publish.replay(
+        frozen, store=store, ownership=recovered, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     assert state.read_control(store, "completed.json") is not None
 
 
@@ -262,6 +308,7 @@ def test_unresolved_request_cannot_use_an_absence_observation(
             ownership=owner,
             runtime=Runtime(tmp_path / "runtime", environ={}),
             now=NOW,
+            clock=lambda: NOW,
         )
     with pytest.raises(state.StateError, match="explicit resolution"):
         state.recover_owner(

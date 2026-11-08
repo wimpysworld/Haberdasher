@@ -431,6 +431,7 @@ def test_apt_outputs_tokens_restore_native_files(
         ownership=owner,
         runtime=Runtime(tmp_path / "runtime", environ={}),
         now=NOW,
+        clock=lambda: NOW,
     )
     owner = state.acquire(store, owner="next")
     committed = state.load_committed(store, owner, out=tmp_path / "committed")
@@ -480,6 +481,7 @@ def committed_generation(
         ownership=owner,
         runtime=Runtime(tmp_path / "runtime", environ={}),
         now=NOW,
+        clock=lambda: NOW,
     )
     owner = state.acquire(store, owner="next")
     committed = state.load_committed(store, owner, out=tmp_path / "committed")
@@ -650,6 +652,7 @@ def test_committed_reuse_and_new_outputs_replay_without_pool_downloads(
         ownership=owner,
         runtime=Runtime(tmp_path / "next-runtime", environ={}),
         now=NOW,
+        clock=lambda: NOW,
     )
     owner = state.acquire(store, owner="verify")
     restored = state.load_committed(store, owner, out=tmp_path / "final")
@@ -700,7 +703,9 @@ def test_bootstrap_reuse_requires_authenticated_unchanged_references(
     first = generation(tmp_path / "input", owner, bootstrap=True)
     frozen = state.freeze(store, owner, first)
     monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
-    publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    publish.replay(
+        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+    )
     owner = state.acquire(store, owner="next")
     prior = state.load_committed(store, owner, out=tmp_path / "prior")
     second = next_generation(tmp_path / "next", owner, prior)
@@ -736,7 +741,9 @@ def test_bootstrap_reuse_requires_authenticated_unchanged_references(
     assert observed is not None
     store.replace(output.ref, output.local_path, expected_etag=observed.etag)
     with pytest.raises(state.StateError, match="bootstrap"):
-        publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+        publish.replay(
+            frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+        )
     completed = state.read_control(store, "completed.json")
     assert completed is not None
     assert state.mapping(completed[0]["generation"])["id"] == first.id
