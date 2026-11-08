@@ -40,6 +40,7 @@ class Runtime:
     ) -> None:
         if type(max_output) is not int or max_output < 1:
             raise ValueError("Invalid output limit")
+        root = root.absolute()
         self.root = root
         self.max_output = max_output
         source = os.environ if environ is None else environ

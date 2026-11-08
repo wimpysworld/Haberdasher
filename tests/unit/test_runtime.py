@@ -59,6 +59,74 @@ def test_environment_profiles(tmp_path: Path, kind: str) -> None:
         runtime.close()
 
 
+@pytest.mark.parametrize("kind", ["native", "github", "storage"])
+@pytest.mark.parametrize("explicit_cwd", [False, True])
+def test_relative_root_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, explicit_cwd: bool
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    runtime = Runtime(Path("work"), environ={"PATH": ""})
+    cwd = tmp_path / "elsewhere" if explicit_cwd else None
+    if cwd is not None:
+        cwd.mkdir()
+    try:
+        result = runtime.run(
+            [
+                sys.executable,
+                "-c",
+                "import json,os; from pathlib import Path; "
+                "(Path(os.environ['HOME']) / 'probe').write_text(str(Path.cwd())); "
+                "print(json.dumps(dict(os.environ)))",
+            ],
+            cwd=cwd,
+            env_kind=kind,
+        )
+        assert result.returncode == 0, result.stderr.decode()
+        root = tmp_path / "work"
+        assert runtime.root == root
+        assert (root / "home/probe").read_text() == str(cwd or root)
+        paths = {
+            "HOME": "home",
+            "GNUPGHOME": "gnupg",
+            "XDG_CONFIG_HOME": "home/.config",
+            "XDG_DATA_HOME": "home/.local/share",
+            "XDG_CACHE_HOME": "home/.cache",
+            "XDG_STATE_HOME": "home/.local/state",
+            "XDG_RUNTIME_DIR": "run",
+            "TMPDIR": "tmp",
+        }
+        if kind == "github":
+            paths["GH_CONFIG_DIR"] = "home/.config/gh"
+        elif kind == "storage":
+            paths.update(
+                {
+                    "AWS_CONFIG_FILE": "aws-config",
+                    "AWS_SHARED_CREDENTIALS_FILE": "aws-credentials",
+                    "RCLONE_CONFIG": "rclone.conf",
+                }
+            )
+        env = json.loads(result.stdout)
+        for name, relative in paths.items():
+            assert env[name] == str(root / relative)
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("link", ["work", "work/home"])
+def test_relative_root_rejects_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    path = Path(link)
+    path.parent.mkdir(exist_ok=True)
+    path.symlink_to(target, target_is_directory=True)
+    with pytest.raises(ValueError, match="Symlink in private"):
+        Runtime(Path("work"), environ={"PATH": ""})
+    assert not list(target.iterdir())
+
+
 def test_run_input_nonzero_and_limits(tmp_path: Path) -> None:
     runtime = Runtime(tmp_path, environ={"PATH": os.defpath}, max_output=300_000)
     try:
