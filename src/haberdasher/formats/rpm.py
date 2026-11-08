@@ -389,6 +389,8 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
     }:
         raise RpmFailure("Incomplete active RPM identities")
     for asset in retained.accepted_history:
+        if asset.inspected.identity.architecture not in (*policy.architectures, "noarch"):
+            raise RpmFailure("Retained RPM architecture is not approved")
         if asset.inspected.metadata.get("rpm_records") != records[asset.history_key]:
             raise RpmFailure("Complete retained RPM records changed")
         if (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
@@ -23,9 +24,11 @@ from haberdasher.core import (
     VerifiedAsset,
     WriteReceipt,
 )
+from haberdasher.formats import rpm
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
 from haberdasher.storage import LocalStore, PreconditionFailed
+from tests.unit.test_rpm import mock_rpm_commands, retained_rpm
 from tests.unit.test_state import NOW, generation, local_store
 
 
@@ -485,6 +488,105 @@ def test_signing_fingerprint_change_fails_before_discovery(
     )
     with pytest.raises(state.StateError, match="rotation"):
         publish.reconcile(Config(("test/project",)), policy, store=store, runtime=runtime, now=NOW)
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "noarch"])
+def test_rpm_policy_change_validates_unchanged_history_before_freeze(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, architecture: str
+) -> None:
+    from haberdasher.config import StoragePolicy
+
+    storage = StoragePolicy(
+        "local", str(tmp_path / "store/private"), {"rpm": str(tmp_path / "store/rpm")}
+    )
+    store = LocalStore(storage)
+    policy = Policy(storage, expected_signing_fingerprint="A" * 40)
+    config = Config(("test/project",), {"rpm": FormatPolicy("rpm")})
+    runtime = Runtime(tmp_path / "runtime", environ={})
+    mock_rpm_commands(monkeypatch)
+    retained = retained_rpm(tmp_path / "rpm", (architecture,))
+    outputs = tuple(
+        core.OutputObject(ref, tmp_path / "rpm" / ref.key, "create", None, index)
+        for index, ref in enumerate(retained.objects)
+    )
+    prepared = PreparedFormat("rpm", retained, outputs, retained.objects)
+    source = retained.accepted_history[0].inspected.verified.source
+    scan_state = discovery.DiscoveryState((), (source,), config.sources)
+
+    def scan(
+        config: Config, *, runtime: Runtime, previous: discovery.DiscoveryState
+    ) -> discovery.CompleteScan:
+        assert previous == scan_state
+        return discovery.CompleteScan(scan_state, (), (), (), ())
+
+    owner = state.acquire(store, owner="seed")
+    template = generation(tmp_path / "input", owner, name="rpm", bootstrap=True)
+    original = replace(
+        template,
+        config_digest=hashlib.sha256(core.canonical_json(config)).hexdigest(),
+        policy_digest=hashlib.sha256(core.canonical_json(policy)).hexdigest(),
+        formats=(prepared,),
+        scan={
+            "state": core.json_value(scan_state),
+            "policies": {"rpm": core.json_value(config.format_policy("rpm"))},
+        },
+        public_inventories={
+            "rpm": core.public_inventory(
+                retained.accepted_history, (*retained.objects, *template.bootstrap_objects)
+            )
+        },
+    )
+    frozen = state.freeze(store, owner, original)
+    publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
+    completion = state.read_control(store, "completed.json")
+    public_before = {
+        path.relative_to(tmp_path / "store/rpm"): path.read_bytes()
+        for path in (tmp_path / "store/rpm").rglob("*")
+        if path.is_file()
+    }
+    owner = state.acquire(store, owner="before")
+    before = state.load_committed(store, owner, out=tmp_path / "before")
+    state.release(store, owner)
+    monkeypatch.setattr(discovery, "scan_releases", scan)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Policy-only change reached signing, rebuilding, or freeze")
+
+    monkeypatch.setattr(publish, "signing_session", forbidden)
+    monkeypatch.setattr(rpm, "prepare", forbidden)
+    changed = replace(config, formats={"rpm": FormatPolicy("rpm", architectures=("aarch64",))})
+    if architecture == "x86_64":
+        monkeypatch.setattr(state, "freeze", forbidden)
+        with pytest.raises(rpm.RpmFailure, match="architecture is not approved"):
+            publish.reconcile(changed, policy, store=store, runtime=runtime, now=NOW)
+        assert state.read_control(store, "completed.json") == completion
+        assert state.pending_generation(store) == frozen
+        held = state.read_control(store, "ownership.json")
+        assert held is not None
+        owner = core.Ownership(
+            str(held[0]["nonce"]),
+            held[1].etag,
+            str(held[0]["runner"]),
+            str(held[0]["acquired_at"]),
+        )
+    else:
+        result = publish.reconcile(changed, policy, store=store, runtime=runtime, now=NOW)
+        assert result.changed
+        owner = state.acquire(store, owner="after")
+    after = state.load_committed(store, owner, out=tmp_path / "after")
+    assert after.config_digest == (
+        before.config_digest
+        if architecture == "x86_64"
+        else hashlib.sha256(core.canonical_json(changed)).hexdigest()
+    )
+    assert after.policy_digest == before.policy_digest
+    assert after.formats[0].accepted_history == before.formats[0].accepted_history
+    assert after.formats[0].objects == before.formats[0].objects
+    assert {
+        path.relative_to(tmp_path / "store/rpm"): path.read_bytes()
+        for path in (tmp_path / "store/rpm").rglob("*")
+        if path.is_file()
+    } == public_before
 
 
 def test_adding_selected_format_retains_previous_bootstrap(
