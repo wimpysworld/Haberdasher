@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import gzip
-import hashlib
 import shutil
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -457,11 +457,45 @@ def test_retained_validation_checks_hash_consistent_signatures() -> None:
                 assert not list((runtime.root / "tmp").glob("apt-verify-*"))
 
 
-def test_deterministic_gzip() -> None:
-    data = b"Package: hd-test\nVersion: 1.0\n\n"
-    left = gzip.compress(data, mtime=0)
-    assert left == gzip.compress(data, mtime=0)
-    assert gzip.decompress(left) == data
-    assert (
-        hashlib.sha256(left).hexdigest() == hashlib.sha256(gzip.compress(data, mtime=0)).hexdigest()
-    )
+def test_indexes_are_deterministic_across_roots_and_times() -> None:
+    with private_workspace() as runtime, disposable_key() as key:
+        config = policy()
+        verified = build(runtime, "hd-deterministic", "1.0", "retained", arch="all")
+        inspected = apt.inspect(
+            verified, policy=config, runtime=runtime, out=runtime.root / "inspection"
+        )
+        accepted = admit(inspected, [], compare=apt.compare, policy=config, runtime=runtime)
+        now = datetime.now(UTC).replace(microsecond=0)
+        roots = (runtime.root / "first", runtime.root / "second")
+        compress = gzip.compress
+        with signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer:
+            for index, root in enumerate(roots):
+                clock = int(now.timestamp()) + index * 100
+                # Require explicit mtime=0, even with Python 3.14's deterministic default.
+                with (
+                    patch.object(apt.gzip, "compress", partial(compress, mtime=clock)),
+                    patch("gzip.time.time", return_value=clock),
+                ):
+                    prepared = apt.prepare(
+                        [accepted],
+                        RetainedFormat("apt", None, (), (), {}, ()),
+                        policy=config,
+                        runtime=runtime,
+                        signer=signer,
+                        now=now + timedelta(seconds=index * 100),
+                        out=root,
+                    )
+                assert any(item.ref.key.endswith("/Packages.gz") for item in prepared.outputs)
+        expected = str(inspected.metadata["record"]).rstrip("\n").encode() + b"\n\n"
+        for arch in config.architectures:
+            relative = f"dists/{config.suite}/{config.component}/binary-{arch}/Packages"
+            left = (roots[0] / (relative + ".gz")).read_bytes()
+            right = (roots[1] / (relative + ".gz")).read_bytes()
+            assert left == right
+            assert gzip.decompress(left) == gzip.decompress(right) == expected
+            assert (roots[0] / relative).read_bytes() == expected
+            assert (roots[1] / relative).read_bytes() == expected
+        release = f"dists/{config.suite}/Release"
+        assert (roots[0] / release).read_bytes() != (roots[1] / release).read_bytes()

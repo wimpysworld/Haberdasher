@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
 import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -439,6 +441,39 @@ def retained_history(
         },
         tuple(refs),
     )
+
+
+def test_indexes_are_deterministic_across_roots_and_times(tmp_path: Path) -> None:
+    config = FormatPolicy("apt", ("amd64", "arm64"))
+    identities = tuple(
+        NativeIdentity("apt", f"hd-{arch}", arch, "1.0") for arch in ("amd64", "arm64", "all")
+    )
+    # Python 3.14 defaults to mtime=0. Require the adapter's explicit setting instead.
+    compress = gzip.compress
+    roots = (tmp_path / "first", tmp_path / "second")
+    for root, clock in zip(roots, (1_800_000_000, 1_800_000_100), strict=True):
+        root.mkdir()
+        with (
+            patch.object(apt.gzip, "compress", partial(compress, mtime=clock)),
+            patch("gzip.time.time", return_value=clock),
+        ):
+            retained = retained_history(root, identities, config)
+            expected = _indexes(retained.accepted_history, config)
+        for key, data in expected.items():
+            assert (root / key).read_bytes() == data
+    for arch in config.architectures:
+        key = f"dists/{config.suite}/{config.component}/binary-{arch}/Packages"
+        plain = (roots[0] / key).read_bytes()
+        left = (roots[0] / (key + ".gz")).read_bytes()
+        right = (roots[1] / (key + ".gz")).read_bytes()
+        assert left == right
+        assert gzip.decompress(left) == gzip.decompress(right) == plain
+        assert plain == (roots[1] / key).read_bytes()
+        assert f"Package: hd-{arch}\n".encode() in plain
+        assert b"Package: hd-all\n" in plain
+        other = "arm64" if arch == "amd64" else "amd64"
+        assert f"Package: hd-{other}\n".encode() not in plain
+        assert b"X-Custom: retained\n" in plain
 
 
 @pytest.mark.parametrize("version", ["1.0", "0:1.0", "1.0-0"])
