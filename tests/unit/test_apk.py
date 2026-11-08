@@ -4,14 +4,25 @@ import gzip
 import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from haberdasher.config import FormatPolicy
-from haberdasher.core import NativeIdentity, RetainedFormat, SourceAsset, VerifiedAsset, sha256_file
+from haberdasher.core import (
+    AdmittedAsset,
+    InspectedAsset,
+    NativeIdentity,
+    RetainedFormat,
+    SourceAsset,
+    VerifiedAsset,
+    sha256_file,
+)
 from haberdasher.formats import apk
 from haberdasher.runtime import Runtime
+from haberdasher.signing import SigningSession
 
 STANZA = (
     "C:Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=\nP:hd-main\nV:1.0-r1\nA:x86_64\nS:123\nI:12\n"
@@ -38,6 +49,114 @@ class FakeRuntime(Runtime):
     ) -> subprocess.CompletedProcess[bytes]:
         self.calls.append(tuple(argv))
         return subprocess.CompletedProcess(argv, self.code, self.stdout, b"failure")
+
+
+@pytest.mark.parametrize("symlink", [None, "root", "parent", "validation"])
+def test_prepare_normalises_relative_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, symlink: str | None
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "output"
+    out = Path("output")
+    if symlink is not None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        if symlink == "root":
+            root.symlink_to(outside, target_is_directory=True)
+        elif symlink == "parent":
+            (tmp_path / "parent").symlink_to(outside, target_is_directory=True)
+            out = Path("parent/output")
+        else:
+            root.mkdir()
+            (root / "validation").symlink_to(outside, target_is_directory=True)
+    runtime = FakeRuntime(tmp_path / "runtime")
+    private, public = tmp_path / "synthetic-private", tmp_path / apk.PUBLIC_KEY
+    private.write_bytes(b"inert private fixture")
+    public.write_bytes(b"inert public fixture")
+    signer = SigningSession(runtime, tmp_path / "gnupg", "A" * 40)
+    path = tmp_path / "input.apk"
+    path.write_bytes(b"inert package fixture")
+    sha, size = sha256_file(path)
+    source = SourceAsset(
+        "synthetic/apk",
+        1,
+        1,
+        path.name,
+        size,
+        "2026-01-01T00:00:00Z",
+        "https://example.invalid/input.apk",
+    )
+    verified = VerifiedAsset(source, path, sha, size, 2, "1" * 64)
+    stanza = STANZA.replace("S:123", f"S:{size}")
+    inspected = InspectedAsset(
+        verified,
+        NativeIdentity("apk", "hd-main", "x86_64", "1.0-r1"),
+        {
+            "stanza": stanza,
+            "pkginfo": "pkgname = hd-main\npkgver = 1.0-r1\narch = x86_64\ndatahash = "
+            + "0" * 64
+            + "\n",
+            "datahash": "0" * 64,
+        },
+        {"dependencies": apk._fields(stanza)["D"], "control_identity": apk._fields(stanza)["C"]},
+        "unsigned",
+    )
+    native_run = runtime.run
+
+    def run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        result = native_run(argv)
+        for flag in ("-czf", "-C", "--keys-dir", "--index", "--output", "-p"):
+            if flag in argv:
+                argument = Path(argv[argv.index(flag) + 1])
+                assert argument.is_absolute()
+                assert argument.is_relative_to(root)
+        if "-czf" in argv:
+            Path(argv[argv.index("-czf") + 1]).write_bytes(b"inert seed")
+        if "--output" in argv:
+            Path(argv[argv.index("--output") + 1]).write_bytes(b"inert index")
+        if "abuild-sign" in argv:
+            assert Path(argv[-1]).is_relative_to(root)
+        return result
+
+    with (
+        patch.object(runtime, "run", side_effect=run),
+        patch.object(signer, "alpine_key", return_value=(private, public)) as signing,
+        patch.object(apk, "inspect", return_value=inspected) as inspection,
+        patch.object(apk, "_extract", return_value=stanza),
+        patch.object(apk, "_verify_index", return_value=apk._records(stanza)),
+    ):
+
+        def prepare() -> apk.PreparedFormat:
+            return apk.prepare(
+                [AdmittedAsset(inspected, "preserve", "synthetic")],
+                RetainedFormat("apk", None, (), (), {}, ()),
+                policy=FormatPolicy("apk"),
+                runtime=runtime,
+                signer=signer,
+                now=datetime(2026, 1, 1, tzinfo=UTC),
+                out=out,
+            )
+
+        if symlink is not None:
+            with pytest.raises(ValueError, match="Symlink"):
+                prepare()
+            assert not runtime.calls
+            inspection.assert_not_called()
+            signing.assert_not_called()
+            assert not list((tmp_path / "outside").iterdir())
+            return
+        prepared = prepare()
+        assert inspection.call_args.kwargs["out"] == root
+    assert {item.local_path for item in prepared.outputs} == {
+        root / apk.PUBLIC_KEY,
+        root / "x86_64/hd-main-1.0-r1.apk",
+        root / "x86_64/APKINDEX.tar.gz",
+    }
+    assert prepared.retained.metadata["public_key"] == apk._file_record(root / apk.PUBLIC_KEY)
+    assert prepared.retained.metadata["indexes"] == {
+        "x86_64": apk._file_record(root / "x86_64/APKINDEX.tar.gz")
+    }
+    assert runtime.calls
 
 
 def test_complete_stanza_is_preserved() -> None:

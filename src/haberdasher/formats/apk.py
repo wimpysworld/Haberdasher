@@ -546,6 +546,7 @@ def prepare(
     out: Path,
 ) -> PreparedFormat:
     validate_retained(retained, policy=policy, runtime=runtime)
+    out = safe_path(out, "validation").parent
     history = list(retained.accepted_history)
     additions: list[AdmittedAsset] = []
     for candidate in new:
