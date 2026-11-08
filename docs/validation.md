@@ -62,7 +62,7 @@ Run `tests/native/test_pipeline.py` for served-key trust without production URLs
 
 The workflow passes `github.token` as `GH_TOKEN` with `contents: read`. Storage variables and `HD_SIGNING_KEY` come from secrets. These inputs stay scoped to the publish step.
 
-Before activation, configure the protected `publisher` environment with the secret `HD_PUBLISH_POLICY`. Set its value to the complete, approved YAML publisher policy, using the README policy example as the schema reference. Do not put credentials or private signing keys in the policy. Keep those values in their existing dedicated secrets. Policy approvals require an operator decision, not a copy of sample approvals.
+Before activation, configure the protected `publisher` environment with the secret `HD_PUBLISH_POLICY`. Set its value to the complete, approved YAML publisher policy, using the [publisher policy example](publisher.md#configuration) as the schema reference. Do not put credentials or private signing keys in the policy. Keep those values in their existing dedicated secrets. Policy approvals require an operator decision, not a copy of sample approvals.
 
 The publish step rejects an empty `HD_PUBLISH_POLICY` before publication. It writes the exact bytes without logging them to a mode `0600` temporary file under `/tmp`, outside the checkout and Nix store. It uses `umask 077` and passes the private path through `--policy-file`. Exit and `HUP`, `INT`, and `TERM` traps remove the file after success, failure, or interruption. The step removes `HD_PUBLISH_POLICY` from the environment before it starts Nix.
 
