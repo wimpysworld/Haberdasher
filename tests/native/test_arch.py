@@ -79,7 +79,19 @@ def test_client_keyring_socket_paths(socket_bytes: int | None) -> None:
                 assert (f"{key.fingerprint}:6:".encode() in trust) == (pacman is trusted)
             for failure in (False, True):
                 pid = agent_pid(runtime, trusted.keyring)
-                assert (trusted.keyring / "S.gpg-agent.browser").is_socket()
+                socketdir = Path(
+                    run(
+                        runtime,
+                        "gpgconf",
+                        "--homedir",
+                        str(trusted.keyring),
+                        "--list-dirs",
+                        "socketdir",
+                    )
+                    .decode()
+                    .strip()
+                )
+                assert (socketdir / "S.gpg-agent.browser").is_socket()
                 if failure:
                     with pytest.raises(RuntimeError):
                         trusted.checked("-Q", "not-installed")
