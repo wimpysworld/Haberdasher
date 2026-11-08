@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from haberdasher.config import (
     Config,
     FormatPolicy,
     Policy,
+    RuntimePolicy,
     StoragePolicy,
     TrustPolicy,
     load_config,
@@ -183,6 +185,82 @@ def test_remote_requires_every_gate() -> None:
         policy.require_remote(())
     with pytest.raises(ValueError):
         policy.require_remote(("flatpak",))
+
+
+def approved_remote_policy(name: str) -> Policy:
+    trust = TrustPolicy(approved=True, approval_reference="synthetic-client-approval")
+    if name == "flatpak":
+        trust = replace(
+            trust,
+            source_owner="synthetic",
+            refs=("app/org.example.App/x86_64/stable",),
+            runtime=RuntimePolicy(
+                url="http://127.0.0.1:12345/runtime",
+                fingerprint="A" * 40,
+                collection="",
+                branch="stable",
+                architecture="x86_64",
+                remote="synthetic-runtime",
+                refs=("runtime/org.example.Platform/x86_64/stable",),
+            ),
+        )
+    return Policy(
+        storage=StoragePolicy("r2", "synthetic-private", {name: f"synthetic-{name}"}),
+        approved_formats=(name,),
+        approval_references={gate: "synthetic-approval" for gate in APPROVAL_GATES},
+        expected_signing_fingerprint=PRODUCTION_FINGERPRINT,
+        clients={name: trust},
+    )
+
+
+@pytest.mark.parametrize("name", ["apk", "flatpak"])
+def test_remote_accepts_approved_format(name: str) -> None:
+    approved_remote_policy(name).require_remote((name,))
+
+
+@pytest.mark.parametrize(
+    "name, field, value, message",
+    [
+        ("apk", "apk_v2", None, "Remote publication is not approved"),
+        ("apk", "approved", False, "Format publication is not approved"),
+        ("apk", "approval_reference", None, "Format publication is not approved"),
+        ("flatpak", "flatpak_runtime", None, "Remote publication is not approved"),
+        ("flatpak", "approved", False, "Format publication is not approved"),
+        ("flatpak", "approval_reference", None, "Format publication is not approved"),
+        ("flatpak", "source_owner", None, "Flatpak source and runtime approval is incomplete"),
+        ("flatpak", "refs", (), "Flatpak source and runtime approval is incomplete"),
+        ("flatpak", "runtime", None, "Flatpak source and runtime approval is incomplete"),
+    ],
+    ids=[
+        "apk-v2-approval",
+        "apk-client-approved",
+        "apk-client-reference",
+        "flatpak-runtime-approval",
+        "flatpak-client-approved",
+        "flatpak-client-reference",
+        "flatpak-source-owner",
+        "flatpak-refs",
+        "flatpak-runtime",
+    ],
+)
+def test_remote_rejects_individual_format_approval_omissions(
+    name: str, field: str, value: object, message: str
+) -> None:
+    policy = approved_remote_policy(name)
+    if field in APPROVAL_GATES:
+        policy = replace(
+            policy,
+            approval_references={
+                gate: reference
+                for gate, reference in policy.approval_references.items()
+                if gate != field
+            },
+        )
+    else:
+        policy = replace(policy, clients={name: replace(policy.clients[name], **{field: value})})
+    with pytest.raises(ValueError) as error:
+        policy.require_remote((name,))
+    assert str(error.value) == message
 
 
 def test_flatpak_runtime_policy(tmp_path: Path) -> None:

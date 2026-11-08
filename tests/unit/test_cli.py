@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from haberdasher.config import (
     PRODUCTION_FINGERPRINT,
     Config,
     Policy,
+    RuntimePolicy,
     StoragePolicy,
     TrustPolicy,
 )
@@ -333,6 +335,109 @@ def test_remote_approval_checks_full_configured_set(capsys: pytest.CaptureFixtur
     ):
         assert cli.main(["--apply", "--remote"]) == 1
     assert "Format publication is not approved" in capsys.readouterr().err
+
+
+def approved_remote_policy(name: str) -> Policy:
+    trust = TrustPolicy(approved=True, approval_reference="synthetic-client-approval")
+    if name == "flatpak":
+        trust = replace(
+            trust,
+            source_owner="synthetic",
+            refs=("app/org.example.App/x86_64/stable",),
+            runtime=RuntimePolicy(
+                url="http://127.0.0.1:12345/runtime",
+                fingerprint="A" * 40,
+                collection="",
+                branch="stable",
+                architecture="x86_64",
+                remote="synthetic-runtime",
+                refs=("runtime/org.example.Platform/x86_64/stable",),
+            ),
+        )
+    return Policy(
+        storage=StoragePolicy("r2", "synthetic-private", {name: f"synthetic-{name}"}),
+        approved_formats=(name,),
+        approval_references={gate: "synthetic-approval" for gate in APPROVAL_GATES},
+        expected_signing_fingerprint=PRODUCTION_FINGERPRINT,
+        clients={name: trust},
+    )
+
+
+@pytest.mark.parametrize("name", ["apk", "flatpak"])
+def test_remote_accepts_approved_format(name: str, capsys: pytest.CaptureFixture[str]) -> None:
+    policy = approved_remote_policy(name)
+    with (
+        patch.object(cli, "load_policy", return_value=policy),
+        patch.object(cli, "load_config", return_value=Config(("synthetic/test",))),
+        patch.object(cli, "private_workspace") as workspace,
+        patch.object(cli, "R2Store") as store,
+        patch.object(publish, "reconcile", return_value=publish.RunResult(None, False, 0)) as run,
+        patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
+    ):
+        assert cli.main(["--apply", "--remote", "--format", name]) == 0
+    workspace.assert_called_once()
+    store.assert_called_once_with(
+        policy.storage, runtime=workspace.return_value.__enter__.return_value
+    )
+    run.assert_called_once()
+    assert run.call_args.args[1] is policy
+    assert run.call_args.kwargs["store"] is store.return_value
+    assert not capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "name, field, value, message",
+    [
+        ("apk", "apk_v2", None, "Remote publication is not approved"),
+        ("apk", "approved", False, "Format publication is not approved"),
+        ("apk", "approval_reference", None, "Format publication is not approved"),
+        ("flatpak", "flatpak_runtime", None, "Remote publication is not approved"),
+        ("flatpak", "approved", False, "Format publication is not approved"),
+        ("flatpak", "approval_reference", None, "Format publication is not approved"),
+        ("flatpak", "source_owner", None, "Flatpak source and runtime approval is incomplete"),
+        ("flatpak", "refs", (), "Flatpak source and runtime approval is incomplete"),
+        ("flatpak", "runtime", None, "Flatpak source and runtime approval is incomplete"),
+    ],
+    ids=[
+        "apk-v2-approval",
+        "apk-client-approved",
+        "apk-client-reference",
+        "flatpak-runtime-approval",
+        "flatpak-client-approved",
+        "flatpak-client-reference",
+        "flatpak-source-owner",
+        "flatpak-refs",
+        "flatpak-runtime",
+    ],
+)
+def test_remote_rejects_individual_format_approval_omissions_before_runtime(
+    name: str, field: str, value: object, message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    policy = approved_remote_policy(name)
+    if field in APPROVAL_GATES:
+        policy = replace(
+            policy,
+            approval_references={
+                gate: reference
+                for gate, reference in policy.approval_references.items()
+                if gate != field
+            },
+        )
+    else:
+        policy = replace(policy, clients={name: replace(policy.clients[name], **{field: value})})
+    with (
+        patch.object(cli, "load_policy", return_value=policy),
+        patch.object(cli, "load_config", side_effect=AssertionError("config opened")),
+        patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
+        patch.object(cli, "LocalStore", side_effect=AssertionError("storage opened")),
+        patch.object(cli, "R2Store", side_effect=AssertionError("storage opened")),
+        patch.object(state, "acquire", side_effect=AssertionError("ownership acquired")),
+        patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
+    ):
+        assert cli.main(["--apply", "--remote", "--format", name]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == f"Error: {message}\n"
+    assert not captured.out
 
 
 @pytest.mark.parametrize("omit_from_policy", [False, True])
