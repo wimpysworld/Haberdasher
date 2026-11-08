@@ -1,4 +1,4 @@
-# Initially fitted by tailor on 2026-11-06
+# Refitted by tailor on 2026-11-08
 license: BlueOak-1.0.0
 
 languages:
@@ -12,7 +12,7 @@ mcp:
   playwright: false
 
 repository:
-  description: Purveyor of fine Linux packages from GitHub Releases 🎩
+  description: "Purveyor of fine Linux packages from GitHub Releases 🎩"
   has_wiki: false
   has_discussions: false
   has_projects: false
@@ -295,3 +295,9 @@ swatches:
 
   - path: .tailor.yml
     alteration: always
+
+  - path: ruff.toml
+    alteration: first-fit
+
+  - path: pyrightconfig.json
+    alteration: first-fit

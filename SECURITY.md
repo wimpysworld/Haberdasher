@@ -8,7 +8,7 @@ Only the latest release is supported. Security fixes are released as patch versi
 
 **Do not open a public issue for security vulnerabilities.**
 
-[Report vulnerabilities privately]({{ADVISORY_URL}}). Include:
+[Report vulnerabilities privately](https://github.com/wimpysworld/Haberdasher/security/advisories/new). Include:
 
 - Steps to reproduce
 - Affected versions
