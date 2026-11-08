@@ -132,7 +132,7 @@ state_gate() {
     done
 }
 output_gate() {
-    local dir=$1 kind record filename embedded count
+    local dir=$1 kind record filename checksum embedded count
     state_gate "$dir" || return 1
     for kind in db files; do
         [[ $(readlink "$dir/proof.$kind") == "proof.$kind.tar.gz" ]] || return 1
@@ -144,6 +144,8 @@ output_gate() {
             filename=$(bsdtar -xOf "$dir/proof.$kind.tar.gz" "$record" | sed -n '/^%FILENAME%$/{n;p;}')
             [[ $filename != */* && -n $filename ]] || return 1
             verify "$dir/$filename" "$dir/$filename.sig" || return 1
+            checksum=$(bsdtar -xOf "$dir/proof.$kind.tar.gz" "$record" | sed -n '/^%SHA256SUM%$/{n;p;}') || return 1
+            [[ $checksum == "$(hash "$dir/$filename")" ]] || return 1
             embedded=$(bsdtar -xOf "$dir/proof.$kind.tar.gz" "$record" | sed -n '/^%PGPSIG%$/{n;p;}')
             [[ -n $embedded ]] || return 1
             printf '%s' "$embedded" | base64 -d >"$PROOF_WORK/embedded.sig" || return 1
@@ -184,6 +186,29 @@ for kind in db files; do
 done
 bytes_equal <(bsdtar -xOf "$PROOF_WORK/frozen1/proof.files.tar.gz" keeper-1-1/files) <(bsdtar -xOf "$PROOF_WORK/frozen2/proof.files.tar.gz" keeper-1-1/files) || proof_fail 'Keeper file records changed.'
 proof_pass 'Both signed native archives retain keeper records with only the new package available'
+
+for kind in db files; do
+    fault_dir="$PROOF_WORK/fault-checksum-$kind"
+    mkdir -p "$fault_dir/records"
+    cp -a "$PROOF_WORK/frozen2/." "$fault_dir/"
+    bsdtar -xf "$fault_dir/proof.$kind.tar.gz" -C "$fault_dir/records"
+    correct=$(hash "$fault_dir/$keeper")
+    wrong=$(hash "$fault_dir/$new")
+    [[ $correct != "$wrong" ]] || proof_fail 'Checksum fixtures have identical bytes.'
+    for checksum in "$wrong" "$correct"; do
+        sed -i "/^%SHA256SUM%$/{n;s|.*|$checksum|;}" "$fault_dir/records/keeper-1-1/desc"
+        bsdtar -czf "$fault_dir/proof.$kind.tar.gz" -C "$fault_dir/records" keeper-1-1 updateable-2-1
+        sign "$fault_dir/proof.$kind.tar.gz"
+        state_gate "$fault_dir" || proof_fail 'Checksum test metadata is not validly signed.'
+        if [[ $checksum == "$wrong" ]]; then
+            expect_reject "$kind keeper checksum belongs to another signed package" output_gate "$fault_dir"
+            [[ ! -e $fault_dir/inventory ]] || proof_fail 'Checksum failure advanced inventory.'
+        else
+            output_gate "$fault_dir" || proof_fail 'Checksum-only repair failed the output gate.'
+            proof_pass "$kind checksum-only repair passes with unchanged packages and package signatures"
+        fi
+    done
+done
 
 for absent in proof.files.tar.gz proof.db.tar.gz.sig proof.files.tar.gz.sig "$new.sig"; do
     mkdir "$PROOF_WORK/fault-$absent"
