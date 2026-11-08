@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-scripts=(just/project/*.sh)
+shopt -s globstar nullglob
+scripts=(just/project/*.sh tests/proofs/**/*.sh)
 shellcheck "${scripts[@]}"
+actionlint .github/workflows/check.yml .github/workflows/publish.yml
 case "${1:-check}" in
     check)
         shfmt -d -i 4 -ci "${scripts[@]}"

@@ -1,0 +1,7 @@
+{
+  "v1/old.deb": "historical-deb",
+  "v1/SHA256SUMS": "95128c47c5b9d7f1cdbb8717ed0c98aed505116e2a5b6bc55da0c59c5082d80f  old.deb\n",
+  "v2/app.deb": "current-deb",
+  "v2/checksums.txt": "58e44010f61498525d0b71f1e306559c4cfeaa0d5c7041f2e7dd4d831896fd74  app.deb\n",
+  "v2/late.rpm": "later"
+}
