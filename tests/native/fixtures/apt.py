@@ -111,6 +111,9 @@ class Client:
         dpkg = shutil.which("dpkg", path=runtime.environment["PATH"])
         if dpkg is None:
             raise RuntimeError("Native dpkg is required")
+        gpgv = shutil.which("gpgv", path=runtime.environment["PATH"])
+        if gpgv is None:
+            raise RuntimeError("Native gpgv is required")
         self.config.write_text(f'''Dir "{client.base}";
 Dir::Etc "{client.path("config")}";
 Dir::Etc::main "-";
@@ -127,6 +130,7 @@ Dir::Cache "{client.path("cache")}";
 Dir::Cache::archives "{client.path("cache/archives")}";
 Dir::Log "{client.path("log")}";
 Dir::Bin::dpkg "{dpkg}";
+Apt::Key::gpgvcommand "{gpgv}";
 APT::Architecture "amd64";
 APT::Architectures {{ "amd64"; }};
 APT::Sandbox::User "{pwd.getpwuid(os.getuid()).pw_name}";

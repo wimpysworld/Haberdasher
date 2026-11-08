@@ -193,6 +193,7 @@ Dir::Cache "$c/cache";
 Dir::Cache::archives "$c/cache/archives";
 Dir::Log "$c/log";
 Dir::Bin::dpkg "$(command -v dpkg)";
+Apt::Key::gpgvcommand "$(command -v gpgv)";
 APT::Architecture "amd64";
 APT::Architectures { "amd64"; };
 APT::Sandbox::User "$(id -un)";
@@ -209,6 +210,7 @@ EOF
 apt_run() {
     [[ $c == "$w/"client-* && -f $c/apt.conf ]] || proof_fail 'Unsafe APT client path.'
     [[ $(APT_CONFIG="$c/apt.conf" apt-config shell status Dir::State::status) == "status='$c/root/var/lib/dpkg/status'" ]] || proof_fail 'Unsafe dpkg status path.'
+    [[ $(APT_CONFIG="$c/apt.conf" apt-config shell verifier Apt::Key::gpgvcommand) == "verifier='$(command -v gpgv)'" ]] || proof_fail 'APT verifier differs from the pinned gpgv.'
     APT_CONFIG="$c/apt.conf" fakeroot apt-get "$@" >"$c/last.log" 2>&1 || {
         cat "$c/last.log" >&2
         return 1

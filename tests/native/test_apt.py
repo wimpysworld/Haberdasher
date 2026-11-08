@@ -7,6 +7,7 @@ import hashlib
 import shutil
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -19,6 +20,26 @@ from haberdasher.signing import SigningFailure, signing_session
 from tests.native.fixtures.apt import Client, build, policy, publish
 from tests.support.http import serve
 from tests.support.keys import disposable_key
+
+
+def test_client_configures_runtime_gpgv(monkeypatch: pytest.MonkeyPatch) -> None:
+    with private_workspace() as runtime:
+        gpgv = shutil.which("gpgv", path=runtime.environment["PATH"])
+        assert gpgv is not None and Path(gpgv).is_absolute()
+        monkeypatch.setenv("PATH", str(runtime.root / "absent-bin"))
+        client = Client(runtime, "verifier", "http://127.0.0.1:9", runtime.root / "public.gpg")
+        result = runtime.run(
+            [
+                "env",
+                f"APT_CONFIG={client.config}",
+                "apt-config",
+                "shell",
+                "verifier",
+                "Apt::Key::gpgvcommand",
+            ]
+        )
+        assert result.returncode == 0, result.stderr.decode()
+        assert result.stdout.decode() == f"verifier='{gpgv}'\n"
 
 
 def test_production_apt_install_update_and_rejections() -> None:
