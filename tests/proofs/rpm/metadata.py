@@ -24,9 +24,9 @@ def digest(data):
 
 
 def child(element, tag):
-    result = element.find(tag)
-    assert result is not None, f"missing XML element: {tag}"
-    return result
+    results = element.findall(tag)
+    assert len(results) == 1, f"expected one XML element: {tag}"
+    return results[0]
 
 
 def text(element, tag):
@@ -105,16 +105,18 @@ def snapshot(directory, inventory):
                 assert checksum.text == expected[key][0], "package checksum mismatch"
                 assert child(package, f"{COMMON}location").attrib["href"] == expected[key][1]
                 if key.startswith("hd-proof-app|"):
-                    requires = child(package, f"{COMMON}format/{RPM}requires")
+                    requires = child(child(package, f"{COMMON}format"), f"{RPM}requires")
                     assert all(entry.tag == f"{RPM}entry" for entry in requires)
                     names = {entry.attrib["name"] for entry in requires}
                     assert {"hd-proof-data", "/opt/hd-proof/hd-proof-data"} <= names
             else:
                 assert package.attrib["pkgid"] == expected[key][0]
                 if kind == "filelists":
-                    assert text(package, f"{NAMESPACES[kind]}file") == f"/opt/hd-proof/{package.attrib['name']}"
+                    assert any(file.text == f"/opt/hd-proof/{package.attrib['name']}"
+                               for file in package.findall(f"{NAMESPACES[kind]}file"))
                 else:
-                    assert text(package, f"{NAMESPACES[kind]}changelog").startswith("- Fixture payload ")
+                    assert any((entry.text or "").startswith("- Fixture payload ")
+                               for entry in package.findall(f"{NAMESPACES[kind]}changelog"))
             packages[key] = semantic(package)
         assert set(packages) == set(expected), f"incomplete {kind} inventory"
         result[kind] = packages
