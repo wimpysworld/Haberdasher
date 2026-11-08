@@ -325,15 +325,17 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
     assert state.mapping(steps[0]["with"])["persist-credentials"] == "false"
     publishing = steps[-1]
     assert publishing["name"] == "Publish with explicit policy approval"
-    assert publishing["run"] == (
-        "nix develop --no-write-lock-file --command "
-        "just publish --apply --remote --policy-file publisher-policy.yaml"
+    assert str(publishing["run"]).endswith(
+        "nix develop --no-write-lock-file --command \\\n"
+        '  just publish --apply --remote --policy-file "$policy_file"\n'
     )
     assert all("env" not in step for step in steps[:-1])
     env = state.mapping(publishing["env"])
     assert env["GH_TOKEN"] == "${{ github.token }}"
+    assert env["HD_PUBLISH_POLICY"] == "${{ secrets.HD_PUBLISH_POLICY }}"
     assert "GITHUB_TOKEN" not in env
     assert {name for name in env if name.startswith("HD_")} == {
+        "HD_PUBLISH_POLICY",
         "HD_SIGNING_KEY",
         "HD_CLOUDFLARE_S3_API_ENDPOINT",
         "HD_CLOUDFLARE_ACCESS_KEY_ID",
