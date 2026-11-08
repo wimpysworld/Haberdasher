@@ -59,7 +59,8 @@ def inspect_native(request: dict[str, str]) -> dict[str, object]:
             else []
         )
     if "summary_signature" in request:
-        data = Path(request["summary_signature"]).read_bytes()
+        with Path(request["summary_signature"]).open("rb") as stream:
+            data = stream.read(1024 * 1024 + 1)
         if len(data) > 1024 * 1024:
             raise ValueError("Signature metadata exceeds 1 MiB")
         variant = GLib.Variant.new_from_bytes(

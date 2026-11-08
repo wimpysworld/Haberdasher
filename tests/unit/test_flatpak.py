@@ -3,10 +3,13 @@
 # pyright: reportPrivateUsage=false
 from __future__ import annotations
 
+import importlib.util
 import subprocess
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -44,6 +47,45 @@ POLICY = FormatPolicy(
         ),
     ),
 )
+
+
+@pytest.mark.parametrize("size", [1024 * 1024, 1024 * 1024 + 1])
+def test_native_summary_signature_bounded_read(monkeypatch: pytest.MonkeyPatch, size: int) -> None:
+    glib = MagicMock()
+    variant = glib.Variant.new_from_bytes.return_value
+    variant.is_normal_form.return_value = True
+    variant.lookup_value.return_value = None
+    for name in ("gi", "Flatpak", "Gio", "GLib", "OSTree"):
+        module_name = name if name == "gi" else f"gi.repository.{name}"
+        monkeypatch.setitem(sys.modules, module_name, glib if name == "GLib" else MagicMock())
+    spec = importlib.util.spec_from_file_location(
+        "flatpak_native_test", Path(flatpak.__file__).with_name("flatpak_native.py")
+    )
+    assert spec is not None and spec.loader is not None
+    native = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(native)
+
+    def read(limit: int = -1) -> bytes:
+        assert limit == 1024 * 1024 + 1
+        return b"x" * min(size, limit)
+
+    stream = MagicMock()
+    stream.__enter__.return_value = stream
+    stream.read.side_effect = read
+    open_stream = MagicMock(return_value=stream)
+    monkeypatch.setattr(Path, "open", open_stream)
+    if size > 1024 * 1024:
+        with pytest.raises(ValueError, match="Signature metadata exceeds 1 MiB"):
+            native.inspect_native({"summary_signature": "summary.sig"})
+        glib.Bytes.new.assert_not_called()
+        glib.Variant.new_from_bytes.assert_not_called()
+    else:
+        assert native.inspect_native({"summary_signature": "summary.sig"}) == {"signatures": []}
+        glib.Bytes.new.assert_called_once_with(b"x" * size)
+        glib.Variant.new_from_bytes.assert_called_once()
+    open_stream.assert_called_once_with("rb")
+    stream.read.assert_called_once_with(1024 * 1024 + 1)
+    stream.__exit__.assert_called_once()
 
 
 @pytest.fixture
