@@ -73,6 +73,10 @@ fixture keeper 1 keeper-1
 fixture updateable 1 updateable-1
 fixture updateable 2 updateable-2
 fixture keeper 1 changed
+fixture checksum-probe 1 original
+checksum_source="$PROOF_WORK/source/checksum-probe-1-original.pkg.tar.zst"
+hash "$checksum_source" >"$PROOF_WORK/release.sha256"
+fixture checksum-probe 1 changed
 
 mkdir -p "$PROOF_WORK/identity-root" "$PROOF_WORK/identity-db"
 identity() {
@@ -86,7 +90,10 @@ identity() {
 import_package() {
     local file=$1 expected=$2 target=$3 name version architecture oldname oldversion oldarch digest actual metadata
     actual=$(hash "$file")
-    [[ $actual == "$expected" ]] || return 1
+    if [[ $actual != "$expected" ]]; then
+        printf '%s\n' 'Source checksum mismatch.' >&2
+        return 1
+    fi
     metadata=$(identity "$file") || return 1
     read -r name version architecture <<<"$metadata"
     while read -r oldname oldversion oldarch digest; do
@@ -109,7 +116,21 @@ history_before=$(hash "$PROOF_WORK/history")
 import_package "$PROOF_WORK/source/keeper-1-keeper-1.pkg.tar.zst" "$(hash "$PROOF_WORK/source/keeper-1-keeper-1.pkg.tar.zst")" "$PROOF_WORK/publisher2"
 [[ $(hash "$PROOF_WORK/history") == "$history_before" && ! -e $PROOF_WORK/publisher2/$keeper ]] || proof_fail 'Unchanged import was not a no-op.'
 proof_pass 'Unchanged native identity is a no-op'
-expect_reject 'source checksum mismatch' import_package "$PROOF_WORK/source/keeper-1-changed.pkg.tar.zst" invalid "$PROOF_WORK/publisher2"
+read -r release_checksum <"$PROOF_WORK/release.sha256"
+[[ $release_checksum =~ ^[a-f0-9]{64}$ ]] || proof_fail 'Expected a recorded release SHA256.'
+checksum_identity=$(identity "$checksum_source")
+[[ $checksum_identity == $'checksum-probe\t1-1\tx86_64' ]] || proof_fail 'Unexpected checksum fixture identity.'
+! grep -q '^checksum-probe[[:space:]]' "$PROOF_WORK/history" || proof_fail 'Checksum fixture identity is not fresh.'
+cp "$PROOF_WORK/source/checksum-probe-1-changed.pkg.tar.zst" "$checksum_source"
+[[ $(identity "$checksum_source") == "$checksum_identity" ]] || proof_fail 'Changed checksum fixture is not a valid matching native identity.'
+[[ $(hash "$checksum_source") != "$release_checksum" ]] || proof_fail 'Checksum fixture bytes did not change.'
+outputs_before=$(find "$PROOF_WORK"/{publisher1,publisher2,frozen1,frozen2,live} -type f -exec sha256sum {} + | sort)
+expect_reject 'fresh native identity with changed bytes against recorded release checksum' import_package "$checksum_source" "$release_checksum" "$PROOF_WORK/publisher2"
+grep -qx 'Source checksum mismatch.' "$PROOF_WORK/rejection.log" || proof_fail 'Source rejection did not identify the checksum mismatch.'
+[[ $(hash "$PROOF_WORK/history") == "$history_before" ]] || proof_fail 'Checksum failure advanced identity history.'
+[[ -z $(find "$PROOF_WORK/publisher2" -mindepth 1 -print -quit) ]] || proof_fail 'Checksum failure imported or indexed a package.'
+[[ $(find "$PROOF_WORK"/{publisher1,publisher2,frozen1,frozen2,live} -type f -exec sha256sum {} + | sort) == "$outputs_before" ]] || proof_fail 'Checksum failure changed signing, index or publication state.'
+proof_pass 'Release checksum rejection precedes import, signing, indexing and state advancement'
 expect_reject 'changed bytes for existing identity' import_package "$PROOF_WORK/source/keeper-1-changed.pkg.tar.zst" "$(hash "$PROOF_WORK/source/keeper-1-changed.pkg.tar.zst")" "$PROOF_WORK/publisher2"
 [[ $(vercmp 1-1 1-01) == 0 ]] || proof_fail 'Expected native equivalent release versions.'
 fixture keeper 1 equivalent-release 01
