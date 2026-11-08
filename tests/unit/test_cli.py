@@ -478,6 +478,18 @@ def test_previous_role_omission_fails_closed(
     after = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
     if omit_from_policy:
         ownership = root / "private/ownership.json"
+        previous_owner = state.parse(before[ownership])
+        failed_owner = state.parse(after[ownership])
+        assert previous_owner["status"] == "idle"
+        assert failed_owner["status"] == "active"
+        nonce = failed_owner["nonce"]
+        assert isinstance(nonce, str) and nonce
+        assert nonce != previous_owner["nonce"]
+        assert failed_owner["completion"] == previous_owner["completion"]
+        store = LocalStore(StoragePolicy("local", str(root / "private"), destinations))
+        with pytest.raises(state.StateError, match="An owner already holds publication rights"):
+            state.acquire(store, owner="competing-test")
+        assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == after
         before.pop(ownership)
         after.pop(ownership)
     assert after == before
