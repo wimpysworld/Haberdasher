@@ -1,6 +1,6 @@
 # Alpine APK proof
 
-PASS: all seven WW-374 local criteria passed independent validation on 2026-11-07. This result is not production repository or client compatibility approval.
+The preserved WW-374 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance. Production policy and distribution compatibility remain unapproved.
 
 ## Reproduce
 
@@ -10,7 +10,7 @@ In the Linux Nix development shell, run:
 just proof apk
 ```
 
-[The executable proof](../../tests/proofs/apk.sh) contains the commands and assertions. [The shared helper](../../tests/proofs/common.sh) isolates temporary state and removes disposable keys.
+This command now runs [the preserved shell proof](../../tests/proofs/apk.sh) and `tests/native/test_apk.py`. The historical shell evidence follows. [The shared helper](../../tests/proofs/common.sh) isolates disposable state and keys.
 
 The executed tools were apk-tools **3.0.5** (compiled for **x86_64**), abuild **3.17.0**, GnuPG/gpgsm **2.4.9**, and OpenSSL **3.5.9**. Client commands explicitly select `--arch x86_64`.
 
@@ -46,4 +46,14 @@ Native v2 `Q1` control identity uses SHA1. Compressed-payload `datahash` uses SH
 
 Same-key conversion proves one disposable RSA4096 primary, matching keygrips and public DER across OpenPGP, X.509, and PKCS#8. No production key is used.
 
-Transport is local files, without R2, remote recovery, cache, or domain activation evidence. Follow the [shared production follow-ons](README.md#production-follow-ons): bound the APK adapter to admitted inputs, retained state, and frozen replay. Resolve real-input/SHA1 and declared-client compatibility first. Prove authenticated fresh-client setup over production transport before publishing setup or installation commands.
+## Production adapter and remaining gates
+
+`src/haberdasher/formats/apk.py` implements v2 admission, retained records, RSA256 index signing, unchanged package bytes, and frozen output. The native key basename is `haberdasher.rsa.pub`, distinct from the historical shell fixture basename.
+
+`tests/native/test_apk.py` checks HTTP install/update and strict rejection. `tests/native/test_pipeline.py` fetches the public RSA key, binds its modulus to the independently verified OpenPGP primary, and checks fresh/existing clients after recovery.
+
+Strict installation of unsigned packages depends on the trusted index. Standalone unsigned-package verification still rejects. The client never disables trust. Native SHA1 control identity remains a separate production approval gate.
+
+An empty configured APK role receives the two OpenPGP exports. It receives the native RSA public key only with its first index. See [APK setup](../clients.md#alpine-apk).
+
+Official Alpine clients, real-input policy, public HTTPS/cache behaviour, production permissions, and real R2 recovery remain unqualified. Use the [activation gates](../validation.md#remaining-activation-gates) before public use.

@@ -1,83 +1,98 @@
 # Haberdasher
 
-Haberdasher is Martin's personal tool for publishing prebuilt GitHub Release packages as signed Linux repositories on Cloudflare R2. Native package managers will handle installation and updates, including direct Arch packages without third-party Arch User Repository (AUR) build scripts.
+Haberdasher publishes prebuilt GitHub release packages as signed Linux repositories on Cloudflare R2. It is Martin's personal publisher, not a package builder.
 
-## Status
+> [!IMPORTANT]
+> The publisher passes isolated local tests. Production publication is not activated. Public domains and production client setup remain unqualified.
 
-The pinned Nix environment supplies common development tools and Linux tools for all five planned repository formats. Local repository proofs are separate from the production publisher. Production package collection, signing, publication, and automation are not implemented.
+## Quick start
 
-Five R2 buckets exist with custom domains enabled. Domain activation is unverified. Local read-only requests succeeded for all buckets. Writes and access from GitHub Actions are untested. Client installation instructions are not ready.
-
-| Format | Domain | R2 bucket |
-| --- | --- | --- |
-| `.deb` | `apt.wimpys.world` | `haberdasher-apt` |
-| `.rpm` | `rpm.wimpys.world` | `haberdasher-rpm` |
-| `.apk` | `apk.wimpys.world` | `haberdasher-apk` |
-| `.pkg.tar.zst` | `pkg.wimpys.world` | `haberdasher-pkg` |
-| `.flatpak` | `flatpak.wimpys.world` | `haberdasher-flatpak` |
-
-## Development environment
-
-Enter the pinned shell and check its tools:
+Use the Tailor-managed flake and locked Python environment:
 
 ```sh
-nix develop
+nix develop --no-write-lock-file
+just setup
 just check-tools
-just lint
+just build
 just test
+just lint
+just publish --help
 ```
 
-`just check-tools` reports executable paths from the declared Nix packages, without using inherited host tools. It fails if a required executable is missing. It makes no network requests and does not create keys, configuration, or repositories. Nix can download packages when you enter the shell.
+`just setup` creates the root `.venv` from `uv.lock`. Haberdasher requires Python 3.14 or later and PyYAML 6.0.3 with LibYAML `CSafeLoader`. There is no pure-Python YAML fallback.
 
-Common tools include Bash, GNU utilities, archive tools, jq, curl, OpenSSL, GnuPG (including `gpgsm`), rclone, ShellCheck, shfmt, and nixfmt. The existing gh, just, and actionlint tools remain available.
-
-Linux also supplies `apt-ftparchive`, `dpkg-deb`, `createrepo_c`, `modifyrepo_c`, `rpm`, `rpmsign`, `apk`, `abuild-sign`, `getopt`, `repo-add`, `repo-remove`, `flatpak`, and `ostree`.
-
-The executable check, lint, and local tests passed on `x86_64-linux`. The `aarch64-linux` and `aarch64-darwin` shells passed evaluation only. Darwin supplies common development tools, not repository tools. Publishing requires Linux because the complete native tool set requires Linux. Tool availability does not prove signing or client installation.
-
-`just test` stays fast: it checks tool selection, proof routing, isolation, and cleanup with test doubles, without running native package proofs. `nix flake check` also checks the Nix package selection for each evaluated system and GNU long-option handling on Linux.
-
-Run local proofs separately in the Linux Nix shell, with the native tools above. Use an ordinary user account. The Arch proof currently requires `x86_64`.
+On `x86_64-linux`, run native acceptance separately:
 
 ```sh
 just proof
 just proof apt
 ```
 
-`just proof` defaults to `all`. To select one format, replace `apt` with `rpm`, `arch`, `apk`, or `flatpak`.
+`just proof` runs all five preserved shell proofs and the production adapter tests. A named format runs its shell proof and native tests. Native runtime qualification is `x86_64-linux` only. `aarch64-linux` and `aarch64-darwin` pass evaluation only. Darwin supplies common development tools, not the Linux repository tools.
 
-See the [local proof guide](docs/proofs/README.md) for scope, isolation, per-format evidence, and the proposed production contract. Local proof results do not establish production publisher support.
+## Plan and publish
 
-## Source configuration
-
-Edit `haberdasher.yaml` in the repository root to list GitHub sources as `owner/repo` strings under the single top-level `sources` key. Tailor is the first source. To add another repository, append another `- owner/repo` entry. Keep credentials, runtime state, and manifest state out of this public file. Haberdasher does not yet read this configuration.
+`haberdasher.yaml` selects GitHub sources and optional format settings:
 
 ```yaml
 sources:
   - wimpysworld/tailor
+formats:
+  apt:
+    architectures: [amd64, arm64]
+    suite: stable
+    component: main
+    validity_seconds: 604800
+    renewal_seconds: 172800
 ```
 
-## Planned flow
+The default command plans without storage access or signing:
 
-Upstream projects build packages with tools such as GoReleaser and electron-builder. Haberdasher will:
+```sh
+just publish --plan --config haberdasher.yaml
+```
 
-1. Reconcile releases from explicitly configured sources, not only their latest tags.
-2. Verify assets against release SHA256 checksums and reject changed bytes under an existing package identity.
-3. Preserve a durable manifest and metadata for each repository format.
-4. Upload immutable package objects before entry metadata, with format-specific recovery and protection against concurrent local or CI writers.
+Planning reads GitHub and checksum assets. Supply `GH_TOKEN` or `GITHUB_TOKEN` through the runtime environment. The isolated GitHub configuration does not use a stored personal `gh` login.
 
-Repository signatures establish publisher identity and integrity, not payload safety.
+Publication requires `--apply` and either `--local-root` or `--remote`. Read the [publisher guide](docs/publisher.md) before either write mode.
 
-Shell scripts will use native repository tools. The [proof guide](docs/proofs/README.md#production-follow-ons) names bounded production follow-ons. No Go rewrite or generic plugin framework is planned.
+> [!WARNING]
+> All configured public formats form one publication. With multiple public formats, use `--format all`. A partial update of shared state is not supported.
 
-The Nix flake and lock file pin tools through Tailor conventions. Local runs use Just recipes. A future Determinate Nix GitHub runner will use the same recipes. Triggers will include manual runs and scheduled reconciliation, with optional cross-repository dispatch after asset uploads.
+## Architecture
 
-## Credentials
+A small Python coordinator handles discovery, admission, private state, conditional storage, and recovery. Native tools inspect, index, sign, and verify packages. There is no plugin framework or Go migration.
 
-The R2 environment interface is:
+Haberdasher reconciles releases and late assets, verifies release SHA256 checksums, and derives identity from native metadata. It rejects changed bytes under an accepted identity. Retained native state avoids routine downloads of the historical package pool.
+
+The publisher freezes signed output before public writes. Public keys precede native entries. Each format's inventory follows its entries. Private completion follows all acknowledged writes. Publication is not atomic across objects. Older referenced objects remain available, without deletion or retention changes.
+
+## Repositories and setup
+
+| Format | Intended domain | Public R2 bucket |
+| --- | --- | --- |
+| APT `.deb` | `apt.wimpys.world` | `haberdasher-apt` |
+| RPM `.rpm` | `rpm.wimpys.world` | `haberdasher-rpm` |
+| Arch `.pkg.tar.zst` | `pkg.wimpys.world` | `haberdasher-pkg` |
+| Alpine `.apk` | `apk.wimpys.world` | `haberdasher-apk` |
+| Flatpak `.flatpak` | `flatpak.wimpys.world` | `haberdasher-flatpak` |
+
+Bucket provisioning and earlier read-only access do not prove publication permissions or domain readiness. [Client setup](docs/clients.md) contains post-activation templates, not a claim that these URLs are ready. No separate public website is implemented.
+
+Every configured public role receives `keys/haberdasher.asc` and `keys/haberdasher.gpg`. APK also receives `keys/haberdasher.rsa.pub` with its first native index. Repository signatures prove publisher identity and integrity, not payload safety.
+
+## Credentials and activation
+
+The storage interface remains:
 
 - `HD_CLOUDFLARE_S3_API_ENDPOINT`
 - `HD_CLOUDFLARE_ACCESS_KEY_ID`
 - `HD_CLOUDFLARE_SECRET_ACCESS_KEY`
 
-Local SOPS configuration injects credentials at runtime. GitHub Secrets use the same names. Haberdasher will not decrypt secrets or require global credentials or `HD_CLOUDFLARE_TOKEN_VALUE`.
+Local SOPS configuration supplies credentials at runtime. GitHub Secrets use the same names. Local signing uses `HD_SIGNING_KEY_FILE`. CI signing uses `HD_SIGNING_KEY`. Do not commit credentials or private keys. Haberdasher does not decrypt credential files or use `HD_CLOUDFLARE_TOKEN_VALUE`.
+
+The manual publish workflow remains disabled unless `HD_PUBLISH_ENABLED` is `true`. It also requires the default branch and the `publisher` environment. There is no schedule. [Validation and activation gates](docs/validation.md) separate local evidence from approval-dependent work.
+
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md). Use the pinned Just commands for changes. See the [proof guides](docs/proofs/README.md) for format-specific evidence and limits.

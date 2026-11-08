@@ -1,8 +1,6 @@
 # RPM proof
 
-**SHIP** the bounded WW-372 local proof. **DEFER** production ingestion and
-publication. Independent validation passed all 29 cases on 2026-11-07 as UID
-1000 on `x86_64-linux`.
+The preserved WW-372 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance on `x86_64-linux`. Production activation remains pending.
 
 ## Reproduce
 
@@ -12,12 +10,7 @@ In the project Nix development shell, use an ordinary account:
 just proof rpm
 ```
 
-The independent run used this command from the checkout:
-
-```sh
-TMPDIR=/tmp timeout 900 nix develop "path:$PWD" --command \
-  bash --noprofile --norc -c 'TMPDIR=/tmp just proof rpm'
-```
+This command now runs the preserved shell proof and `tests/native/test_rpm.py`. The shell evidence below remains distinct from production pipeline acceptance.
 
 [The proof](../../tests/proofs/rpm.sh),
 [XML helper](../../tests/proofs/rpm/metadata.py), and
@@ -89,9 +82,12 @@ This proof does not authorise replacing upstream signatures. Defer
 already-signed RPM ingestion until the owner approves a preservation or
 replacement policy.
 
-Bound the adapter to admitted inputs, retained XML, and frozen replay. Follow
-the [shared production follow-ons](README.md#production-follow-ons). Test
-Fedora, RHEL, openSUSE, authenticated public setup, and remote recovery
-separately. Local files prove no production transport, writer exclusion, or
-availability policy. No credentials, production keys, buckets, activation, or
-external writes are involved.
+## Production adapter and remaining gates
+
+`src/haberdasher/formats/rpm.py` implements unsigned-input admission, package signing before indexing, retained XML, output verification, and frozen replay. Already-signed RPMs reject. Trust-policy fields do not qualify upstream signature replacement.
+
+`tests/native/test_rpm.py` checks HTTP install/update, dependencies, retained metadata, and strict package/metadata rejection. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and signer-free recovery.
+
+Package trust applies globally to the selected RPM database. Metadata trust uses a repository-specific keyring. The pinned librepo client needs pre-seeded metadata trust. See [RPM setup](../clients.md#rpm).
+
+Fedora, RHEL, and openSUSE images, public HTTPS/cache behaviour, real R2 recovery, production keys, and hosted permissions remain unqualified. Use the [activation gates](../validation.md#remaining-activation-gates) before external tests.

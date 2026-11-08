@@ -1,8 +1,6 @@
 # Arch local proof
 
-SHIP the bounded local proof for WW-373. Independent validator
-`9cecaf12-b13e-4d9` reports LOCAL CORE PASS with 49 assertions.
-DEFER official Arch distribution compatibility and production availability policy.
+The preserved WW-373 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance. Official Arch distribution compatibility and production delivery remain unqualified.
 
 ## Run and environment
 
@@ -12,7 +10,7 @@ In the Linux Nix development shell, use an ordinary account:
 just proof arch
 ```
 
-The tested platform is x86_64 Linux. Pacman, repo-add, and vercmp use version
+This command now runs the preserved shell proof and `tests/native/test_arch.py`. The historical shell evidence below uses x86_64 Linux. Pacman, repo-add, and vercmp use version
 7.1.0 from this exact Nix build:
 
 ```text
@@ -75,12 +73,12 @@ previous completion inventory.
 Exact frozen replay restores packages, signatures, both archives, and inventory
 without re-signing or deletion.
 
-## Deferred work
+## Production adapter and remaining gates
 
-Bound the future Arch adapter to admitted new packages, verified retained state,
-two-generation tests, explicit output gates, and exact frozen replay.
-Test a declared official Arch client separately, including trust bootstrap,
-installation, update, and file search over the intended transport.
-Resolve HTTP/cache behaviour and split-publication availability before deployment.
-Use the [shared production follow-ons](README.md#production-follow-ons) for these
-separate tasks.
+`src/haberdasher/formats/arch.py` implements admitted new packages, verified retained archives, signature gates, and exact frozen output. `tests/native/test_arch.py` checks HTTP installation, update, file search, dependencies, and rejection under strict trust.
+
+`tests/native/test_pipeline.py` adds real CLI publication, served public keys, fresh/existing clients, no-op, late assets, and recovery without source packages or signing access.
+
+The client `GPGDir` is global to the selected pacman invocation, not a per-repository signer allow-list. [Arch setup](../clients.md#arch) explains the dedicated configuration/root boundary.
+
+Official Arch images, other architectures, public HTTPS/cache behaviour, split-publication availability, and real R2 permissions remain unqualified. Use the [activation gates](../validation.md#remaining-activation-gates) before deployment.

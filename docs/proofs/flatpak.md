@@ -1,7 +1,6 @@
 # Flatpak local proof
 
-**SHIP: bounded local approach. DEFER: production support.** Independent final
-validation passed all 27 records.
+The preserved WW-375 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance. Production source/runtime approval remains pending.
 
 ## Run and boundary
 
@@ -11,9 +10,7 @@ In the project Linux Nix development shell, run:
 just proof flatpak
 ```
 
-The tested boundary is x86_64 Linux, Flatpak 1.18.4, OSTree 2026.2, GnuPG 2.4.9,
-and local `file://` transport. Flatpak 1.18.4 is the minimum tested client,
-not an established compatibility floor.
+This command now runs the preserved shell proof and `tests/native/test_flatpak.py`. The historical shell boundary below is x86_64 Linux, Flatpak 1.18.4, OSTree 2026.2, GnuPG 2.4.9, and `file://` transport. That client version is not an established compatibility floor.
 
 The [proof](../../tests/proofs/flatpak.sh) uses the
 [common isolation helper](../../tests/proofs/common.sh), disposable RSA4096
@@ -78,11 +75,12 @@ Dependency, entry, and inventory interruptions recover exact frozen bytes withou
 re-signing or deletion. Completion follows recovery. Split legacy entries can
 temporarily remove availability. No multi-object atomicity is proved.
 
-## Production decision
+## Production adapter and remaining gates
 
-Defer production transport, older-client/architecture compatibility,
-availability policy, real upstream inputs, and sandbox execution. Bound the
-Flatpak adapter to admitted bundles, retained heads/payload, signed frozen
-output, and exact replay. Use the
-[shared contract and follow-ons](README.md#production-follow-ons) before
-production integration.
+`src/haberdasher/formats/flatpak.py` implements approved bundle admission, retained heads/payload, signed commit/summary output, and exact frozen replay. It rejects signed upstream bundles. It requires explicit source owner, application refs, runtime URL, fingerprint, branch, architecture, remote, refs, and extensions. The collection policy is empty.
+
+`tests/native/test_flatpak.py` checks HTTP search, install/update, commit/summary trust, approved runtime and extension origins, exact deployed commits, and rejection cases. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and source-free/signer-free recovery.
+
+The runtime origin remains separate from the application origin. Arbitrary `RuntimeRepo` selection is not allowed. No production source is automatically added. See [Flatpak setup](../clients.md#flatpak).
+
+Production source/runtime approval, real upstream inputs, public HTTPS/cache behaviour, older clients, other architectures, sandbox execution, and production permissions remain pending. Use the [activation gates](../validation.md#remaining-activation-gates) before public use.

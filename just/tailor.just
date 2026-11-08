@@ -2,13 +2,13 @@
 
 # Run explicitly requested setup for enabled components
 setup:
-    @echo "No setup recipes are enabled."
+    @just _python setup
 
 # Build all enabled ecosystems
 build:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "No build recipes are enabled."
+    just _python build
     project_script='just/project/build.sh'
     for parent in just just/project; do
         if [[ -L "${parent}" || ( -e "${parent}" && ! -d "${parent}" ) ]]; then
@@ -28,7 +28,7 @@ build:
 test:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "No test recipes are enabled."
+    just _python test
     project_script='just/project/test.sh'
     for parent in just just/project; do
         if [[ -L "${parent}" || ( -e "${parent}" && ! -d "${parent}" ) ]]; then
@@ -64,6 +64,7 @@ lint $mode="check":
         echo "No GitHub Actions workflows found. Skipping actionlint."
     }
     check_workflows
+    just _python lint "${mode}"
     project_script='just/project/lint.sh'
     for parent in just just/project; do
         if [[ -L "${parent}" || ( -e "${parent}" && ! -d "${parent}" ) ]]; then

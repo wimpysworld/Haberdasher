@@ -1,81 +1,54 @@
-# Local repository proofs
+# Repository proofs
 
-These local fixtures test native repository updates, signature checks, and interrupted publication. They are not a production publisher or installation instructions for public repositories.
+`just proof` runs two distinct layers: the preserved WW-370 shell proofs and the production Python adapter tests. Both use disposable local fixtures.
 
 ## Run
 
-In the Linux Nix development shell, use an ordinary user account:
+After `just setup`, use an ordinary user in the pinned `x86_64-linux` Nix shell:
 
 ```sh
 just proof
 just proof apt
 ```
 
-The first command selects all five formats. Replace `apt` with `rpm`, `arch`, `apk`, or `flatpak` for one proof. Arch requires `x86_64`.
+The first command selects all formats, plus shared signing, HTTP, storage-client, and pipeline tests. Replace `apt` with `rpm`, `arch`, `apk`, or `flatpak` to select one shell proof and its native adapter tests.
 
-The router clears inherited credentials and uses the pinned tool path. Each proof creates a private temporary workspace with disposable packages, keys, and client configuration. Cleanup removes the workspace and stops its GnuPG agents. APT serves fixtures on loopback. The other proofs use local files. No proof writes to R2.
+The router clears inherited credentials and uses the declared tool path. Private workspaces isolate client configuration, packages, and keys. Cleanup removes private files and stops owned servers and agents. Long temporary paths use a private `/tmp` fallback when GnuPG socket limits require it.
 
-Read the format evidence before making a support claim:
+Native runtime qualification is `x86_64-linux` only. ARM Linux and Darwin pass evaluation only. Official distribution images are not qualified. No proof writes to R2, installs onto the host, or executes an installed application.
 
-- [APT](apt.md)
-- [RPM](rpm.md)
-- [Arch](arch.md)
-- [Alpine APK](apk.md)
-- [Flatpak](flatpak.md)
+## Evidence layers
 
-These independent WW-370 proofs can run in parallel. They do not activate production publication. Individual results and support decisions belong in the format guides.
-
-## Current proof inputs and outputs
-
-The scripts in `tests/proofs/` create their own fixtures, not GitHub downloads. Admission receives a local package path and an expected whole-file SHA256. Negative cases supply a wrong checksum or changed bytes. Flatpak also supplies a fixture owner, asset identity, and expected version.
-
-Each proof reads native metadata. APT uses package, version, and architecture with Debian version comparison. RPM uses name, epoch, version, release, and architecture, with absent epoch normalised to zero. Arch uses package, version, and architecture with `vercmp`. APK extracts package, version, and architecture from native index records for its bounded fixtures. Flatpak checks the full ref, commit, runtime, version, and collection binding, alongside asset history. These checks are not a shared identity implementation.
-
-Retained state differs by format: complete APT package records, RPM repository metadata, signed Arch database/files archives, and a signed APK index. Flatpak retains admission history, expected heads, trust, and native configuration. Its cold restore fetches current-head trees and payload, not only commit metadata. The format guides define the exact retained files and limits.
-
-Each script prepares signed output before local replay. Frozen directories retain the generation's package objects, dependency metadata, and entry files. Proofs use local checksum inventories, byte comparisons, or tree hashes to check published output and retries. RPM records source and signed-package SHA256 separately. Flatpak preserves bundle bytes and commit identity, but adds detached signatures and repository objects. The other proofs preserve admitted package bytes.
-
-Completion is a local final inventory copy or marker after publication. The inventories differ in content and coverage. They are neither a common schema nor the proposed public `haberdasher.json`. Temporary proof state is not durable production recovery state.
-
-## Proposed production input/output contract
-
-This semantic contract is a proposal, not a current API. It does not define a plugin framework or configuration options.
-
-| Item | Proposed input | Required output or rule |
+| Layer | Sources | Scope |
 | --- | --- | --- |
-| Source admission | Verified source repository, release/asset identity, local bytes, and expected SHA256 | Record the source SHA256 before native import. Reject missing checksums and changed source bytes for an existing identity. |
-| Native identity | Package metadata and format-specific comparison rules | Preserve ecosystem version semantics. Do not derive identity from filenames or release tags alone. Record Flatpak refs, commits, runtime, and binding policy. |
-| New packages | Only newly admitted package files, plus accepted asset history | Unchanged input causes no new signing or indexing. Discover assets added to an existing release. Do not require the historical binary pool as routine input. |
-| Retained native state | Verified metadata and native configuration from the completed generation | Retain enough native state for incremental indexing. Record any required Flatpak current-head payload restore and its cost. Reject incomplete state. |
-| Signing and digests | Runtime access to the approved signing identity and an explicit transformation policy | Record source SHA256 separately from published object SHA256. Preserve unchanged bytes where required. Verify native signatures before publication. |
-| Prepared generation | Newly admitted packages and retained state | Freeze exact signed dependency objects, entry files, object paths, sizes, digests, and publication order for retry without re-signing. |
-| Public package inventory | Completed publication and non-secret package/object records | Write one public `haberdasher.json` per bucket. Exclude credentials, private provenance, locks, and pending journals. |
-| Private completion journal | Frozen generation, previous completion, and publication progress | Keep pending state private and durable. Advance completion only after all required writes and checks succeed. |
+| Preserved shell proofs | `tests/proofs/{apt,rpm,arch,apk,flatpak}.sh` | Independent format experiments, local inventories and frozen directories, format-specific trust boundaries |
+| Production adapters | `src/haberdasher/formats/`, `tests/native/test_*.py` | Shared typed records, verified retained state, native signatures, isolated HTTP clients |
+| Complete local pipeline | `tests/native/test_pipeline.py` | Recorded GitHub discovery, real CLI, durable local publication, served public trust, no-op, late assets, signer-free recovery |
 
-Production uses the approved single RSA4096 primary without subkeys across all five formats, with Alpine PKCS#8 conversion. Proof keys are disposable, not production keys.
+Shell proof ledgers are not the publisher's durable schema. Their local inventories are not public `haberdasher.json`. Their original results do not establish production transport or permissions.
 
-Publish immutable packages and dependency objects before format entry files. Write the public inventory last, then record private completion. Retain older objects that published metadata still references. This order does not make an object set atomic. Split entry/signature pairs can cause temporary native-client failure. Production must settle the acceptable retry and availability policy before deployment. No deletion or retention change is authorised.
+The production pipeline fetches both public OpenPGP exports over HTTP and compares full fingerprints with an independently supplied disposable identity. It checks public-only packets and uses the fetched keys for native client trust. APK also checks the served RSA key against that primary. Fresh clients and existing clients check installed records and payloads.
 
-No shared adapter, discovery, storage, or locking service is implemented. Haberdasher does not yet parse releases from `haberdasher.yaml`. Domain activation and publication permissions in continuous integration (CI) remain unverified. Local read access does not establish write access.
+## Format guides
 
-## Production follow-ons
+- [APT](apt.md): scoped trust, expiry, by-hash, and delayed clients.
+- [RPM](rpm.md): package signing, metadata signing, and split pairs.
+- [Arch](arch.md): strict package/database trust and retained archives.
+- [Alpine APK](apk.md): RSA256 index trust and the native SHA1 boundary.
+- [Flatpak](flatpak.md): commit/summary trust, runtime origin, and payload restoration.
 
-These are documentation-only scope estimates, not tracker updates. S means one bounded module change with tests. M means several files in one subsystem, with tests and documentation. Unresolved design starts with an S investigation, not an oversized implementation task.
+## Current production implementation
 
-| Named follow-on | Size | Boundary and completion evidence |
-| --- | --- | --- |
-| GitHub release and asset discovery | M | Read configured sources, reconcile releases and late assets, and test unchanged runs. No signing or storage writes. |
-| Checksum admission | S | Verify discovered assets against release SHA256 records before import. Test missing, mismatched, and replaced assets. |
-| Durable private publisher state | M | Persist accepted asset history, native state, frozen generations, and pending/completed journals. Test restart recovery. Exclude public storage. |
-| Writer exclusion design | S | Select a shared local/CI exclusion mechanism and stale-owner policy. Produce the design and contention test plan. No locking service implementation. |
-| Local/CI writer exclusion | M | Implement the agreed exclusion design. Test contention and stale-owner recovery. Workflow concurrency alone is insufficient. |
-| Immutable R2 object publication | M | Upload and verify package/dependency objects before entries. Reject changed immutable objects. Test with a disposable destination, not production buckets. |
-| Frozen R2 publication recovery | M | Replay one prepared generation after each interrupted phase. Verify digests, inventory-last ordering, and private completion without re-signing or deletion. |
-| Production native adapter, one task per format | M each | Adapt one proof to admitted new inputs and retained native state. Test two generations and exact frozen replay. No shared discovery or locking implementation. |
-| Unproven native compatibility policy, per affected format | S each | Resolve one format's open input, signature, client, or availability decision. Use its guide's evidence gaps. Produce a bounded client test plan. |
-| Native trust bootstrap and compatibility, one task per format | M each | Prove one declared client/architecture over the production transport. Publish a predictable public-key URL. Authenticate bootstrap and test copy-paste setup, install, and update commands. |
-| Public setup page | S | Choose the page location after bootstrap tests. Link the five tested setup guides and verification keys. No DNS changes. |
+The earlier discovery, admission, state, writer exclusion, storage, recovery, native adapter, and public-key follow-ons are implemented. The coordinator is minimal Python with native repository tools, not a shell-only publisher or plugin framework.
 
-The per-format rows describe separate tasks, not one combined estimate. Shared state and publication work precede production integration. Native compatibility investigations precede their affected adapters and setup instructions. Keep the existing pinned Nix/Just path for local processing and Determinate Nix CI.
+`src/haberdasher/core.py` defines records. `discovery.py` and `admission.py` reconcile and verify assets. `state.py`, `storage.py`, and `publish.py` freeze, conditionally publish, and recover generations. All configured public formats share one publication. Multiple configured formats require `--format all`.
 
-Start with discovery and checksum admission. Obtain explicit authority before any production key, domain, bucket, or publication-permission test.
+Exact public-key bytes freeze before public writes. Bootstrap keys precede native entries, inventories follow their format outputs, and private completion follows all acknowledgements. Ownership has no automatic expiry. Unknown writes require stopped-owner evidence, not a timed takeover.
+
+These controls do not provide multi-object atomicity. Older referenced objects remain available. No deletion or retention change is authorised.
+
+## Remaining work
+
+Use [publisher operations](../publisher.md) for the real CLI and policy schema. [Client setup](../clients.md) is the setup document, not a separate implemented website.
+
+Production permission tests, private bucket approval, production key use, protected CI secrets, public HTTPS/cache qualification, and official distribution clients remain approval-dependent. APK SHA1 acceptance and Flatpak source/runtime approval remain pending. See [validation and activation](../validation.md) before any external action.

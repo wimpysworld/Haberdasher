@@ -19,6 +19,8 @@ with pkgs;
   shfmt
   nixfmt
   rclone
+  awscli2
+  miniserve
 ]
 ++ lib.optionals stdenv.hostPlatform.isLinux [
   apt
@@ -28,7 +30,6 @@ with pkgs;
   dnf5
   fakechroot
   fakeroot
-  python3
   apk-tools
   abuild
   getopt
@@ -36,4 +37,8 @@ with pkgs;
   flatpak
   ostree
   shared-mime-info
+  appstream
 ]
+++ lib.optionals (stdenv.hostPlatform.isLinux && builtins.pathExists ./flatpak-metadata.nix) (
+  import ./flatpak-metadata.nix { inherit pkgs; }
+)

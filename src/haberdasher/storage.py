@@ -1,0 +1,501 @@
+"""Conditional local storage and single-request native R2 transport."""
+
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import tempfile
+from collections.abc import Generator
+from pathlib import Path
+from typing import cast
+from urllib.parse import urlsplit
+
+from haberdasher.config import StoragePolicy
+from haberdasher.core import (
+    ObjectRef,
+    ObjectStat,
+    WriteReceipt,
+    canonical_json,
+    integer,
+    safe_key,
+    safe_path,
+    sha256_file,
+    text,
+)
+from haberdasher.runtime import STORAGE_VARIABLES, Runtime, RuntimeFailure
+
+MAX_OBJECT_SIZE = 5368709120
+
+
+class StorageError(RuntimeError):
+    pass
+
+
+class PreconditionFailed(StorageError):
+    pass
+
+
+class UnknownWrite(StorageError):
+    """The caller must resolve its durable write intent before further writes.
+
+    An observation proves bytes only, not which generation wrote them. Absence
+    does not prove failure: a request can commit after the verification read.
+    """
+
+    def __init__(self, observation: WriteReceipt | None = None) -> None:
+        super().__init__("Write outcome needs generation evidence before recovery")
+        self.observation = observation
+
+
+def _check_ref(ref: ObjectRef) -> None:
+    if not isinstance(ref, ObjectRef):
+        raise ValueError("Expected an object reference")
+    ref.__post_init__()
+    if ref.size >= MAX_OBJECT_SIZE:
+        raise ValueError("Objects at or above 5 GiB are not supported")
+
+
+def _check_private_read(key: str, max_bytes: int) -> None:
+    safe_key(key)
+    integer(max_bytes, "private read limit", 1)
+    if max_bytes >= MAX_OBJECT_SIZE:
+        raise ValueError("Private read limits at or above 5 GiB are not supported")
+
+
+def _etag(value: str) -> str:
+    text(value, "ETag")
+    if "*" in value or "," in value:
+        raise ValueError("Expected one exact ETag, not a wildcard or list")
+    return value
+
+
+def _verify(ref: ObjectRef, source: Path) -> None:
+    if sha256_file(source) != (ref.sha256, ref.size):
+        raise StorageError("Object bytes differ from the expected SHA256 or size")
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _mkdir(path: Path) -> None:
+    safe_path(path.parent, path.name)
+    if not path.exists():
+        _mkdir(path.parent)
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            safe_path(path.parent, path.name)
+        _sync_directory(path.parent)
+    if not path.is_dir():
+        raise ValueError("Storage parent must be a directory")
+
+
+@contextlib.contextmanager
+def _temporary(parent: Path) -> Generator[Path]:
+    safe_path(parent, "validation")
+    descriptor, name = tempfile.mkstemp(prefix=".hd-store-", dir=parent)
+    os.close(descriptor)
+    path = Path(name)
+    try:
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _snapshot(ref: ObjectRef, source: Path, destination: Path) -> None:
+    source = safe_path(source.parent, source.name)
+    if not source.is_file() or source.stat().st_size != ref.size:
+        raise StorageError("Source size or file type differs from the expected object")
+    with source.open("rb") as incoming, destination.open("wb") as outgoing:
+        remaining = ref.size
+        while remaining:
+            block = incoming.read(min(remaining, 1024 * 1024))
+            if not block:
+                raise StorageError("Source was truncated")
+            outgoing.write(block)
+            remaining -= len(block)
+        if incoming.read(1):
+            raise StorageError("Source grew during the copy")
+        outgoing.flush()
+        os.fsync(outgoing.fileno())
+    _verify(ref, destination)
+
+
+def _install(source: Path, destination: Path) -> None:
+    destination = safe_path(destination.parent, destination.name)
+    if destination.exists() and not destination.is_file():
+        raise ValueError("Destination must be a regular file")
+    os.replace(source, destination)
+    _sync_directory(destination.parent)
+
+
+class LocalStore:
+    """Directory storage for isolated execution, not an R2 emulator.
+
+    Each bucket directory is the process lock, without a public lock file.
+    The inode revision changes with replacement, including identical bytes.
+    """
+
+    def __init__(self, storage: StoragePolicy) -> None:
+        if storage.backend != "local" or storage.private is None:
+            raise ValueError("Local storage requires a private destination")
+        storage.__post_init__()
+        self._roots = {role: Path(path) for role, path in storage.public.items()}
+        self._roots["private"] = Path(storage.private)
+        for root in self._roots.values():
+            _mkdir(root)
+        self._uncertain = False
+
+    def _path(self, ref: ObjectRef) -> Path:
+        _check_ref(ref)
+        try:
+            return safe_path(self._roots[ref.bucket_role], ref.key)
+        except KeyError:
+            raise ValueError("No destination for this bucket role") from None
+
+    @contextlib.contextmanager
+    def _locked(self, ref: ObjectRef) -> Generator[Path]:
+        self._path(ref)
+        descriptor = os.open(
+            self._roots[ref.bucket_role], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield self._path(ref)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _stat(path: Path) -> ObjectStat | None:
+        if not path.exists():
+            return None
+        if not path.is_file():
+            raise StorageError("Stored object is not a regular file")
+        return LocalStore._revision(path.stat())
+
+    @staticmethod
+    def _revision(info: os.stat_result) -> ObjectStat:
+        revision = canonical_json(
+            [info.st_dev, info.st_ino, info.st_ctime_ns, info.st_mtime_ns, info.st_size]
+        )
+        return ObjectStat(hashlib.sha256(revision).hexdigest(), info.st_size)
+
+    def stat(self, ref: ObjectRef) -> ObjectStat | None:
+        with self._locked(ref) as path:
+            return self._stat(path)
+
+    def download(self, ref: ObjectRef, destination: Path) -> ObjectStat:
+        destination = safe_path(destination.parent, destination.name).absolute()
+        if any(destination == root or root in destination.parents for root in self._roots.values()):
+            raise ValueError("Downloads must not bypass conditional storage writes")
+        with self._locked(ref) as path:
+            result = self._stat(path)
+            if result is None:
+                raise FileNotFoundError("Stored object is absent")
+            with _temporary(destination.parent) as temporary:
+                _snapshot(ref, path, temporary)
+                _install(temporary, destination)
+            return result
+
+    def read_private(self, key: str, *, max_bytes: int) -> tuple[bytes, ObjectStat] | None:
+        _check_private_read(key, max_bytes)
+        root = self._roots["private"]
+        path = safe_path(root, key)
+        with contextlib.ExitStack() as stack:
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            stack.callback(os.close, directory)
+            fcntl.flock(directory, fcntl.LOCK_EX)
+            try:
+                for part in key.split("/")[:-1]:
+                    directory = os.open(
+                        part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory
+                    )
+                    stack.callback(os.close, directory)
+                descriptor = os.open(
+                    path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+                )
+            except FileNotFoundError:
+                return None
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise StorageError("Stored object is not a regular file")
+                before = self._revision(info)
+                if before.size > max_bytes:
+                    raise StorageError("Private object exceeds the read limit")
+                data = stream.read(before.size + 1)
+                after = self._revision(os.fstat(stream.fileno()))
+            if (
+                len(data) != before.size
+                or after != before
+                or self._stat(safe_path(root, key)) != before
+            ):
+                raise StorageError("Private object changed during read")
+            return data, before
+
+    def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
+        return self._write(ref, source, None)
+
+    def replace(self, ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
+        return self._write(ref, source, _etag(expected_etag))
+
+    def _write(self, ref: ObjectRef, source: Path, expected: str | None) -> WriteReceipt:
+        if self._uncertain:
+            raise UnknownWrite()
+        with self._locked(ref) as path:
+            current = self._stat(path)
+            if (
+                current is not None
+                if expected is None
+                else current is None or current.etag != expected
+            ):
+                raise PreconditionFailed("Local object precondition failed")
+            _mkdir(path.parent)
+            with _temporary(path.parent) as temporary:
+                _snapshot(ref, source, temporary)
+                try:
+                    _install(temporary, path)
+                    _verify(ref, path)
+                    result = self._stat(path)
+                    if result is None:
+                        raise StorageError("Written object is absent")
+                except OSError, StorageError:
+                    self._uncertain = True
+                    raise UnknownWrite() from None
+            return WriteReceipt(result.etag, ref.sha256, ref.size)
+
+
+class R2Store:
+    def __init__(self, storage: StoragePolicy, *, runtime: Runtime) -> None:
+        if storage.backend != "r2" or storage.private is None:
+            raise ValueError("R2 storage requires a private bucket")
+        storage.__post_init__()
+        self._buckets = dict(storage.public)
+        self._buckets["private"] = storage.private
+        self._runtime = runtime
+        environment = runtime.environment_for("storage")
+        if any(not environment.get(name) for name in STORAGE_VARIABLES):
+            raise ValueError("The three approved storage environment variables are required")
+        self._endpoint = text(environment[STORAGE_VARIABLES[0]], "storage endpoint")
+        parsed = urlsplit(self._endpoint)
+        if (
+            not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or (
+                parsed.scheme != "https"
+                and not (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1"})
+            )
+        ):
+            raise ValueError("Storage requires HTTPS, or numeric loopback for isolated tests")
+        self._uncertain = False
+
+    def _bucket(self, ref: ObjectRef) -> str:
+        _check_ref(ref)
+        try:
+            return self._buckets[ref.bucket_role]
+        except KeyError:
+            raise ValueError("No bucket for this role") from None
+
+    def _aws(
+        self, operation: str, parameters: dict[str, str | int] | None, *extra: str
+    ) -> list[str]:
+        return [
+            "aws",
+            "s3api",
+            operation,
+            *(["--cli-input-json", canonical_json(parameters).decode()] if parameters else []),
+            "--endpoint-url",
+            self._endpoint,
+            "--region",
+            "auto",
+            "--output",
+            "json",
+            "--no-cli-pager",
+            "--no-cli-auto-prompt",
+            *extra,
+        ]
+
+    @staticmethod
+    def _response(data: bytes) -> dict[str, object]:
+        try:
+            value: object = json.loads(data)
+        except ValueError, UnicodeError:
+            raise StorageError("Invalid native storage response") from None
+        if not isinstance(value, dict):
+            raise StorageError("Expected a native storage response object")
+        return cast(dict[str, object], value)
+
+    @staticmethod
+    def _response_etag(value: dict[str, object]) -> str:
+        try:
+            return _etag(text(value.get("ETag"), "response ETag"))
+        except ValueError:
+            raise StorageError("Missing or invalid response ETag") from None
+
+    def stat(self, ref: ObjectRef) -> ObjectStat | None:
+        return self._head(self._bucket(ref), ref.key)
+
+    def _head(self, bucket: str, key: str) -> ObjectStat | None:
+        command = self._aws("head-object", {"Bucket": bucket, "Key": key})
+        result = self._runtime.run(command, env_kind="storage")
+        if result.returncode:
+            if re.search(
+                rb"\((?:404|NoSuchKey|NotFound)\) when calling the HeadObject operation",
+                result.stderr,
+            ):
+                return None
+            raise StorageError("Native object stat failed")
+        value = self._response(result.stdout)
+        size = value.get("ContentLength")
+        if type(size) is not int or size < 0:
+            raise StorageError("Missing or invalid object size")
+        return ObjectStat(self._response_etag(value), size)
+
+    def download(self, ref: ObjectRef, destination: Path) -> ObjectStat:
+        bucket = self._bucket(ref)
+        destination = safe_path(destination.parent, destination.name)
+        before = self.stat(ref)
+        if before is None:
+            raise FileNotFoundError("Stored object is absent")
+        if before.size != ref.size:
+            raise StorageError("Stored object size differs from the expected size")
+        with _temporary(destination.parent) as temporary:
+            result = self._runtime.run(
+                [
+                    "rclone",
+                    "copyto",
+                    f":s3:{bucket}/{ref.key}",
+                    str(temporary),
+                    "--s3-provider=Cloudflare",
+                    "--s3-env-auth",
+                    "--s3-region=auto",
+                    f"--s3-endpoint={self._endpoint}",
+                    "--s3-no-check-bucket",
+                    "--ignore-times",
+                    "--no-traverse",
+                    "--retries=1",
+                    "--low-level-retries=1",
+                ],
+                env_kind="storage",
+            )
+            if result.returncode:
+                raise StorageError("Native object download failed")
+            _verify(ref, temporary)
+            if self.stat(ref) != before:
+                raise StorageError("Object changed during download")
+            with temporary.open("rb") as stream:
+                os.fsync(stream.fileno())
+            _install(temporary, destination)
+        return before
+
+    def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
+        return self._write(ref, source, None)
+
+    def replace(self, ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
+        return self._write(ref, source, _etag(expected_etag))
+
+    def read_private(self, key: str, *, max_bytes: int) -> tuple[bytes, ObjectStat] | None:
+        _check_private_read(key, max_bytes)
+        bucket = self._buckets["private"]
+        before = self._head(bucket, key)
+        if before is None:
+            return None
+        if before.size > max_bytes:
+            raise StorageError("Private object exceeds the read limit")
+        data = b""
+        if before.size:
+            with _temporary(self._runtime.root / "tmp") as temporary:
+                result = self._runtime.run(
+                    self._aws(
+                        "get-object",
+                        None,
+                        f"--bucket={bucket}",
+                        f"--key={key}",
+                        f"--if-match={before.etag}",
+                        f"--range=bytes=0-{before.size - 1}",
+                        str(temporary),
+                    ),
+                    env_kind="storage",
+                )
+                if result.returncode:
+                    raise StorageError("Native private object read failed")
+                value = self._response(result.stdout)
+                if (
+                    self._response_etag(value) != before.etag
+                    or type(value.get("ContentLength")) is not int
+                    or value["ContentLength"] != before.size
+                    or temporary.stat().st_size != before.size
+                ):
+                    raise StorageError("Private object changed during read")
+                with temporary.open("rb") as stream:
+                    data = stream.read(before.size + 1)
+                if len(data) != before.size:
+                    raise StorageError("Private object changed during read")
+        if self._head(bucket, key) != before:
+            raise StorageError("Private object changed during read")
+        return data, before
+
+    def _observe(self, ref: ObjectRef) -> WriteReceipt | None:
+        try:
+            with _temporary(self._runtime.root / "tmp") as temporary:
+                result = self.download(ref, temporary)
+                return WriteReceipt(result.etag, ref.sha256, ref.size)
+        except OSError, StorageError, RuntimeFailure, ValueError:
+            return None
+
+    def _write(self, ref: ObjectRef, source: Path, expected: str | None) -> WriteReceipt:
+        if self._uncertain:
+            raise UnknownWrite()
+        parameters: dict[str, str | int] = {
+            "Bucket": self._bucket(ref),
+            "Key": ref.key,
+            "ContentLength": ref.size,
+            "ContentType": ref.content_type,
+            "CacheControl": ref.cache_control,
+        }
+        parameters["IfNoneMatch" if expected is None else "IfMatch"] = (
+            "*" if expected is None else expected
+        )
+        with _temporary(self._runtime.root / "tmp") as temporary:
+            _snapshot(ref, source, temporary)
+            command = self._aws("put-object", parameters, "--body", str(temporary))
+            try:
+                result = self._runtime.run(command, env_kind="storage")
+            except RuntimeFailure:
+                self._uncertain = True
+                raise UnknownWrite(self._observe(ref)) from None
+            if result.returncode:
+                if re.search(
+                    rb"\((?:412|PreconditionFailed|409|ConditionalRequestConflict)\) when calling the PutObject operation",
+                    result.stderr,
+                ):
+                    raise PreconditionFailed("Remote object precondition failed")
+                self._uncertain = True
+                raise UnknownWrite(self._observe(ref))
+            try:
+                etag = self._response_etag(self._response(result.stdout))
+            except StorageError:
+                self._uncertain = True
+                raise UnknownWrite(self._observe(ref)) from None
+            observed = self._observe(ref)
+            if observed is None or observed.etag != etag:
+                self._uncertain = True
+                raise UnknownWrite(observed)
+            return observed
+
+
+type Store = LocalStore | R2Store

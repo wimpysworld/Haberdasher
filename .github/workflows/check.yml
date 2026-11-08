@@ -1,0 +1,29 @@
+name: Check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: "DeterminateSystems/nix-installer-action@\
+          c5a866b6ab867e88becbed4467b93592bce69f8a" # v21
+        with:
+          determinate: true
+      - name: Set up the pinned Python environment
+        run: nix develop --no-write-lock-file --command just setup
+      - name: Check tools, build, test, and lint
+        run: >-
+          nix develop --no-write-lock-file --command
+          just check-tools build test lint
+      - name: Run shell proofs and native acceptance
+        run: nix develop --no-write-lock-file --command just proof

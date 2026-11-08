@@ -38,7 +38,7 @@ start_server() {
     # The pipe waits for server readiness without a timer or network probe.
     coproc APT_SERVER { exec python3 "$helper/server.py" "$w/http" "$w/port" "$w/requests"; }
     server_pid=$APT_SERVER_PID
-    read -r ready <&"${APT_SERVER[0]}"
+    read -r -t 10 ready <&"${APT_SERVER[0]}" || proof_fail 'Loopback readiness deadline expired.'
     [[ $ready == ready ]] || proof_fail 'Loopback server did not start.'
     port=$(cat "$w/port")
 }
@@ -92,8 +92,10 @@ import_asset() {
     printf '%s %s %s %s %s %s\n' "$package" "$version" "$arch" "$digest" "$size" "$filename" >>"$w/state/assets"
 }
 
+generation=0
 freeze() {
     local expiry=$2 frozen="$w/frozen-$1" index digest file
+    generation=$((generation + 1))
     mkdir -p "$frozen/dists/proof/main/binary-amd64" "$frozen/pool"
     index="$frozen/dists/proof/main/binary-amd64"
     while read -r _ _ _ digest _ _; do
@@ -125,6 +127,7 @@ freeze() {
         fi
     done
     cp "$w/publisher/pool/"*.deb "$frozen/pool/"
+    python3 "$helper/server.py" --mtime "$generation" "$frozen"
     (
         cd "$frozen"
         find pool -type f | sort
@@ -156,7 +159,7 @@ publish() {
             head -c 17 "$frozen/$file" >"$target/$file"
             return 75
         fi
-        cp "$frozen/$file" "$target/$file"
+        cp -p "$frozen/$file" "$target/$file"
     done <"$frozen/order"
     (cd "$target" && sha256sum -c "$frozen/inventory") >/dev/null || return 1
     if [[ $interrupt == inventory ]]; then
@@ -338,8 +341,9 @@ installed 2.0 second
 proof_pass 'Native apt-get upgraded to 2.0 and changed the installed payload'
 
 mkdir -p "$w/http/delayed/dists/proof/main"
-ln -s "$w/http/live/dists/proof/main/binary-amd64" "$w/http/delayed/dists/proof/main/binary-amd64"
-ln -s "$w/http/live/pool" "$w/http/delayed/pool"
+# Miniserve rejects every symlink. Copy these disposable aliases as bytes.
+cp -a "$w/http/live/dists/proof/main/binary-amd64" "$w/http/delayed/dists/proof/main/binary-amd64"
+cp -a "$w/http/live/pool" "$w/http/delayed/pool"
 cp "$w/frozen-1/dists/proof/InRelease" "$w/http/delayed/dists/proof/InRelease"
 client delayed delayed
 apt_run update

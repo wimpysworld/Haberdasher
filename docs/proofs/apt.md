@@ -1,7 +1,6 @@
 # APT proof
 
-CORE PASS: independent WW-371 validation passed on 2026-11-07. This local
-result is not production repository support.
+The preserved WW-371 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance. Neither result activates public service.
 
 ## Reproduce
 
@@ -11,9 +10,7 @@ In the Linux Nix development shell, use an ordinary user account:
 just proof apt
 ```
 
-The [executable proof](../../tests/proofs/apt.sh) contains the native commands
-and assertions. The [common helper](../../tests/proofs/common.sh) isolates
-credentials, client state, and disposable keys.
+This command runs the [preserved shell proof](../../tests/proofs/apt.sh) and `tests/native/test_apt.py`. The historical shell evidence follows. `tests/native/test_pipeline.py` separately checks the complete production path.
 
 Executed tools were APT **3.3.5**, dpkg **1.23.7**, and GnuPG **2.4.9**. Scope
 is only `proof/main/amd64`, with data-only synthetic DEBs. Noble and Trixie
@@ -79,12 +76,18 @@ server and both owned agents, then removes private files.
 unverifiable frozen output. **DEFER** production support and compatibility
 approval.
 
-The [loopback helper](../../tests/proofs/apt/server.py) ignores
-`If-Modified-Since`. Local HTTP proves acquisition paths, not production
+The [loopback helper](../../tests/proofs/apt/server.py) uses shared `miniserve`
+with deterministic, distinct modification times and normal conditional `304`
+and range `206` responses. It does not delete request headers.
+Local HTTP proves acquisition paths and these request semantics, not production
 cache behaviour, remote recovery, or crash durability.
 
-Recommend a small production adapter from admitted new inputs and retained
-native state. Follow the [shared production follow-ons][follow-ons] before
-public setup instructions.
+## Production adapter and remaining gates
 
-[follow-ons]: README.md#production-follow-ons
+`src/haberdasher/formats/apt.py` uses admitted new inputs and retained package records. It signs both Release forms and publishes immutable by-hash dependencies before entries. Default validity is seven days, with renewal within two days, configurable through `haberdasher.yaml`.
+
+`tests/native/test_apt.py` covers HTTP install/update, strict rejection, delayed by-hash clients, retained records, and expiry. `tests/native/test_pipeline.py` adds real CLI publication, served-key trust, late assets, no-op, and exact recovery without sources or signing access.
+
+Expired frozen APT output rejects replay. A new preparation requires an explicit operator decision, not a silent re-sign. Public HTTPS/cache behaviour, official distribution clients, production permissions, and arm64 runtime remain unqualified.
+
+Use [client setup](../clients.md#apt) and [activation gates](../validation.md#remaining-activation-gates) before public use.

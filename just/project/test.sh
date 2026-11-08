@@ -9,7 +9,8 @@ printf '#!/bin/sh\nexit 99\n' >"$fixture/tool"
 chmod +x "$fixture/tool"
 for tool in bash env cat cp mv rm mkdir mktemp chmod sha256sum sort timeout id \
     find xargs grep sed tar gzip xz zstd bsdtar \
-    jq curl openssl gpg gpgv gpgsm gpgconf shellcheck shfmt nixfmt rclone gh just actionlint; do
+    jq curl openssl gpg gpgv gpgsm gpgconf shellcheck shfmt nixfmt rclone gh just actionlint \
+    python3 tailor-python uv ruff basedpyright aws miniserve; do
     ln -s "$fixture/tool" "$fixture/bin/$tool"
 done
 
@@ -31,8 +32,8 @@ done
 printf 'PASS: both Linux systems require repository tools.\n'
 
 for tool in apt-ftparchive apt-get apt-config dpkg dpkg-deb dpkg-query createrepo_c modifyrepo_c \
-    rpm rpmsign rpmbuild rpmkeys dnf5 fakechroot fakeroot python3 \
-    apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp flatpak ostree update-mime-database; do
+    rpm rpmsign rpmbuild rpmkeys dnf5 fakechroot fakeroot \
+    apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp flatpak ostree update-mime-database appstreamcli; do
     ln -s "$fixture/tool" "$fixture/bin/$tool"
 done
 for system in x86_64-linux aarch64-linux; do
@@ -40,7 +41,7 @@ for system in x86_64-linux aarch64-linux; do
 done
 printf 'PASS: both Linux systems accept all tools without executing them.\n'
 
-for tool in bash openssl gpgsm gpgconf getopt dnf5 fakechroot fakeroot python3 apt-get rpmkeys vercmp update-mime-database; do
+for tool in bash openssl gpgsm gpgconf getopt dnf5 fakechroot fakeroot python3 tailor-python uv ruff basedpyright aws miniserve appstreamcli apt-get rpmkeys vercmp update-mime-database; do
     rm "$fixture/bin/$tool"
     if check x86_64-linux; then
         printf 'FAIL: inherited PATH hid missing %s.\n' "$tool" >&2
@@ -88,13 +89,26 @@ router() {
             "$bash_path" just/project/proof.sh "$2"
     ) >"$fixture/output" 2>&1
 }
-for system in x86_64-linux aarch64-linux; do
-    router "$system" all
-    [[ $(cat "$fixture/project/dispatch.log") == $'apt.sh\nrpm.sh\narch.sh\napk.sh\nflatpak.sh' ]]
-    rm "$fixture/project/dispatch.log"
-done
+mkdir -p "$fixture/project/.venv/bin"
+cat >"$fixture/project/.venv/bin/python" <<'EOF'
+#!/bin/sh
+[ -z "${HD_SIGNING_KEY_FILE+x}${HD_CLOUDFLARE_ACCESS_KEY_ID+x}${UNRELATED_SENTINEL+x}" ] || exit 1
+[ "$HOME" = "$TMPDIR" ] && [ -d "$HOME" ] || exit 1
+printf '%s\n' "$*" >native.log
+EOF
+chmod +x "$fixture/project/.venv/bin/python"
+router x86_64-linux all
+[[ $(cat "$fixture/project/dispatch.log") == $'apt.sh\nrpm.sh\narch.sh\napk.sh\nflatpak.sh' ]]
+[[ $(cat "$fixture/project/native.log") == '-m pytest -p no:cacheprovider tests/native/test_apt.py tests/native/test_rpm.py tests/native/test_arch.py tests/native/test_apk.py tests/native/test_flatpak.py tests/native/test_signing.py tests/native/test_http.py tests/native/test_storage_clients.py tests/native/test_pipeline.py' ]]
+rm "$fixture/project/dispatch.log"
+if router aarch64-linux all; then
+    printf 'FAIL: unqualified native architecture accepted.\n' >&2
+    exit 1
+fi
+grep -q 'not qualified on aarch64-linux' "$fixture/output"
 router x86_64-linux apt
 [[ $(cat "$fixture/project/dispatch.log") == apt.sh ]]
+[[ $(cat "$fixture/project/native.log") == '-m pytest -p no:cacheprovider tests/native/test_apt.py' ]]
 rm "$fixture/project/dispatch.log"
 if router x86_64-linux unknown; then
     printf 'FAIL: unknown proof format accepted.\n' >&2
@@ -116,6 +130,22 @@ if router x86_64-linux apt; then
 fi
 grep -q 'proof script is not available' "$fixture/output"
 printf 'PASS: proof routing checks formats, Linux, isolation, and missing scripts.\n'
+
+cp just/project.just "$fixture/project/justfile"
+cat >"$fixture/project/.venv/bin/python" <<'EOF'
+#!/bin/sh
+printf '<%s>\n' "$@" >publish.log
+EOF
+(
+    cd "$fixture/project"
+    env -i PATH="$PATH" just publish
+    [[ $(cat publish.log) == $'<-m>\n<haberdasher>' ]]
+    literal="path with spaces;\$(touch unexpected)"
+    env -i PATH="$PATH" just publish --config "$literal" --plan
+    [[ $(cat publish.log) == $'<-m>\n<haberdasher>\n<--config>\n'"<$literal>"$'\n<--plan>' ]]
+    [[ ! -e unexpected ]]
+)
+printf 'PASS: publish defaults to no arguments and preserves literal argument boundaries.\n'
 
 cat >"$fixture/helpers/gpgconf" <<'EOF'
 #!/bin/sh

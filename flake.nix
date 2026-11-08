@@ -26,8 +26,8 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          tools = import ./nix/tools.nix { inherit pkgs; };
-          names = map (package: package.pname) tools;
+          tools = (import ./nix/tools.nix { inherit pkgs; }) ++ import ./nix/python.nix { inherit pkgs; };
+          names = map pkgs.lib.getName tools;
           linuxTools = [
             "apt"
             "dpkg"
@@ -36,7 +36,6 @@
             "dnf5"
             "fakechroot"
             "fakeroot"
-            "python3"
             "apk-tools"
             "abuild"
             "getopt"
@@ -44,23 +43,41 @@
             "flatpak"
             "ostree"
             "shared-mime-info"
+            "appstream"
           ];
         in
         assert builtins.all (name: builtins.elem name names == pkgs.stdenv.hostPlatform.isLinux) linuxTools;
+        assert builtins.all (name: builtins.elem name names) [
+          "python3"
+          "uv"
+          "ruff"
+          "basedpyright"
+          "awscli2"
+          "miniserve"
+        ];
         {
-          tools = pkgs.runCommand "haberdasher-tools-test" { nativeBuildInputs = [ pkgs.bash ]; } ''
-            mkdir -p just/project tests/proofs
-            cp ${./just/project/tools.sh} just/project/tools.sh
-            cp ${./just/project/proof.sh} just/project/proof.sh
-            cp ${./tests/proofs/common.sh} tests/proofs/common.sh
-            bash ${./just/project/test.sh}
-            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-              test "$(${pkgs.getopt}/bin/getopt --options h --longoptions help -- --help)" = " --help --"
-              test -x ${pkgs.shared-mime-info}/bin/update-mime-database
-              test -f ${pkgs.shared-mime-info}/share/mime/mime.cache
-            ''}
-            touch "$out"
-          '';
+          tools =
+            pkgs.runCommand "haberdasher-tools-test"
+              {
+                nativeBuildInputs = [
+                  pkgs.bash
+                  pkgs.just
+                ];
+              }
+              ''
+                mkdir -p just/project tests/proofs
+                cp ${./just/project.just} just/project.just
+                cp ${./just/project/tools.sh} just/project/tools.sh
+                cp ${./just/project/proof.sh} just/project/proof.sh
+                cp ${./tests/proofs/common.sh} tests/proofs/common.sh
+                bash ${./just/project/test.sh}
+                ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                  test "$(${pkgs.getopt}/bin/getopt --options h --longoptions help -- --help)" = " --help --"
+                  test -x ${pkgs.shared-mime-info}/bin/update-mime-database
+                  test -f ${pkgs.shared-mime-info}/share/mime/mime.cache
+                ''}
+                touch "$out"
+              '';
         }
       );
       packages = forAllSystems (
@@ -83,17 +100,15 @@
             pkgs.gh
             pkgs.just
           ]
-          ++ import ./nix/tools.nix { inherit pkgs; };
+          ++ import ./nix/tools.nix { inherit pkgs; }
+          ++ import ./nix/loader.nix { inherit pkgs; };
         in
         {
           default = pkgs.mkShell {
             shellHook = import ./nix/hooks.nix { inherit pkgs; };
             HABERDASHER_TOOL_PATH = pkgs.lib.makeBinPath projectTools;
             HABERDASHER_TOOL_SYSTEM = system;
-            packages =
-              projectTools
-              ++ (if tailorPkgs ? tailor then [ tailorPkgs.tailor ] else [ ])
-              ++ import ./nix/loader.nix { inherit pkgs; };
+            packages = projectTools ++ (if tailorPkgs ? tailor then [ tailorPkgs.tailor ] else [ ]);
           };
         }
         //
