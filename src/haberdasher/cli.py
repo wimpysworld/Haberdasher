@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import stat
 import sys
 import uuid
 from collections.abc import Sequence
@@ -81,6 +82,17 @@ def _validate(args: Arguments) -> None:
         raise ValueError("Generation ID must be one path component")
 
 
+def _checkout_root(path: Path) -> Path | None:
+    for directory in (path, *path.parents):
+        try:
+            mode = (directory / ".git").lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+            return directory
+    return None
+
+
 def _policy(args: Arguments) -> Policy:
     policy = load_policy(args.policy_file)
     if args.format != "all" and policy.storage.public:
@@ -102,10 +114,13 @@ def _policy(args: Arguments) -> Policy:
                 raise ValueError("Local storage must not use symlinks")
         root = root.resolve()
         working_path = Path.cwd().resolve()
+        caller_checkout = _checkout_root(working_path) or working_path
+        source_checkout = _checkout_root(Path(__file__).resolve().parent)
         if (
             root == Path.home()
             or root in Path.home().parents
-            or root.is_relative_to(working_path)
+            or root.is_relative_to(caller_checkout)
+            or (source_checkout is not None and root.is_relative_to(source_checkout))
             or working_path.is_relative_to(root)
         ):
             raise ValueError("Use a disposable local root outside the checkout and home root")

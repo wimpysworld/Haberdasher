@@ -87,8 +87,21 @@ def test_remote_denied_before_credentials_or_workspace(policy: list[str]) -> Non
 
 @pytest.mark.parametrize(
     "destination",
-    ["ancestor", "grandparent", "checkout", "child", "alias", "alias-child", "home", "root"],
+    [
+        "ancestor",
+        "grandparent",
+        "checkout",
+        "child",
+        "sibling",
+        "source",
+        "source-child",
+        "alias",
+        "alias-child",
+        "home",
+        "root",
+    ],
 )
+@pytest.mark.parametrize("marker_kind", ["file", "directory", "symlink"])
 @pytest.mark.parametrize(
     "mode",
     [
@@ -102,21 +115,41 @@ def test_local_root_denied_before_workspace_store_or_key(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     destination: str,
+    marker_kind: str,
     mode: list[str],
 ) -> None:
     checkout = tmp_path / "parent/checkout"
-    checkout.mkdir(parents=True)
+    docs = checkout / "docs"
+    docs.mkdir(parents=True)
+    source_checkout = tmp_path / "source-checkout"
+    module = source_checkout / "src/haberdasher/cli.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    module_alias = tmp_path / "module-alias.py"
+    module_alias.symlink_to(module)
+    monkeypatch.setattr(cli, "__file__", str(module_alias))
+    for boundary in (checkout, source_checkout):
+        marker = boundary / ".git"
+        if marker_kind == "file":
+            marker.write_text("gitdir: must-not-open\n")
+        elif marker_kind == "directory":
+            marker.mkdir()
+        else:
+            marker.symlink_to(tmp_path / "must-not-follow")
     home = tmp_path / "home"
     home.mkdir()
     alias = tmp_path / "alias"
     alias.symlink_to(checkout, target_is_directory=True)
-    monkeypatch.chdir(alias)
+    monkeypatch.chdir(alias / "docs")
     monkeypatch.setenv("HOME", str(home))
     roots = {
         "ancestor": checkout.parent,
         "grandparent": tmp_path,
         "checkout": checkout,
-        "child": checkout / "store",
+        "child": docs / "store",
+        "sibling": checkout / "store",
+        "source": source_checkout,
+        "source-child": source_checkout / "store",
         "alias": alias,
         "alias-child": alias / "store",
         "home": home,
@@ -124,6 +157,10 @@ def test_local_root_denied_before_workspace_store_or_key(
     }
     before = set(tmp_path.rglob("*"))
     with (
+        patch.object(Path, "open", side_effect=AssertionError("file opened")),
+        patch.object(cli, "_evidence", side_effect=AssertionError("evidence opened")),
+        patch.object(state, "acquire", side_effect=AssertionError("ownership acquired")),
+        patch.object(state, "recover_owner", side_effect=AssertionError("ownership recovered")),
         patch.object(cli, "load_config", side_effect=AssertionError("config opened")),
         patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
         patch.object(cli, "LocalStore", side_effect=AssertionError("storage opened")),
@@ -133,6 +170,53 @@ def test_local_root_denied_before_workspace_store_or_key(
         assert cli.main([*mode, "--local-root", str(roots[destination])]) == 1
     error = capsys.readouterr().err
     assert ("symlinks" if "alias" in destination else "disposable local root") in error
+    assert set(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("destination", ["cwd", "child", "sibling", "site-packages", "nearest"])
+def test_local_root_uses_nearest_markers_or_packaged_cwd_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, destination: str
+) -> None:
+    working_path = tmp_path / "work"
+    working_path.mkdir()
+    site_packages = tmp_path / "installed/lib/python3.14/site-packages"
+    module = site_packages / "haberdasher/cli.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    monkeypatch.chdir(working_path)
+    monkeypatch.setattr(cli, "__file__", str(module))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    roots = {
+        "cwd": working_path,
+        "child": working_path / "store",
+        "sibling": tmp_path / "store",
+        "site-packages": site_packages / "store",
+    }
+    if destination == "nearest":
+        (tmp_path / ".git").mkdir()
+        (working_path / ".git").symlink_to(tmp_path / "must-not-follow")
+        (site_packages / ".git").touch()
+        roots["nearest"] = tmp_path / "store"
+    root = roots[destination]
+    before = set(tmp_path.rglob("*"))
+    with (
+        patch.object(Path, "open", side_effect=AssertionError("file opened")),
+        patch.object(cli, "load_config", return_value=Config(("synthetic/test",))) as config,
+        patch.object(cli, "private_workspace") as workspace,
+        patch.object(cli, "LocalStore") as store,
+        patch.object(publish, "reconcile", return_value=publish.RunResult(None, False, 0)) as run,
+    ):
+        result = cli.main(["--apply", "--local-root", str(root)])
+    if destination in ("cwd", "child"):
+        assert result == 1
+        config.assert_not_called()
+        workspace.assert_not_called()
+        store.assert_not_called()
+        run.assert_not_called()
+    else:
+        assert result == 0
+        run.assert_called_once()
+        assert run.call_args.args[1].storage.private == str(root / "private")
     assert set(tmp_path.rglob("*")) == before
 
 
