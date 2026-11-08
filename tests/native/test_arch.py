@@ -18,10 +18,10 @@ from haberdasher.admission import AdmissionFailure, admit
 from haberdasher.config import FormatPolicy
 from haberdasher.core import AdmittedAsset, PreparedFormat, RetainedFormat, sha256_file
 from haberdasher.formats import arch
-from haberdasher.runtime import private_workspace
+from haberdasher.runtime import Runtime, private_workspace
 from haberdasher.signing import signing_session
 from tests.native.fixtures.arch import client, client_keyring, fixture
-from tests.native.test_signing import agent_pid, stopped
+from tests.native.test_signing import agent_pid, agent_socketdir, stopped
 from tests.support.http import serve
 from tests.support.keys import disposable_key, run
 
@@ -79,18 +79,7 @@ def test_client_keyring_socket_paths(socket_bytes: int | None) -> None:
                 assert (f"{key.fingerprint}:6:".encode() in trust) == (pacman is trusted)
             for failure in (False, True):
                 pid = agent_pid(runtime, trusted.keyring)
-                socketdir = Path(
-                    run(
-                        runtime,
-                        "gpgconf",
-                        "--homedir",
-                        str(trusted.keyring),
-                        "--list-dirs",
-                        "socketdir",
-                    )
-                    .decode()
-                    .strip()
-                )
+                socketdir = agent_socketdir(runtime, trusted.keyring)
                 assert (socketdir / "S.gpg-agent.browser").is_socket()
                 if failure:
                     with pytest.raises(RuntimeError):
@@ -98,13 +87,21 @@ def test_client_keyring_socket_paths(socket_bytes: int | None) -> None:
                 else:
                     trusted.checked("--version")
                 stopped(pid)
+                assert not (socketdir / "S.gpg-agent.browser").exists()
+                if socketdir != trusted.keyring:
+                    assert not socketdir.exists()
+                assert (trusted.keyring / "pubring.gpg").is_file()
                 os.kill(unrelated_pid, 0)
             for error in (ValueError, SystemExit):
                 with pytest.raises(error, match="injected"):
                     with client_keyring(runtime, trusted.keyring):
                         pid = agent_pid(runtime, trusted.keyring)
+                        socketdir = agent_socketdir(runtime, trusted.keyring)
                         raise error("injected")
                 stopped(pid)
+                assert not (socketdir / "S.gpg-agent.browser").exists()
+                if socketdir != trusted.keyring:
+                    assert not socketdir.exists()
             alias = root / "alias"
             alias.symlink_to(Path(short), target_is_directory=True)
             with pytest.raises(ValueError), client_keyring(runtime, alias):
@@ -113,6 +110,56 @@ def test_client_keyring_socket_paths(socket_bytes: int | None) -> None:
         assert all(not home.exists() for home in homes)
         assert unrelated.read_text() == "keep"
         os.kill(unrelated_pid, 0)
+
+
+@pytest.mark.parametrize("failure", [None, "kill", "query", "remove"])
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_client_keyring_external_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None, body_fails: bool
+) -> None:
+    runtime = Runtime(tmp_path / "owned", environ={"PATH": ""})
+    home = runtime.root / "p0000"
+    home.mkdir(mode=0o700)
+    keyring = home / "pubring.gpg"
+    keyring.write_bytes(b"synthetic")
+    socketdir = tmp_path / "owned-sockets"
+    socketdir.mkdir()
+    sentinel = tmp_path / "unrelated"
+    sentinel.write_text("keep")
+    commands: list[list[str]] = []
+
+    def fake(argv: Sequence[str], **_kwargs: object) -> CompletedProcess[bytes]:
+        commands.append(list(argv))
+        assert list(argv[:3]) == ["gpgconf", "--homedir", str(home)]
+        stage = {"--kill": "kill", "--list-dirs": "query", "--remove-socketdir": "remove"}[argv[3]]
+        if stage == "remove" and failure != stage:
+            socketdir.rmdir()
+        return CompletedProcess(argv, int(stage == failure), os.fsencode(socketdir) + b"\n", b"")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime, "run", fake)
+            try:
+                with client_keyring(runtime, home):
+                    if body_fails:
+                        raise ValueError("injected")
+            except RuntimeError:
+                assert failure is not None
+            except ValueError:
+                assert body_fails and failure is None
+            else:
+                assert failure is None and not body_fails
+        expected = ["--kill"]
+        if failure != "kill":
+            expected.append("--list-dirs")
+            if failure != "query":
+                expected.append("--remove-socketdir")
+        assert [argv[3] for argv in commands] == expected
+        assert socketdir.exists() == (failure is not None)
+        assert keyring.read_bytes() == b"synthetic"
+        assert sentinel.read_text() == "keep"
+    finally:
+        runtime.close()
 
 
 def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:

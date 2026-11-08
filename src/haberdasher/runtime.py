@@ -221,6 +221,21 @@ class Runtime:
                 if stream is not None:
                     stream.close()
 
+    def cleanup_gnupg(
+        self, home: Path, *, timeout: float = 120
+    ) -> subprocess.CompletedProcess[bytes]:
+        command = ["gpgconf", "--homedir", str(home)]
+        result = self.run([*command, "--kill", "all"], timeout=timeout)
+        if result.returncode:
+            return result
+        result = self.run([*command, "--list-dirs", "socketdir"], timeout=timeout)
+        if result.returncode:
+            return result
+        # Removal can fail on read-only /run even when sockets use the homedir.
+        if Path(os.fsdecode(result.stdout).rstrip("\n")) != home:
+            return self.run([*command, "--remove-socketdir"], timeout=timeout)
+        return result
+
     def close(self) -> None:
         if self._closed:
             return
@@ -229,9 +244,7 @@ class Runtime:
         self._children.clear()
         if shutil.which("gpgconf", path=self._path):
             with contextlib.suppress(RuntimeFailure):
-                self.run(
-                    ["gpgconf", "--homedir", str(self.root / "gnupg"), "--kill", "all"], timeout=10
-                )
+                self.cleanup_gnupg(self.root / "gnupg", timeout=10)
         self._closed = True
         self._github.clear()
         self._storage.clear()

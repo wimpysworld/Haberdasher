@@ -345,8 +345,9 @@ def signing_session(
             yield session
         finally:
             session._active = False  # pyright: ignore[reportPrivateUsage]
-            command = ["gpgconf", "--homedir", str(session.gnupghome), "--kill", "all"]
             try:
-                _checked(runtime, command)
+                if runtime.cleanup_gnupg(session.gnupghome).returncode:
+                    raise SigningFailure("Native signing command failed")
             except RuntimeFailure, SigningFailure:
-                _checked(workspace, command)
+                if workspace.cleanup_gnupg(session.gnupghome).returncode:
+                    raise SigningFailure("Native signing command failed") from None

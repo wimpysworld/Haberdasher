@@ -4,6 +4,7 @@ import select
 import signal
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -271,6 +272,52 @@ else:
                 os.close(descriptor)
     finally:
         runtime.close()
+
+
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("failure", [None, "kill", "query", "remove", "start"])
+def test_close_cleans_only_owned_socketdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, external: bool, failure: str | None
+) -> None:
+    runtime = Runtime(tmp_path / "owned", environ={"PATH": "", "GH_TOKEN": "synthetic"})
+    home = runtime.root / "gnupg"
+    socketdir = tmp_path / "owned-sockets" if external else home
+    socketdir.mkdir(exist_ok=True)
+    sentinel = tmp_path / "unrelated"
+    sentinel.write_text("keep")
+    commands: list[list[str]] = []
+
+    def run(argv: Sequence[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        commands.append(list(argv))
+        assert argv[:3] == ["gpgconf", "--homedir", str(home)]
+        if failure == "start":
+            raise RuntimeFailure("Could not start native command")
+        stage = {"--kill": "kill", "--list-dirs": "query", "--remove-socketdir": "remove"}[argv[3]]
+        code = int(stage == failure)
+        if stage == "remove" and not code:
+            socketdir.rmdir()
+        return subprocess.CompletedProcess(argv, code, os.fsencode(socketdir) + b"\n", b"")
+
+    def which(_command: str, *, path: str) -> str:
+        return "/gpgconf"
+
+    with monkeypatch.context() as patch:
+        patch.setattr("haberdasher.runtime.shutil.which", which)
+        patch.setattr(runtime, "run", run)
+        runtime.close()
+        runtime.close()
+    expected = [["--kill", "all"]]
+    if failure not in {"kill", "start"}:
+        expected.append(["--list-dirs", "socketdir"])
+        if failure != "query" and external:
+            expected.append(["--remove-socketdir"])
+    assert [command[3:] for command in commands] == expected
+    assert socketdir.exists() == (not external or failure is not None)
+    assert home.is_dir()
+    assert sentinel.read_text() == "keep"
+    assert "GH_TOKEN" not in runtime.environment_for("github")
+    with pytest.raises(RuntimeFailure, match="closed"):
+        runtime.run([sys.executable])
 
 
 def test_private_parent_guards(tmp_path: Path) -> None:

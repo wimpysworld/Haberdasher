@@ -26,6 +26,14 @@ def agent_pid(runtime: Runtime, home: Path) -> int:
     return int(next(line[2:] for line in response.splitlines() if line.startswith(b"D ")))
 
 
+def agent_socketdir(runtime: Runtime, home: Path) -> Path:
+    return Path(
+        os.fsdecode(
+            run(runtime, "gpgconf", "--homedir", str(home), "--list-dirs", "socketdir")
+        ).rstrip("\n")
+    )
+
+
 def stopped(pid: int) -> None:
     try:
         descriptor = os.pidfd_open(pid)
@@ -35,6 +43,28 @@ def stopped(pid: int) -> None:
         assert select.select([descriptor], [], [], 5)[0], "Owned agent did not stop"
     finally:
         os.close(descriptor)
+
+
+def test_runtime_native_socket_cleanup() -> None:
+    with private_workspace() as unrelated, private_workspace() as runtime:
+        unrelated_home = unrelated.root / "gnupg"
+        unrelated_pid = agent_pid(unrelated, unrelated_home)
+        unrelated_socketdir = agent_socketdir(unrelated, unrelated_home)
+        home = runtime.root / "gnupg"
+        sentinel = home / "keep"
+        sentinel.write_text("keep")
+        pid = agent_pid(runtime, home)
+        socketdir = agent_socketdir(runtime, home)
+        assert (socketdir / "S.gpg-agent.browser").is_socket()
+        runtime.close()
+        runtime.close()
+        stopped(pid)
+        assert not (socketdir / "S.gpg-agent.browser").exists()
+        if socketdir != home:
+            assert not socketdir.exists()
+        assert sentinel.read_text() == "keep"
+        os.kill(unrelated_pid, 0)
+        assert (unrelated_socketdir / "S.gpg-agent.browser").is_socket()
 
 
 @pytest.mark.parametrize("link_kind,mode", [("directory", 0o400), ("file", 0o600)])
@@ -119,7 +149,9 @@ def test_native_signatures_exports_and_same_rsa(
                 if path.is_file() or path.is_dir():
                     assert path.stat().st_mode & 0o777 == (0o700 if path.is_dir() else 0o600), path
             pid = agent_pid(runtime, home)
+            socketdir = agent_socketdir(runtime, home)
         assert not home.parent.exists()
+        assert not socketdir.exists()
         stopped(pid)
         with pytest.raises(SigningFailure, match="closed"):
             signer.alpine_key()
@@ -188,6 +220,7 @@ def test_long_socket_path_and_exception_cleanup(key: DisposableKey) -> None:
         long_parent.mkdir(mode=0o700)
         with private_workspace(long_parent) as nested:
             home: Path | None = None
+            socketdir: Path | None = None
             pid: int | None = None
             with pytest.raises(ValueError, match="injected"):
                 with signing_session(
@@ -196,9 +229,11 @@ def test_long_socket_path_and_exception_cleanup(key: DisposableKey) -> None:
                     home = signer.gnupghome
                     assert len(os.fsencode(home / "S.gpg-agent.browser")) < 107
                     pid = agent_pid(runtime, home)
+                    socketdir = agent_socketdir(runtime, home)
                     raise ValueError("injected")
-            assert home is not None and pid is not None
+            assert home is not None and pid is not None and socketdir is not None
             assert not home.parent.exists()
+            assert not socketdir.exists()
             stopped(pid)
             assert long_parent.exists()
 
@@ -215,7 +250,9 @@ with private_workspace() as runtime:
         result = runtime.run(["gpg-connect-agent", "--homedir", str(signer.gnupghome), "GETINFO pid", "/bye"])
         if result.returncode: raise RuntimeError("agent query failed")
         pid = int(next(line[2:] for line in result.stdout.splitlines() if line.startswith(b"D ")))
-        print(json.dumps([str(runtime.root), str(signer.gnupghome.parent), pid]), flush=True)
+        sockets = runtime.run(["gpgconf", "--homedir", str(signer.gnupghome), "--list-dirs", "socketdir"])
+        if sockets.returncode: raise RuntimeError("socket query failed")
+        print(json.dumps([str(runtime.root), str(signer.gnupghome.parent), pid, sockets.stdout.decode().strip()]), flush=True)
         signal.pause()
 """
     process = subprocess.Popen(
@@ -227,11 +264,12 @@ with private_workspace() as runtime:
     try:
         assert process.stdout is not None
         assert select.select([process.stdout], [], [], 30)[0], "No signing readiness"
-        root, signing_root, pid = json.loads(process.stdout.readline())
+        root, signing_root, pid, socketdir = json.loads(process.stdout.readline())
         process.send_signal(sig)
         _, stderr = process.communicate(timeout=15)
         assert process.returncode == 128 + sig, stderr.decode()
         assert not Path(root).exists() and not Path(signing_root).exists()
+        assert not Path(socketdir).exists()
         stopped(pid)
         os.kill(unrelated_pid, 0)
         assert key.key_file.exists()

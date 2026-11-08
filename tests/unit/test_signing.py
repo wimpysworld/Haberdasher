@@ -1,11 +1,12 @@
 import os
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from haberdasher.core import atomic_write, safe_path
-from haberdasher.runtime import Runtime, private_workspace
+from haberdasher.runtime import Runtime, RuntimeFailure, private_workspace
 from haberdasher.signing import (
     MAX_KEY_BYTES,
     SigningFailure,
@@ -340,6 +341,67 @@ def test_missing_or_invalid_signature_preserves_output(
         assert not list(runtime.root.glob("signature-*"))
         with pytest.raises(ValueError, match="armour"):
             session.sign_file(source, output, clear=True, armour=False)
+
+
+@pytest.mark.parametrize("failure", [None, "kill", "query", "remove", "start"])
+@pytest.mark.parametrize("fallback_fails", [False, True])
+def test_session_socket_cleanup_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None, fallback_fails: bool
+) -> None:
+    with private_workspace() as runtime:
+        socketdir = tmp_path / "owned-sockets"
+        socketdir.mkdir()
+        commands: list[tuple[Path, list[str]]] = []
+        home: Path | None = None
+        signer: SigningSession | None = None
+
+        def run(
+            runner: Runtime, argv: Sequence[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
+            commands.append((runner.root, list(argv)))
+            assert home is not None and argv[:3] == ["gpgconf", "--homedir", str(home)]
+            stage = {"--kill": "kill", "--list-dirs": "query", "--remove-socketdir": "remove"}[
+                argv[3]
+            ]
+            fail = (runner is runtime or fallback_fails) and failure in {stage, "start"}
+            if fail and failure == "start":
+                raise RuntimeFailure("Could not start native command")
+            if stage == "remove" and not fail and socketdir.exists():
+                socketdir.rmdir()
+            return subprocess.CompletedProcess(argv, int(fail), os.fsencode(socketdir) + b"\n", b"")
+
+        def gpg(_session: SigningSession, *args: str, data: bytes | None = None) -> bytes:
+            if "--list-keys" in args or "--list-secret-keys" in args:
+                return listing(secret="--list-secret-keys" in args)
+            return b""
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Runtime, "run", run)
+            patch.setattr(SigningSession, "_gpg", gpg)
+            error = RuntimeFailure if failure == "start" else SigningFailure
+            try:
+                with signing_session(
+                    runtime, expected_fingerprint=FINGERPRINT, key_data=b"synthetic"
+                ) as signer:
+                    home = signer.gnupghome
+            except error:
+                assert failure is not None and fallback_fails
+            else:
+                assert failure is None or not fallback_fails
+        assert home is not None and not home.parent.exists()
+        assert socketdir.exists() == (failure is not None and fallback_fails)
+        expected = ["--kill"]
+        if failure not in {"kill", "start"}:
+            expected.append("--list-dirs")
+            if failure != "query":
+                expected.append("--remove-socketdir")
+        assert [argv[3] for root, argv in commands if root == runtime.root] == expected
+        if failure is not None:
+            fallback = [argv[3] for root, argv in commands if root == home.parent]
+            assert fallback[: len(expected)] == expected
+        assert signer is not None
+        with pytest.raises(SigningFailure, match="closed"):
+            signer.alpine_key()
 
 
 def test_reject_invalid_fingerprint_before_import() -> None:

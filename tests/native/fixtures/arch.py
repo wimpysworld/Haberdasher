@@ -86,7 +86,9 @@ def client_keyring(runtime: Runtime, home: Path | None = None) -> Generator[Path
         yield home
     finally:
         safe_path(runtime.root, str(home.relative_to(runtime.root)))
-        run(runtime, "gpgconf", "--homedir", str(home), "--kill", "all")
+        result = runtime.cleanup_gnupg(home)
+        if result.returncode:
+            raise RuntimeError(f"Synthetic keyring cleanup failed: {result.stderr.decode()}")
 
 
 @dataclass
