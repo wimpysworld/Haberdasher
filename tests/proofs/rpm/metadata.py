@@ -10,6 +10,12 @@ from pathlib import Path
 
 REPO = "{http://linux.duke.edu/metadata/repo}"
 COMMON = "{http://linux.duke.edu/metadata/common}"
+RPM = "{http://linux.duke.edu/metadata/rpm}"
+NAMESPACES = {
+    "primary": COMMON,
+    "filelists": "{http://linux.duke.edu/metadata/filelists}",
+    "other": "{http://linux.duke.edu/metadata/other}",
+}
 TYPES = ("primary", "filelists", "other")
 
 
@@ -29,10 +35,10 @@ def text(element, tag):
     return result
 
 
-def identity(package, primary=False):
-    version = child(package, "{*}version")
-    name = text(package, f"{COMMON}name") if primary else package.attrib["name"]
-    arch = text(package, f"{COMMON}arch") if primary else package.attrib["arch"]
+def identity(package, kind):
+    version = child(package, f"{NAMESPACES[kind]}version")
+    name = text(package, f"{COMMON}name") if kind == "primary" else package.attrib["name"]
+    arch = text(package, f"{COMMON}arch") if kind == "primary" else package.attrib["arch"]
     return "|".join((name, str(int(version.attrib.get("epoch", "0"))),
                      version.attrib["ver"], version.attrib["rel"], arch))
 
@@ -45,6 +51,7 @@ def semantic(element):
 def documents(directory):
     root = Path(directory)
     repomd = ET.parse(root / "repodata/repomd.xml")  # noqa: S314 - local fixture
+    assert repomd.getroot().tag == f"{REPO}repomd", "invalid repomd root"
     records = {}
     for entry in repomd.getroot().findall(f"{REPO}data"):
         kind = entry.attrib["type"]
@@ -65,9 +72,12 @@ def documents(directory):
         assert digest(opened) == checksum.text, f"{kind} open checksum mismatch"
         assert len(opened) == int(text(entry, f"{REPO}open-size"))
         document = ET.fromstring(opened)  # noqa: S314 - locally generated fixture
-        assert document.tag.rsplit("}", 1)[-1] == {
+        namespace = NAMESPACES[kind]
+        root_name = {
             "primary": "metadata", "filelists": "filelists", "other": "otherdata"
         }[kind]
+        assert document.tag == f"{namespace}{root_name}", f"invalid {kind} root"
+        assert all(package.tag == f"{namespace}package" for package in document)
         assert int(document.attrib["packages"]) == len(document)
         records[kind] = (entry, path, document)
     assert set(records) == set(TYPES), "missing retained XML type"
@@ -86,7 +96,7 @@ def snapshot(directory, inventory):
     for kind, (_, _, document) in records.items():
         packages = {}
         for package in document:
-            key = identity(package, kind == "primary")
+            key = identity(package, kind)
             assert key not in packages, f"duplicate {kind} identity"
             assert key in expected, f"unexpected {kind} identity: {key}"
             if kind == "primary":
@@ -95,15 +105,16 @@ def snapshot(directory, inventory):
                 assert checksum.text == expected[key][0], "package checksum mismatch"
                 assert child(package, f"{COMMON}location").attrib["href"] == expected[key][1]
                 if key.startswith("hd-proof-app|"):
-                    requires = child(package, "{*}format/{*}requires")
+                    requires = child(package, f"{COMMON}format/{RPM}requires")
+                    assert all(entry.tag == f"{RPM}entry" for entry in requires)
                     names = {entry.attrib["name"] for entry in requires}
                     assert {"hd-proof-data", "/opt/hd-proof/hd-proof-data"} <= names
             else:
                 assert package.attrib["pkgid"] == expected[key][0]
                 if kind == "filelists":
-                    assert text(package, "{*}file") == f"/opt/hd-proof/{package.attrib['name']}"
+                    assert text(package, f"{NAMESPACES[kind]}file") == f"/opt/hd-proof/{package.attrib['name']}"
                 else:
-                    assert text(package, "{*}changelog").startswith("- Fixture payload ")
+                    assert text(package, f"{NAMESPACES[kind]}changelog").startswith("- Fixture payload ")
             packages[key] = semantic(package)
         assert set(packages) == set(expected), f"incomplete {kind} inventory"
         result[kind] = packages
