@@ -23,7 +23,7 @@ from tests.support.native import NativeClient
 
 
 def policy() -> FormatPolicy:
-    return FormatPolicy("apt", architectures=("amd64", "arm64"), suite="proof")
+    return FormatPolicy("apt", architectures=("amd64", "arm64"), suite="stable")
 
 
 def build(
@@ -100,7 +100,7 @@ class Client:
             client.path(relative).mkdir(parents=True, exist_ok=True)
         client.path("root/var/lib/dpkg/status").touch()
         client.path("config/sources.list").write_text(
-            f"deb [arch=amd64 signed-by={keyring}] {url} proof main\n"
+            f"deb [arch=amd64 signed-by={keyring}] {url} stable main\n"
         )
         self.config = client.path("config/apt.conf")
         dpkg = shutil.which("dpkg", path=runtime.environment["PATH"])

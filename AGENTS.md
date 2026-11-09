@@ -26,8 +26,11 @@ Haberdasher is a personal-use publisher for prebuilt GitHub release assets from 
 - Use `just plan` for a read-only plan, without storage changes or signing.
 - Use `just publish` to publish `haberdasher.yaml` to R2, and `just unlock` to delete stale locks.
   Keep these recipes free of arguments.
-- Keep all publisher configuration, including storage buckets, in `haberdasher.yaml`.
-  Do not add a separate policy file or approval gates.
+- Keep `haberdasher.yaml` to a list of GitHub repositories, for example `sources: [wimpysworld/tailor]`.
+  Do not add per-project settings. Haberdasher must handle dozens of projects with different release layouts.
+- Derive formats from asset types, and architectures from package metadata.
+  Verify a cosign bundle when a release has one. Keep bucket names and public URLs in code.
+- Do not add a separate policy file or approval gates.
 - Publish all configured formats as one global publication.
   Preserve previously published formats.
 - Verify release checksums before importing packages.

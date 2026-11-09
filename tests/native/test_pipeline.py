@@ -22,7 +22,7 @@ from urllib.request import urlopen
 
 import pytest
 
-from haberdasher import cli, publish, state
+from haberdasher import cli, discovery, publish, state
 from haberdasher.config import (
     Config,
     FormatPolicy,
@@ -37,8 +37,6 @@ from haberdasher.core import (
     RetainedFormat,
     VerifiedAsset,
     WriteReceipt,
-    canonical_json,
-    json_value,
     sha256_file,
 )
 from haberdasher.runtime import Runtime, private_workspace
@@ -104,17 +102,18 @@ class RecordedGitHub:
         contents["SHA256SUMS"] = sums
         rows: list[dict[str, object]] = []
         for index, (name, data) in enumerate(contents.items(), 1):
-            rows.append(
-                {
-                    "id": 999 if name == "SHA256SUMS" else index,
-                    "name": name,
-                    "size": len(data),
-                    "state": "uploaded",
-                    "updated_at": "2026-01-01T00:00:00Z",
-                    "browser_download_url": f"https://example.invalid/{name}",
-                    "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
-                }
-            )
+            row: dict[str, object] = {
+                "id": 999 if name == "SHA256SUMS" else index,
+                "name": name,
+                "size": len(data),
+                "state": "uploaded",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "browser_download_url": f"https://example.invalid/{name}",
+            }
+            # A late upload has neither a checksum entry nor a GitHub digest, so it stays pending.
+            if name == "SHA256SUMS" or index <= self.checksummed:
+                row["digest"] = "sha256:" + hashlib.sha256(data).hexdigest()
+            rows.append(row)
         return rows, contents
 
     def record_native(self, argv: Sequence[str], input: bytes | None = None) -> None:
@@ -160,6 +159,13 @@ class RecordedGitHub:
         else:
             value = release
         return CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
+
+
+def use_policy(monkeypatch: pytest.MonkeyPatch, policy: FormatPolicy) -> None:
+    def format_policy(self: Config, name: str) -> FormatPolicy:
+        return policy
+
+    monkeypatch.setattr(Config, "format_policy", format_policy)
 
 
 def apply_cli(
@@ -563,24 +569,20 @@ def test_recorded_pipeline_and_full_rerun(
                     ),
                 ),
             )
-        config = Config(("wimpysworld/fixture",), {name: format_policy})
+        config = Config(("wimpysworld/fixture",))
+        if name == "flatpak":
+            # Flatpak needs per-project settings, so discovery skips it. Exercise the adapter
+            # in process with the loopback runtime, never through the CLI subprocess.
+            use_policy(monkeypatch, format_policy)
+            monkeypatch.setattr(discovery, "UNSUPPORTED_SUFFIXES", {})
+            monkeypatch.setattr(
+                discovery, "PACKAGE_SUFFIXES", (*discovery.PACKAGE_SUFFIXES, ".flatpak")
+            )
         policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
         monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
         (fixtures.root / "work").mkdir()
         config_file = fixtures.root / "work/haberdasher.yaml"
-        configured = {"architectures": json_value(format_policy.architectures)}
-        if name == "apt":
-            configured["suite"] = format_policy.suite
-        trust = {
-            key: value
-            for key, value in state.mapping(json_value(format_policy.trust)).items()
-            if value not in (None, False, [])
-        }
-        if trust:
-            configured["trust"] = trust
-        config_file.write_bytes(
-            canonical_json({"sources": config.sources, "formats": {name: configured}})
-        )
+        config_file.write_text("sources: [wimpysworld/fixture]\n")
         arguments = ["publish", "--local-root", str(local_root)]
 
         @contextmanager
@@ -590,7 +592,7 @@ def test_recorded_pipeline_and_full_rerun(
                 yield runtime
 
         def reconcile() -> publish.RunResult:
-            if not interrupted:
+            if not interrupted and name != "flatpak":
                 return apply_cli(
                     recorded,
                     fixtures.root,
@@ -729,7 +731,8 @@ def test_public_bootstrap_interruption_converges_with_a_full_rerun(
                     raise RuntimeError("synthetic bootstrap interruption")
                 return super().create(ref, source)
 
-        config = Config(("wimpysworld/fixture",), {"apt": apt.policy()})
+        config = Config(("wimpysworld/fixture",))
+        assert config.format_policy("apt") == apt.policy()
         policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
         monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
         with private_workspace() as runtime:

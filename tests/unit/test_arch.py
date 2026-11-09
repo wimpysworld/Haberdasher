@@ -241,7 +241,9 @@ def test_inspect_aarch64_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     item = inspected(native, runtime, "tailor_0.6.0_linux_arm64.pkg.tar.zst")
     identity = item.inspected.identity
     assert identity == NativeIdentity("arch", "tailor", "aarch64", "0.6.0-1")
-    assert arch._key(identity) == "aarch64/tailor-0.6.0-1-aarch64.pkg.tar.zst"
+    assert arch._keys(item.inspected, ARCH_POLICY) == (
+        "aarch64/tailor-0.6.0-1-aarch64.pkg.tar.zst",
+    )
     assert item.inspected.upstream_signature == "unsigned"
     assert "%PGPSIG%" not in arch._string(item.inspected.metadata.get("desc"))
     other = replace(identity, architecture="x86_64")
@@ -262,7 +264,10 @@ def test_inspect_rejects_unconfigured_architecture(
     architectures: tuple[str, ...],
 ) -> None:
     native, runtime = native_arch(tmp_path, monkeypatch)
-    with pytest.raises(arch.ArchFailure, match="not qualified by policy"):
+    unsupported = "aarch64" if "arm64" in filename else "x86_64"
+    with pytest.raises(
+        arch.ArchFailure, match=f"^{filename}: unsupported Arch architecture '{unsupported}'$"
+    ):
         arch.inspect(
             native.asset(filename),
             policy=FormatPolicy("arch", architectures),

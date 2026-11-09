@@ -197,8 +197,11 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         with pytest.raises(AdmissionFailure, match="Changed bytes"):
             admit(inspected, accepted, compare=arch.compare, policy=POLICY, runtime=runtime)
-        unqualified = fixture(runtime, "unqualified", "1", architecture="any")
-        with pytest.raises(arch.ArchFailure, match="qualified"):
+        unqualified = fixture(runtime, "unqualified", "1", architecture="armv7h")
+        with pytest.raises(
+            arch.ArchFailure,
+            match="^unqualified-1-1-armv7h.pkg.tar.zst: unsupported Arch architecture 'armv7h'$",
+        ):
             arch.inspect(
                 unqualified, policy=POLICY, runtime=runtime, out=runtime.root / "unqualified"
             )
@@ -504,7 +507,7 @@ def test_arch_native_multiarch() -> None:
             accepted.append(
                 admit(inspected, accepted, compare=arch.compare, policy=policy, runtime=runtime)
             )
-        with pytest.raises(arch.ArchFailure, match="not qualified by policy"):
+        with pytest.raises(arch.ArchFailure, match="unsupported Arch architecture 'aarch64'"):
             arch.inspect(
                 accepted[1].inspected.verified,
                 policy=POLICY,
@@ -559,3 +562,77 @@ def test_arch_native_multiarch() -> None:
             mismatched.checked("-Sy")
             assert mismatched.run("-S", "multi").returncode != 0
             assert not mismatched.client.path("root/usr/share/arch-test/multi.txt").exists()
+
+
+def test_arch_native_any_package_in_every_architecture() -> None:
+    policy = FormatPolicy("arch", ("x86_64", "aarch64"))
+    with (
+        disposable_key() as key,
+        private_workspace(Path("/tmp")) as runtime,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+    ):
+        empty = RetainedFormat("arch", None, (), (), {}, ())
+        accepted: list[AdmittedAsset] = []
+        for name, architecture, extension in (
+            ("native", "x86_64", ".pkg.tar.zst"),
+            ("shared", "any", ".pkg.tar.xz"),
+        ):
+            asset = fixture(
+                runtime,
+                name,
+                "1",
+                architecture=architecture,
+                content=f"{name}-{architecture}",
+                extension=extension,
+            )
+            inspected = arch.inspect(
+                asset, policy=policy, runtime=runtime, out=runtime.root / f"inspect-{name}"
+            )
+            assert inspected.identity.architecture == architecture
+            accepted.append(
+                admit(inspected, accepted, compare=arch.compare, policy=policy, runtime=runtime)
+            )
+        prepared = arch.prepare(
+            accepted,
+            empty,
+            policy=policy,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "generation1",
+        )
+        keys = [output.ref.key for output in prepared.outputs]
+        for directory in ("x86_64", "aarch64"):
+            assert f"{directory}/shared-1-1-any.pkg.tar.xz" in keys
+            assert f"{directory}/shared-1-1-any.pkg.tar.xz.sig" in keys
+        assert "aarch64/native-1-1-x86_64.pkg.tar.zst" not in keys
+        assert [key for key in keys if key.endswith(".db.tar.gz")] == [
+            "aarch64/haberdasher.db.tar.gz",
+            "x86_64/haberdasher.db.tar.gz",
+        ]
+        arch.validate_retained(prepared.retained, policy=policy, runtime=runtime)
+        live = runtime.root / "live"
+        live.mkdir()
+        publish(prepared, live)
+        shared = accepted[1].inspected.verified
+        with serve(live) as http:
+            for architecture in ("x86_64", "aarch64"):
+                http.set_generation_mtime(list((live / architecture).iterdir()), 1)
+                pacman = client(
+                    runtime,
+                    f"any-{architecture.replace('_', '-')}",
+                    http.url(architecture),
+                    key,
+                    architecture=architecture,
+                )
+                pacman.checked("-Sy")
+                pacman.checked("-S", "shared")
+                assert pacman.checked("-Q", "shared").strip() == b"shared 1-1"
+                assert sha256_file(pacman.client.path("cache/shared-1-1-any.pkg.tar.xz")) == (
+                    shared.sha256,
+                    shared.size,
+                )
+                native = pacman.run("-S", "native")
+                assert (native.returncode == 0) is (architecture == "x86_64")

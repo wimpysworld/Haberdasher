@@ -7,14 +7,21 @@ import stat
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from haberdasher import discovery, publish, signing, state
-from haberdasher.config import PRODUCTION_FINGERPRINT, Config, Policy, StoragePolicy, load_config
-from haberdasher.core import FORMATS, plural, step, utc_now
+from haberdasher.config import (
+    PRODUCTION_FINGERPRINT,
+    PUBLIC,
+    Config,
+    Policy,
+    StoragePolicy,
+    load_config,
+)
+from haberdasher.core import plural, step, utc_now
 from haberdasher.runtime import private_workspace
 from haberdasher.storage import LocalStore, R2Store, Store
 
@@ -79,19 +86,17 @@ def _local_root(path: Path) -> Path:
     return root
 
 
-def _formats(config: Config) -> tuple[str, ...]:
-    return config.public_formats() or tuple(sorted(config.formats)) or tuple(sorted(FORMATS))
-
-
-def _storage(config: Config, root: Path | None) -> StoragePolicy:
+def _storage(names: Sequence[str], root: Path | None) -> StoragePolicy:
     if root is not None:
-        return StoragePolicy(
-            "local", {name: str(root / "public" / name) for name in _formats(config)}
-        )
-    configured = config.public_formats()
-    if config.storage is None or not configured:
-        raise ValueError("Publication needs a storage bucket for a configured format")
-    return StoragePolicy("r2", {name: config.storage.public[name] for name in configured})
+        return StoragePolicy("local", {name: str(root / "public" / name) for name in names})
+    return StoragePolicy("r2", {name: PUBLIC[name][0] for name in names})
+
+
+def _published(name: str, root: Path | None) -> bool:
+    """Whether a format already has a public inventory to preserve."""
+    if root is not None:
+        return (root / "public" / name / state.INVENTORY_KEY).is_file()
+    return read_published(name, PUBLIC[name][1]).sha256 is not None
 
 
 def say(line: str) -> None:
@@ -119,31 +124,36 @@ def read_published(name: str, url: str) -> state.Published:
     return state.decode_published(name, data, None)
 
 
-def show_plan(config: Config, scan: discovery.CompleteScan) -> None:
-    """Print published and new package counts for each format with a public URL."""
-    urls = config.storage.urls if config.storage is not None else {}
-    names = [name for name in config.formats if name in urls]
-    found = sum(1 for item in scan.changed if item.checksum is not None)
-    if not names:
-        say("")
-        say(
-            f"{plural(found, 'package')} found. No public URLs in {CONFIG}, so "
-            "published state is unknown. Nothing written."
-        )
-        return
-    hosts = {name: urlsplit(urls[name]).hostname or urls[name] for name in names}
-    say(f"Reading published state from {', '.join(hosts[name] for name in names)}")
+def _urls() -> dict[str, str]:
+    return {name: url for name, (_, url) in PUBLIC.items()}
+
+
+def show_plan(scan: discovery.CompleteScan, urls: Mapping[str, str] | None = None) -> None:
+    """Print published and new package counts for each format found or already published."""
+    urls = _urls() if urls is None else urls
+    hosts = {name: urlsplit(url).hostname or url for name, url in urls.items()}
+    say(f"Reading published state from {', '.join(hosts.values())}")
     published: dict[str, state.Published] = {}
-    for name in names:
+    for name, url in urls.items():
         try:
-            published[name] = read_published(name, urls[name])
+            published[name] = read_published(name, url)
         except urllib.error.HTTPError as error:
             step(say, name, f"cannot read {hosts[name]}: HTTP {error.code}")
         except urllib.error.URLError as error:
             step(say, name, f"cannot reach {hosts[name]}: {error.reason}")
         except (OSError, ValueError, RuntimeError) as error:
             step(say, name, f"cannot read {hosts[name]}: {error}")
-    new = publish.new_assets(scan, published)
+    found = publish.provided(scan)
+    names = [
+        name
+        for name in urls
+        if name in found or name not in published or published[name].sha256 is not None
+    ]
+    new = publish.new_assets(scan, {name: published[name] for name in names if name in published})
+    if not names:
+        say("")
+        say("No packages found. Nothing written.")
+        return
     rows = [("Format", "Repository", "Published", "New")]
     for name in names:
         if name in published:
@@ -180,32 +190,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         root = _local_root(args.local_root) if args.local_root is not None else None
         config = load_config(CONFIG)
-        if args.command == "plan":
-            _reading(config)
+        if args.command == "unlock":
+            storage = _storage(tuple(PUBLIC), root)
             with private_workspace() as runtime:
-                scan = discovery.scan_releases(
-                    config, runtime=runtime, previous=discovery.DiscoveryState(), report=say
+                store: Store = (
+                    LocalStore(storage) if root is not None else R2Store(storage, runtime=runtime)
                 )
-            show_plan(config, scan)
-            return 0
-        storage = _storage(config, root)
-        if root is None:
-            Policy(storage, PRODUCTION_FINGERPRINT).require_remote()
-        with private_workspace() as runtime:
-            store: Store = (
-                LocalStore(storage) if root is not None else R2Store(storage, runtime=runtime)
-            )
-            if args.command == "unlock":
                 broken = state.break_locks(store, tuple(storage.public), report=say)
-                say(f"Removed {plural(len(broken), 'lock')}." if broken else "No locks found.")
+            say(f"Removed {plural(len(broken), 'lock')}." if broken else "No locks found.")
+            return 0
+        _reading(config)
+        with private_workspace() as runtime:
+            remote = (
+                R2Store(_storage(tuple(PUBLIC), None), runtime=runtime)
+                if args.command == "publish" and root is None
+                else None
+            )
+            scan = discovery.scan_releases(
+                config, runtime=runtime, previous=discovery.DiscoveryState(), report=say
+            )
+            if args.command == "plan":
+                show_plan(scan)
                 return 0
-            _reading(config)
+            found = publish.provided(scan)
+            names = tuple(name for name in PUBLIC if name in found or _published(name, root))
+            if not names:
+                say("No packages found. Nothing written.")
+                return 0
+            storage = _storage(names, root)
+            store = remote or LocalStore(storage)
             fingerprint = (
                 signing.key_fingerprint(runtime) if root is not None else PRODUCTION_FINGERPRINT
             )
-            policy = Policy(storage, fingerprint)
             result = publish.reconcile(
-                config, policy, store=store, runtime=runtime, now=utc_now(), report=say
+                config,
+                Policy(storage, fingerprint),
+                store=store,
+                runtime=runtime,
+                now=utc_now(),
+                report=say,
+                scan=scan,
             )
             if result.pending_assets:
                 say(f"Skipped {plural(result.pending_assets, 'package')} without a checksum.")
@@ -223,8 +247,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _reading(config: Config) -> None:
-    names = tuple(config.formats) or _formats(config)
-    say(
-        f"Reading {CONFIG}: {plural(len(config.sources), 'source')}, "
-        f"{plural(len(names), 'format')} ({', '.join(names)})"
-    )
+    say(f"Reading {CONFIG}: {plural(len(config.sources), 'source')}")

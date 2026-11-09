@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import quote
 
-from haberdasher.config import Config, CosignPolicy
+from haberdasher.config import Config
 from haberdasher.core import (
     Record,
     Report,
@@ -40,7 +40,11 @@ MAX_CHECKSUM_BYTES = 1024 * 1024
 MAX_CHECKSUM_ENTRIES = 10_000
 MAX_BUNDLE_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 5 * 1024 * 1024 * 1024 - 1
-PACKAGE_SUFFIXES = (".deb", ".rpm", ".apk", ".pkg.tar.zst", ".flatpak")
+PACKAGE_SUFFIXES = (".deb", ".rpm", ".apk", ".pkg.tar.zst", ".pkg.tar.xz")
+UNSUPPORTED_SUFFIXES = {".flatpak": "Flatpak"}
+PER_ASSET_SUFFIXES = (".sha256", ".sha256sum")
+COSIGN_BUNDLE_SUFFIX = ".sigstore.json"
+COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
 
 
 class DiscoveryFailure(ValueError):
@@ -142,7 +146,10 @@ def _match_checksum(source: SourceAsset, checksum: ChecksumEntry) -> None:
 
 
 def parse_checksums(data: bytes, source: SourceAsset) -> tuple[ChecksumEntry, ...]:
-    """Read GNU SHA256 or BSD SHA256 lines, without path or name normalisation."""
+    """Read GNU SHA256 or BSD SHA256 lines, without path or name normalisation.
+
+    A per-asset document, such as app.deb.sha256, can also hold one bare digest for app.deb.
+    """
     if len(data) > MAX_CHECKSUM_BYTES or len(data) != source.size:
         raise DiscoveryFailure("Invalid checksum document size")
     checksum_hash = hashlib.sha256(data).hexdigest()
@@ -158,8 +165,11 @@ def parse_checksums(data: bytes, source: SourceAsset) -> tuple[ChecksumEntry, ..
         if not line:
             continue
         match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](.+)", line)
+        bare = re.fullmatch(r"[0-9a-fA-F]{64}", line)
         if match:
             value, name = match.groups()
+        elif bare and source.filename.lower().endswith(PER_ASSET_SUFFIXES):
+            value, name = line, source.filename.rsplit(".", 1)[0]
         else:
             match = re.fullmatch(r"SHA256 \((.+)\) = ([0-9a-fA-F]{64})", line)
             if match is None:
@@ -360,19 +370,19 @@ def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[tu
         yield path, tag
 
 
+def cosign_identity(repository: str, tag: str) -> str:
+    """Pin a release workflow certificate to the source repository and the release tag."""
+    owner, name = repository_name(repository).split("/")
+    return (
+        rf"^https://github\.com/{re.escape(owner)}/{re.escape(name)}"
+        rf"/\.github/workflows/[^@]+@refs/tags/{re.escape(text(tag, 'release tag'))}$"
+    )
+
+
 def _verify_bundle(
-    checksum: SourceAsset,
-    group: tuple[SourceAsset, ...],
-    signer: CosignPolicy,
-    tag: str,
-    path: Path,
-    runtime: Runtime,
+    checksum: SourceAsset, bundle: SourceAsset, tag: str, path: Path, runtime: Runtime
 ) -> None:
     """Fail closed unless cosign verifies the checksum document against its release bundle."""
-    name = checksum.filename + signer.bundle_suffix
-    bundle = next((asset for asset in group if asset.filename == name), None)
-    if bundle is None:
-        raise DiscoveryFailure(f"Missing cosign bundle {name} for {checksum.filename}")
     with _download(bundle, runtime, MAX_BUNDLE_BYTES) as (bundle_path, bundle_tag):
         if bundle_tag != tag:
             raise DiscoveryFailure("Release tag changed during download")
@@ -382,17 +392,17 @@ def _verify_bundle(
                 "verify-blob",
                 "--bundle",
                 str(bundle_path),
-                "--certificate-identity",
-                signer.certificate_identity(tag),
+                "--certificate-identity-regexp",
+                cosign_identity(checksum.repository, tag),
                 "--certificate-oidc-issuer",
-                signer.issuer,
+                COSIGN_ISSUER,
                 str(path),
             ]
         )
     if result.returncode != 0:
         raise DiscoveryFailure(
-            f"Cosign bundle verification failed for {checksum.filename}. "
-            "Check the cosign identity and issuer in haberdasher.yaml"
+            f"Cosign bundle {bundle.filename} does not verify for "
+            f"{checksum.repository} at tag {tag}"
         )
 
 
@@ -439,16 +449,18 @@ def scan_releases(
         width = max((len(label) for label, _ in releases), default=0)
         for label, group in releases:
             checksums: dict[str, ChecksumEntry] = {}
-            signed = False
+            documents = signed = 0
+            siblings = {source.filename: source for source in group}
             for source in sorted(group, key=lambda item: item.asset_id):
                 if not _is_checksum(source.filename):
                     continue
+                documents += 1
                 try:
                     with _download(source, runtime, MAX_CHECKSUM_BYTES) as (path, tag):
-                        signer = config.cosign.get(source.repository)
-                        if signer is not None:
-                            _verify_bundle(source, group, signer, tag, path, runtime)
-                            signed = True
+                        bundle = siblings.get(source.filename + COSIGN_BUNDLE_SUFFIX)
+                        if bundle is not None:
+                            _verify_bundle(source, bundle, tag, path, runtime)
+                            signed += 1
                         with path.open("rb") as stream:
                             entries = parse_checksums(stream.read(MAX_CHECKSUM_BYTES + 1), source)
                 except DiscoveryFailure as error:
@@ -456,19 +468,37 @@ def scan_releases(
                         f"{source.repository} {label}, {source.filename}: {error}"
                     ) from error
                 for entry in entries:
-                    if entry.filename in checksums:
+                    prior = checksums.setdefault(entry.filename, entry)
+                    if prior.sha256 != entry.sha256:
                         raise DiscoveryFailure(
-                            f"Ambiguous checksum sources in {repository} {label}: more than one "
-                            f"checksum file lists {entry.filename}"
+                            f"Conflicting checksums in {repository} {label}: checksum files "
+                            f"disagree about {entry.filename}"
                         )
-                    checksums[entry.filename] = entry
             packages = 0
             missing = 0
+            digests = 0
+            unsupported: list[str] = []
             for source in sorted(group, key=lambda item: item.asset_id):
+                kind = next(
+                    (
+                        label
+                        for suffix, label in UNSUPPORTED_SUFFIXES.items()
+                        if source.filename.endswith(suffix)
+                    ),
+                    None,
+                )
+                if kind is not None:
+                    unsupported.append(f"    {source.filename}: {kind} not supported yet, skipped")
+                    continue
                 if not source.filename.endswith(PACKAGE_SUFFIXES):
                     continue
                 packages += 1
                 checksum = checksums.get(source.filename)
+                if checksum is None and source.github_sha256 is not None:
+                    checksum = ChecksumEntry(
+                        source, source.filename, source.github_sha256, source.github_sha256
+                    )
+                    digests += 1
                 fingerprint = hashlib.sha256(
                     canonical_json((source, checksum.sha256 if checksum is not None else None))
                 ).hexdigest()
@@ -487,13 +517,20 @@ def scan_releases(
                     unchanged.append(record)
                 else:
                     changed.append(record)
-            line = f"  {label:<{width}}  {'checksums OK' if checksums else 'no checksums'}"
-            if signed:
-                line += "  cosign OK"
+            if checksums:
+                status = "checksums OK"
+            elif digests:
+                status = "GitHub digests OK"
+            else:
+                status = "no checksums"
+            line = f"  {label:<{width}}  {status}"
+            line += "  cosign OK" if documents and signed == documents else "  no cosign bundle"
             line += f"  {plural(packages, 'package')}"
             if missing:
                 line += f", {missing} without a checksum (skipped)"
             report(line)
+            for item in unsupported:
+                report(item)
     state = DiscoveryState(tuple(records), tuple(assets.values()), config.sources)
     disappeared = tuple(asset for asset in previous.assets if _asset_key(asset) not in assets)
     return CompleteScan(state, tuple(changed), tuple(unchanged), tuple(pending), disappeared)

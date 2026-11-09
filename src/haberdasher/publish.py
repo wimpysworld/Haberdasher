@@ -100,12 +100,22 @@ def _format(filename: str) -> str | None:
         (".deb", "apt"),
         (".rpm", "rpm"),
         (".pkg.tar.zst", "arch"),
+        (".pkg.tar.xz", "arch"),
         (".apk", "apk"),
         (".flatpak", "flatpak"),
     ):
         if filename.endswith(suffix):
             return name
     return None
+
+
+def provided(scan: discovery.CompleteScan) -> set[str]:
+    """Formats that the scanned release assets contain."""
+    return {
+        name
+        for record in scan.state.records
+        if (name := _format(record.source.filename)) is not None
+    }
 
 
 def new_assets(
@@ -199,6 +209,7 @@ def reconcile(
     runtime: Runtime,
     now: datetime,
     report: Report = quiet,
+    scan: discovery.CompleteScan | None = None,
 ) -> RunResult:
     now = utc_now(lambda: now)
     if not policy.storage.public:
@@ -210,7 +221,9 @@ def reconcile(
     for name in names:
         step(report, name, "locked")
     try:
-        result = _reconcile(config, policy, store=store, runtime=runtime, now=now, report=report)
+        result = _reconcile(
+            config, policy, store=store, runtime=runtime, now=now, report=report, scan=scan
+        )
     except BaseException:
         with contextlib.suppress(Exception):
             state.release(store, lock)
@@ -231,6 +244,7 @@ def _reconcile(
     runtime: Runtime,
     now: datetime,
     report: Report,
+    scan: discovery.CompleteScan | None,
 ) -> RunResult:
     names = tuple(sorted(policy.storage.public))
     fingerprint = policy.expected_signing_fingerprint
@@ -242,9 +256,10 @@ def _reconcile(
                 "Native signing fingerprint changes need a key rotation, which is not supported"
             )
     policies = {name: config.format_policy(name) for name in names}
-    scan = discovery.scan_releases(
-        config, runtime=runtime, previous=discovery.DiscoveryState(), report=report
-    )
+    if scan is None:
+        scan = discovery.scan_releases(
+            config, runtime=runtime, previous=discovery.DiscoveryState(), report=report
+        )
     changed = new_assets(scan, published)
     renew: set[str] = set()
     if "apt" in published and published["apt"].retained.metadata:

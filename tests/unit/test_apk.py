@@ -404,7 +404,9 @@ def test_inspect_rejects_unconfigured_architecture(
 ) -> None:
     runtime = NativeApk(tmp_path / "runtime")
     asset = runtime.asset("tailor", "0.6.0", arch)
-    with pytest.raises(apk.ApkFailure, match="Unqualified APK architecture"):
+    with pytest.raises(
+        apk.ApkFailure, match=f"^{asset.source.filename}: unsupported APK architecture '{arch}'$"
+    ):
         apk.inspect(
             asset,
             policy=FormatPolicy("apk", architectures=architectures),

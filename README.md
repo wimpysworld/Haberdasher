@@ -31,19 +31,13 @@ just proof apt
 
 ## Plan and publish
 
-`haberdasher.yaml` selects GitHub sources and optional format settings:
+`haberdasher.yaml` lists GitHub repositories and nothing else:
 
 ```yaml
-sources:
-  - wimpysworld/tailor
-formats:
-  apt:
-    architectures: [amd64, arm64]
-    suite: stable
-    component: main
-    validity_seconds: 604800
-    renewal_seconds: 172800
+sources: [wimpysworld/tailor]
 ```
+
+Haberdasher derives the rest. The asset suffix selects the format, package metadata gives the architecture, and the code holds the bucket and public URL of each format. See [Publisher operations](docs/publisher.md#configuration).
 
 Three recipes run Haberdasher. None takes arguments, and each reads `haberdasher.yaml` in the working directory:
 
@@ -53,7 +47,7 @@ just publish
 just unlock
 ```
 
-`just plan` checks each release, reads the published state from each public repository, and prints a table of published and new packages. It writes nothing and signs nothing. `just publish` publishes every configured format to its R2 bucket. `just unlock` deletes stale locks after a stopped run.
+`just plan` checks each release, reads the published state from each public repository, and prints a table of published and new packages. It writes nothing and signs nothing. `just publish` publishes every format that the sources provide or that is already published. `just unlock` deletes stale locks after a stopped run.
 
 Planning reads GitHub and checksum assets. Supply `GH_TOKEN` or `GITHUB_TOKEN` through the runtime environment. The isolated GitHub configuration does not use a stored personal `gh` login.
 

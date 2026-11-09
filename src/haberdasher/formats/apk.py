@@ -163,6 +163,15 @@ def _filename(identity: NativeIdentity) -> str:
     return f"{identity.architecture}/{identity.name}-{identity.version}.apk"
 
 
+def _slots(architecture: str, policy: FormatPolicy) -> tuple[str, ...]:
+    """Indexes that list a package. Every architecture index lists noarch packages.
+
+    The apk client fetches each package from the directory of its own architecture,
+    so a noarch package has one object under noarch/.
+    """
+    return policy.architectures if architecture == "noarch" else (architecture,)
+
+
 def _control(info: str, identity: NativeIdentity | None = None) -> str:
     if not info or len(info.encode()) > MAX_METADATA or "\0" in info:
         raise ApkFailure("Invalid APK control metadata")
@@ -311,8 +320,8 @@ def inspect(
         if len(records) != 1:
             raise ApkFailure("Native APK inspection omitted the input")
         (name, version, arch), stanza = next(iter(records.items()))
-        if arch not in policy.architectures or arch == "noarch":
-            raise ApkFailure("Unqualified APK architecture")
+        if arch not in (*policy.architectures, "noarch"):
+            raise ApkFailure(f"{asset.source.filename}: unsupported APK architecture {arch!r}")
         identity = NativeIdentity("apk", name, arch, version)
         _filename(identity)
         _control(info, identity)
@@ -388,7 +397,7 @@ def _expected(
         identity = item.identity
         _filename(identity)
         if (
-            identity.architecture not in policy.architectures
+            identity.architecture not in (*policy.architectures, "noarch")
             or accepted.transformation_policy != "preserve"
         ):
             raise ApkFailure("Invalid retained APK policy")
@@ -493,7 +502,7 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
         raise ApkFailure("Incomplete retained APK identities")
     key = _file(retained.metadata.get("public_key"))
     indexes = _mapping(retained.metadata.get("indexes"))
-    if set(indexes) != {identity[2] for identity in expected}:
+    if set(indexes) != {slot for identity in expected for slot in _slots(identity[2], policy)}:
         raise ApkFailure("Missing retained APK index")
     refs: dict[str, ObjectRef] = {}
     for ref in retained.objects:
@@ -505,7 +514,9 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
         raise ApkFailure("Missing retained APK public key reference")
     for arch, record in indexes.items():
         path = _file(record)
-        if _verify_index(path, key, runtime) != {k: v for k, v in expected.items() if k[2] == arch}:
+        if _verify_index(path, key, runtime) != {
+            k: v for k, v in expected.items() if k[2] in (arch, "noarch")
+        }:
             raise ApkFailure("Retained APK index does not contain the complete accepted records")
         index_key = f"{arch}/APKINDEX.tar.gz"
         required.add(index_key)
@@ -607,9 +618,14 @@ def prepare(
         keys = work / "keys"
         keys.mkdir(mode=0o700)
         atomic_write(keys / PUBLIC_KEY, key.read_bytes())
-        for arch in sorted({item.inspected.identity.architecture for item in additions}):
+        changed = {
+            slot
+            for item in additions
+            for slot in _slots(item.inspected.identity.architecture, policy)
+        }
+        for arch in sorted(changed):
             etag = _string(_mapping(indexes[arch]).get("etag")) if arch in indexes else None
-            records = {k: v for k, v in expected.items() if k[2] == arch}
+            records = {k: v for k, v in expected.items() if k[2] in (arch, "noarch")}
             # Native inspection and retained validation use separate trust roots.
             # Reuse their complete stanzas, never upstream keys, for the repository merge.
             content = work / arch
@@ -632,6 +648,7 @@ def prepare(
             )
             _sign_index(seed, private, key, signer=signer, runtime=runtime)
             target = out / arch / "APKINDEX.tar.gz"
+            target.parent.mkdir(mode=0o700, exist_ok=True)
             _run(
                 runtime,
                 _apk(

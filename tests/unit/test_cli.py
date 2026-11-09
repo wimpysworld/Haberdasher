@@ -11,15 +11,15 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from haberdasher import cli, discovery, publish, state
+from haberdasher import cli, discovery, publish, signing, state
 from haberdasher.config import (
     PRODUCTION_FINGERPRINT,
+    PUBLIC,
     Config,
-    FormatPolicy,
     Policy,
     StoragePolicy,
 )
-from haberdasher.core import FORMATS
+from haberdasher.core import SourceAsset
 from haberdasher.runtime import Runtime
 
 
@@ -27,12 +27,30 @@ def empty_scan(*args: object, **kwargs: object) -> discovery.CompleteScan:
     return discovery.CompleteScan(discovery.DiscoveryState(), (), (), (), ())
 
 
-def configured(names: tuple[str, ...], buckets: tuple[str, ...] | None = None) -> Config:
-    return Config(
-        ("synthetic/test",),
-        {name: FormatPolicy(name) for name in names},
-        storage=StoragePolicy("r2", {name: f"test-{name}" for name in buckets or names}),
+def scan_with(*filenames: str) -> discovery.CompleteScan:
+    """A scan with one checksummed asset for each file name."""
+    records: list[discovery.DiscoveredAsset] = []
+    for index, filename in enumerate(filenames, 1):
+        source = SourceAsset(
+            "synthetic/test",
+            1,
+            index,
+            filename,
+            1,
+            "2026-01-01T00:00:00Z",
+            f"https://github.com/synthetic/test/{filename}",
+            "a" * 64,
+        )
+        checksum = discovery.ChecksumEntry(source, filename, "a" * 64, "a" * 64)
+        records.append(discovery.DiscoveredAsset(source, checksum, "b" * 64))
+    state_ = discovery.DiscoveryState(
+        tuple(records), tuple(record.source for record in records), ("synthetic/test",)
     )
+    return discovery.CompleteScan(state_, tuple(records), (), (), ())
+
+
+def unpublished(name: str, url: str) -> state.Published:
+    return state.unpublished(name)
 
 
 def work_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> Path:
@@ -53,6 +71,7 @@ def test_plan_never_opens_store_or_signer(
         patch.object(discovery, "scan_releases", side_effect=empty_scan) as scan,
         patch.object(cli, "LocalStore", side_effect=AssertionError("storage opened")),
         patch.object(cli, "R2Store", side_effect=AssertionError("storage opened")),
+        patch.object(cli, "read_published", side_effect=unpublished),
         patch.object(state, "acquire", side_effect=AssertionError("lock acquired")),
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
         patch("haberdasher.signing.SigningSession", side_effect=AssertionError("key imported")),
@@ -60,7 +79,7 @@ def test_plan_never_opens_store_or_signer(
         assert cli.main(["plan"]) == 0
         scan.assert_called_once()
     output = capsys.readouterr().out
-    assert output.startswith("Reading haberdasher.yaml: 1 source, 5 formats")
+    assert output.startswith("Reading haberdasher.yaml: 1 source\n")
     assert output.endswith("Nothing written.\n") and "{" not in output
 
 
@@ -87,31 +106,17 @@ def test_argparse_rejects_removed_options(arguments: list[str]) -> None:
     assert error.value.code == 2
 
 
-@pytest.mark.parametrize(
-    "config",
-    [
-        "sources: [synthetic/test]\n",
-        "sources: [synthetic/test]\nformats: {apt: {}}\n"
-        "storage: {public: {rpm: {bucket: test-rpm, url: 'https://rpm.example.invalid'}}}\n",
-    ],
-    ids=["no-storage", "no-configured-bucket"],
-)
-@pytest.mark.parametrize("command", ["publish", "unlock"])
-def test_remote_denied_before_credentials_or_workspace(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    config: str,
-    command: str,
-    capsys: pytest.CaptureFixture[str],
+def test_remote_publish_needs_credentials_before_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    work_config(tmp_path, monkeypatch, config)
+    work_config(tmp_path, monkeypatch, "sources: [synthetic/test]\n")
     with (
-        patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
-        patch.dict(os.environ, clear=True),
+        patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+        patch.object(discovery, "scan_releases", side_effect=AssertionError("scanned")),
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
     ):
-        assert cli.main([command]) == 1
-    assert "needs a storage bucket" in capsys.readouterr().err
+        assert cli.main(["publish"]) == 1
+    assert "storage environment variables are required" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -225,6 +230,7 @@ def test_local_root_uses_nearest_markers_or_packaged_cwd_fallback(
         patch.object(cli, "load_config", return_value=Config(("synthetic/test",))) as config,
         patch.object(cli, "private_workspace") as workspace,
         patch.object(cli, "LocalStore") as store,
+        patch.object(discovery, "scan_releases", return_value=scan_with("app.deb")),
         patch.object(publish, "reconcile", return_value=publish.RunResult(False, 0)) as run,
     ):
         result = cli.main(["publish", "--local-root", str(root)])
@@ -237,105 +243,86 @@ def test_local_root_uses_nearest_markers_or_packaged_cwd_fallback(
     else:
         assert result == 0
         run.assert_called_once()
-        assert run.call_args.args[1].storage.public == {
-            name: str(root / "public" / name) for name in FORMATS
-        }
+        assert run.call_args.args[1].storage.public == {"apt": str(root / "public" / "apt")}
     assert set(tmp_path.rglob("*")) == before
 
 
 @pytest.mark.parametrize("backend", ["local", "r2"])
-@pytest.mark.parametrize("names", [("apt",), ("rpm", "apt")])
-def test_policy_preserves_all_configured_roles(
-    tmp_path: Path, backend: str, names: tuple[str, ...]
+@pytest.mark.parametrize(
+    "filenames,published,names",
+    [
+        (("a.deb",), (), ("apt",)),
+        (("a.rpm", "b.deb", "c.pkg.tar.xz", "d.tar.gz"), (), ("apt", "rpm", "arch")),
+        (("a.apk",), ("rpm",), ("rpm", "apk")),
+    ],
+)
+def test_publication_covers_found_and_published_formats(
+    tmp_path: Path,
+    backend: str,
+    filenames: tuple[str, ...],
+    published: tuple[str, ...],
+    names: tuple[str, ...],
 ) -> None:
     root = tmp_path / "store"
-    roles = tuple(sorted(names))
+    for name in published if backend == "local" else ():
+        inventory = root / "public" / name / state.INVENTORY_KEY
+        inventory.parent.mkdir(parents=True)
+        inventory.write_bytes(b"previously published inventory")
+
+    def read(name: str, url: str) -> state.Published:
+        assert url == PUBLIC[name][1]
+        if name in published:
+            return state.Published(name, None, "c" * 64, (), state.unpublished(name).retained)
+        return state.unpublished(name)
+
     expected = Policy(
         StoragePolicy(
             backend,
             {
-                name: str(root / "public" / name) if backend == "local" else f"test-{name}"
-                for name in roles
+                name: str(root / "public" / name) if backend == "local" else PUBLIC[name][0]
+                for name in names
             },
         ),
-        PRODUCTION_FINGERPRINT if backend == "r2" else None,
+        PRODUCTION_FINGERPRINT if backend == "r2" else "A" * 40,
     )
     destination = ["--local-root", str(root)] if backend == "local" else []
     with (
-        patch.object(cli, "load_config", return_value=configured(names, (*names, "flatpak"))),
-        patch.object(cli, "LocalStore"),
-        patch.object(cli, "R2Store"),
+        patch.object(cli, "load_config", return_value=Config(("synthetic/test",))),
+        patch.object(discovery, "scan_releases", return_value=scan_with(*filenames)),
+        patch.object(cli, "read_published", side_effect=read),
+        patch.object(cli, "LocalStore") as local,
+        patch.object(cli, "R2Store") as remote,
+        patch.object(signing, "key_fingerprint", return_value="A" * 40),
         patch.object(publish, "reconcile", return_value=publish.RunResult(False, 0)) as run,
-        patch.dict(os.environ, {"HD_SIGNING_KEY_FILE": ""}),
-        patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
     ):
         assert cli.main(["publish", *destination]) == 0
     run.assert_called_once()
-    assert run.call_args.args[1] == expected
-    assert not root.exists()
+    assert run.call_args.args == (Config(("synthetic/test",)), expected)
+    if backend == "r2":
+        remote.assert_called_once_with(
+            StoragePolicy("r2", {name: bucket for name, (bucket, _) in PUBLIC.items()}),
+            runtime=remote.call_args.kwargs["runtime"],
+        )
+        assert run.call_args.kwargs["store"] is remote.return_value
+        local.assert_not_called()
+    else:
+        local.assert_called_once_with(expected.storage)
+        remote.assert_not_called()
 
 
-def test_remote_uses_configured_buckets_and_production_key(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    config = configured(("apk", "rpm"), ("apk", "apt", "rpm"))
-    with (
-        patch.object(cli, "load_config", return_value=config),
-        patch.object(cli, "private_workspace") as workspace,
-        patch.object(cli, "R2Store") as store,
-        patch.object(publish, "reconcile", return_value=publish.RunResult(False, 0)) as run,
-        patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
-    ):
-        assert cli.main(["publish"]) == 0
-    policy = Policy(
-        StoragePolicy("r2", {"apk": "test-apk", "rpm": "test-rpm"}),
-        PRODUCTION_FINGERPRINT,
-    )
-    store.assert_called_once_with(
-        policy.storage, runtime=workspace.return_value.__enter__.return_value
-    )
-    run.assert_called_once()
-    assert run.call_args.args == (config, policy)
-    assert run.call_args.kwargs["store"] is store.return_value
-    assert not capsys.readouterr().err
-
-
-def test_omitted_format_bucket_is_preserved(
+def test_local_publish_without_packages_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    work_config(
-        tmp_path,
-        monkeypatch,
-        yaml.safe_dump(
-            {
-                "sources": ["synthetic/test"],
-                "formats": {"apt": {}},
-                "storage": {
-                    "public": {"apt": {"bucket": "test-apt", "url": "https://apt.example.invalid"}}
-                },
-            }
-        ),
-    )
+    work_config(tmp_path, monkeypatch, "sources: [synthetic/test]\n")
     root = tmp_path / "store"
-    inventory = root / "public/rpm/haberdasher.json"
-    inventory.parent.mkdir(parents=True)
-    inventory.write_bytes(b"previously published rpm inventory")
-    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
     with (
-        patch.object(discovery, "scan_releases", side_effect=empty_scan),
-        patch.dict(os.environ, {"HD_SIGNING_KEY_FILE": ""}),
+        patch.object(discovery, "scan_releases", return_value=scan_with("tool.tar.gz")),
+        patch.object(publish, "reconcile", side_effect=AssertionError("reconciled")),
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
     ):
-        result = cli.main(["publish", "--local-root", str(root)])
-    assert result == 0
-    assert capsys.readouterr().out.splitlines()[-3:] == [
-        "apt   unchanged",
-        "apt   unlocked",
-        "Nothing changed in 1 repository.",
-    ]
-    after = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
-    assert after == before
-    assert not list(root.rglob(state.LOCK_KEY))
+        assert cli.main(["publish", "--local-root", str(root)]) == 0
+    assert capsys.readouterr().out.endswith("No packages found. Nothing written.\n")
+    assert not root.exists()
 
 
 def test_help_lists_commands_and_hides_local_root(capsys: pytest.CaptureFixture[str]) -> None:
@@ -414,33 +401,10 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
         runtime.close()
 
 
-def test_local_publish_without_key_or_assets_writes_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    work_config(tmp_path, monkeypatch, "sources: [synthetic/test]\nformats: {apt: {}}\n")
-    root = tmp_path / "store"
-    with (
-        patch.object(discovery, "scan_releases", side_effect=empty_scan),
-        patch.dict(os.environ, {"HD_SIGNING_KEY_FILE": ""}),
-    ):
-        assert cli.main(["publish", "--local-root", str(root)]) == 0
-    assert capsys.readouterr().out.endswith("Nothing changed in 1 repository.\n")
-    assert sorted(path.name for path in (root / "public").iterdir()) == ["apt"]
-    assert not any((root / "public/apt").iterdir())
-
-
 def test_plan_treats_404_as_unpublished_and_continues_past_an_unreachable_domain(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    config = Config(
-        ("synthetic/test",),
-        {"apt": FormatPolicy("apt"), "rpm": FormatPolicy("rpm")},
-        storage=StoragePolicy(
-            "r2",
-            {"apt": "test-apt", "rpm": "test-rpm"},
-            {"apt": "https://apt.example.invalid", "rpm": "https://127.0.0.1:1"},
-        ),
-    )
+    urls = {"apt": "https://apt.example.invalid", "rpm": "https://127.0.0.1:1"}
     real = urllib.request.urlopen
 
     def answer(request: urllib.request.Request, timeout: float) -> object:
@@ -449,17 +413,17 @@ def test_plan_treats_404_as_unpublished_and_continues_past_an_unreachable_domain
         return real(request, timeout=timeout)
 
     with patch.object(urllib.request, "urlopen", side_effect=answer):
-        cli.show_plan(config, empty_scan())
+        cli.show_plan(scan_with("app.deb"), urls)
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "Reading published state from apt.example.invalid, 127.0.0.1"
     assert lines[1].startswith("rpm   cannot reach 127.0.0.1: ")
     assert lines[2:] == [
         "",
         "Format  Repository           Published  New",
-        "apt     apt.example.invalid          0    0",
+        "apt     apt.example.invalid          0    1",
         "rpm     127.0.0.1                    ?    ?",
         "",
-        "No new packages. Nothing written. Could not read rpm, so the plan is incomplete.",
+        "1 new package. Nothing written. Could not read rpm, so the plan is incomplete.",
     ]
 
 

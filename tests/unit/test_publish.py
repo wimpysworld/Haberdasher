@@ -4,11 +4,13 @@ import hashlib
 import io
 import json
 import socket
+import urllib.error
 import urllib.request
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
+from email.message import Message
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -459,6 +461,9 @@ def test_unlock_deletes_existing_locks_only_on_request(
     storage = StoragePolicy("local", {name: str(root / "public" / name) for name in core.FORMATS})
     store = LocalStore(storage)
     state.acquire(store, {"arch": storage.public["arch"]}, now=NOW)
+    releases = Releases(tmp_path / "releases")
+    releases.add("tool", "1")
+    monkeypatch.setattr(discovery, "scan_releases", releases.scan)
     assert cli.main(["publish", "--local-root", str(root)]) == 1
     error = capsys.readouterr().err
     assert "is locked by another run" in error and "Use just unlock only after" in error
@@ -534,29 +539,26 @@ def test_plan_counts_published_and_new_packages_from_the_public_inventory(
     fixture.run()
     fixture.releases.add("tool", "2")
     inventory = fixture.path("arch", state.INVENTORY_KEY).read_bytes()
-    config = Config(
-        ("test/project",),
-        {"arch": FormatPolicy("arch")},
-        storage=StoragePolicy(
-            "r2",
-            {"arch": "test-arch", "apt": "test-apt"},
-            {"arch": "https://pkg.example.invalid", "apt": "https://apt.example.invalid"},
-        ),
-    )
+    urls = {"arch": "https://pkg.example.invalid", "apt": "https://apt.example.invalid"}
     requested: list[str] = []
 
     def answer(request: urllib.request.Request, timeout: float) -> io.BytesIO:
         requested.append(request.full_url)
+        if request.full_url.startswith("https://apt."):
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
         return io.BytesIO(inventory)
 
     scan = fixture.releases.scan(
-        config, runtime=fixture.runtime, previous=discovery.DiscoveryState()
+        fixture.config, runtime=fixture.runtime, previous=discovery.DiscoveryState()
     )
     with patch.object(urllib.request, "urlopen", side_effect=answer):
-        cli.show_plan(config, scan)
-    assert requested == ["https://pkg.example.invalid/haberdasher.json"]
+        cli.show_plan(scan, urls)
+    assert requested == [
+        "https://pkg.example.invalid/haberdasher.json",
+        "https://apt.example.invalid/haberdasher.json",
+    ]
     assert capsys.readouterr().out.splitlines() == [
-        "Reading published state from pkg.example.invalid",
+        "Reading published state from pkg.example.invalid, apt.example.invalid",
         "",
         "Format  Repository           Published  New",
         "arch    pkg.example.invalid          1    1",

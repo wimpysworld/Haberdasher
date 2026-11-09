@@ -60,7 +60,7 @@ Run `tests/native/test_pipeline.py` for served-key trust without production URLs
 
 The workflow passes `github.token` as `GH_TOKEN` with `contents: read`. Storage variables and `HD_SIGNING_KEY` come from secrets. These inputs stay scoped to the publish step.
 
-The publish step runs `just publish`. It reads buckets and formats from the committed `haberdasher.yaml`. No secret holds publisher configuration.
+The publish step runs `just publish`. It reads sources from the committed `haberdasher.yaml`. Buckets are in code. No secret holds publisher configuration.
 
 This change does not provision secrets, change environment protection, or enable `HD_PUBLISH_ENABLED`. Keep publication disabled until the activation checks below pass. Workflow configuration alone does not prove hosted access.
 
@@ -73,9 +73,9 @@ This change does not provision secrets, change environment protection, or enable
 | Hosted execution | Configure CI secrets, default-branch policy, environment protection, and hosted permissions |
 | Public delivery | Qualify custom-domain HTTPS, content types, cache headers, delayed clients, and split entry/signature recovery |
 | APK | Accept native v2 SHA1 control identity and test declared real inputs/client compatibility |
-| Flatpak | Configure source owner, application refs, runtime origin, extensions, and empty collection in `haberdasher.yaml` |
+| Flatpak | Derive source owner, application refs, runtime origin, extensions, and empty collection without per-project settings. Until then, discovery skips `.flatpak` assets. |
 | Distribution clients | Test declared official distribution images and architectures separately from pinned Nix clients |
 
-Already-signed RPMs and signed upstream Flatpak bundles remain rejected. Flatpak source/runtime configuration is not yet in `haberdasher.yaml`, and there is no automatic source addition. No activation test above ran as part of the local acceptance path.
+Already-signed RPMs and signed upstream Flatpak bundles remain rejected. Flatpak publication is not supported yet, and there is no automatic source addition. No activation test above ran as part of the local acceptance path.
 
 Obtain explicit approval before production credentials, key use, public actions, or external permission tests. No deletion or retention change forms part of activation.

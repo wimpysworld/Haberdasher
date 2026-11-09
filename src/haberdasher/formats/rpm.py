@@ -96,7 +96,9 @@ def inspect(
         raise RpmFailure("Verified RPM bytes changed")
     identity = _identity(asset.local_path, runtime)
     if identity.architecture not in (*policy.architectures, "noarch"):
-        raise RpmFailure("RPM architecture is not approved")
+        raise RpmFailure(
+            f"{asset.source.filename}: unsupported RPM architecture {identity.architecture!r}"
+        )
     _unsigned(asset.local_path, runtime)
     header = _run(runtime, ["rpm", "-qp", "--xml", str(asset.local_path)])
     parse_xml(header)

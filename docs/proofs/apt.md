@@ -84,7 +84,7 @@ cache behaviour, remote recovery, or crash durability.
 
 ## Production adapter and remaining gates
 
-`src/haberdasher/formats/apt.py` uses admitted new inputs and retained package records. It signs both Release forms and publishes immutable by-hash dependencies before entries. Default validity is seven days, with renewal within two days, configurable through `haberdasher.yaml`.
+`src/haberdasher/formats/apt.py` uses admitted new inputs and retained package records. It signs both Release forms and publishes immutable by-hash dependencies before entries. Default validity is seven days, with renewal within two days, set in code.
 
 `tests/native/test_apt.py` covers HTTP install/update, strict rejection, delayed by-hash clients, retained records, and expiry. `tests/native/test_pipeline.py` adds real CLI publication, served-key trust, late assets, no-op, and a full rerun after an interruption.
 

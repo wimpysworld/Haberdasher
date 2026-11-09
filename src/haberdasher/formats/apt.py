@@ -116,8 +116,11 @@ def inspect(
     _policy(policy)
     if sha256_file(asset.local_path) != (asset.sha256, asset.size):
         raise AptFailure("Verified DEB bytes changed before inspection")
-    control = _run(runtime, ["dpkg-deb", "-f", str(asset.local_path)]).decode("utf-8")
-    identity = _identity(_fields(control), policy)
+    control = _fields(_run(runtime, ["dpkg-deb", "-f", str(asset.local_path)]).decode("utf-8"))
+    arch = control.get("Architecture", "")
+    if arch not in (*policy.architectures, "all"):
+        raise AptFailure(f"{asset.source.filename}: unsupported APT architecture {arch!r}")
+    identity = _identity(control, policy)
     filename = f"pool/{asset.sha256}.deb"
     target = safe_path(out, filename)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

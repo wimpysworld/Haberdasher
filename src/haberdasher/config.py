@@ -22,7 +22,6 @@ from yaml.events import (
 from yaml.nodes import MappingNode, Node
 
 from haberdasher.core import (
-    FORMATS,
     Record,
     format_name,
     integer,
@@ -88,27 +87,9 @@ def _load(path: Path) -> dict[str, object]:
             loader.dispose()
     except (yaml.YAMLError, UnicodeError) as error:
         raise ValueError("Invalid YAML document") from error
-    return _keys(value, None)
-
-
-def _keys(value: object, allowed: set[str] | frozenset[str] | None) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise ValueError("Expected a mapping")
-    if any(not isinstance(key, str) for key in cast(dict[object, object], value)):
-        raise ValueError("Expected string mapping keys")
-    result = cast(dict[str, object], value)
-    if allowed is not None and result.keys() - allowed:
-        raise ValueError("Unknown configuration key")
-    return result
-
-
-def _strings(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise ValueError("Expected a list of strings")
-    result = tuple(text(item, "list item") for item in cast(list[object], value))
-    if len(set(result)) != len(result):
-        raise ValueError("Duplicate list item")
-    return result
+        raise ValueError("Expected a YAML mapping, for example sources: [owner/repo]")
+    return cast(dict[str, object], value)
 
 
 def _bool(value: object) -> bool:
@@ -205,41 +186,28 @@ class FormatPolicy(Record):
             raise ValueError("Invalid trust policy")
 
 
-def _https_url(value: object, label: str) -> str:
-    value = text(value, label)
-    parsed = urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError(f"Invalid {label}")
-    return value
-
-
-@dataclass(frozen=True)
-class CosignPolicy(Record):
-    """Sigstore bundle requirements for a source's release checksum documents."""
-
-    bundle_suffix: str
-    issuer: str
-    identity: str
-
-    def __post_init__(self) -> None:
-        suffix = text(self.bundle_suffix, "cosign bundle suffix")
-        if re.fullmatch(r"\.[A-Za-z0-9][A-Za-z0-9_.-]*", suffix) is None:
-            raise ValueError("Invalid cosign bundle suffix")
-        _https_url(self.issuer, "cosign issuer")
-        _https_url(self.identity, "cosign identity")
-        if "{" in self.identity.replace("{tag}", "") or "}" in self.identity.replace("{tag}", ""):
-            raise ValueError("Cosign identity supports only the {tag} placeholder")
-
-    def certificate_identity(self, tag: str) -> str:
-        return self.identity.replace("{tag}", text(tag, "release tag"))
+# Bucket and public URL for each format. Plans read the URL; publication writes the bucket.
+PUBLIC: dict[str, tuple[str, str]] = {
+    "apt": ("haberdasher-apt", "https://apt.wimpys.world"),
+    "rpm": ("haberdasher-rpm", "https://rpm.wimpys.world"),
+    "arch": ("haberdasher-pkg", "https://pkg.wimpys.world"),
+    "apk": ("haberdasher-apk", "https://apk.wimpys.world"),
+    "flatpak": ("haberdasher-flatpak", "https://flatpak.wimpys.world"),
+}
+# Concrete architectures that each repository layout indexes. Every format also accepts its
+# architecture-independent packages: APT all, RPM noarch, Arch any, and Alpine noarch.
+ARCHITECTURES: dict[str, tuple[str, ...]] = {
+    "apt": ("amd64", "arm64"),
+    "rpm": ("x86_64", "aarch64"),
+    "arch": ("x86_64", "aarch64"),
+    "apk": ("x86_64", "aarch64"),
+    "flatpak": ("x86_64", "aarch64"),
+}
 
 
 @dataclass(frozen=True)
 class Config(Record):
     sources: tuple[str, ...]
-    formats: dict[str, FormatPolicy] = field(default_factory=dict)
-    cosign: dict[str, CosignPolicy] = field(default_factory=dict)
-    storage: StoragePolicy | None = None
 
     def __post_init__(self) -> None:
         if not self.sources or len({source.lower() for source in self.sources}) != len(
@@ -248,45 +216,20 @@ class Config(Record):
             raise ValueError("Sources must be non-empty and unique")
         for source in self.sources:
             repository_name(source)
-        for name, policy in self.formats.items():
-            if not isinstance(policy, FormatPolicy) or name != policy.format:
-                raise ValueError("Invalid format policy")
-        for source, cosign in self.cosign.items():
-            if source not in self.sources or not isinstance(cosign, CosignPolicy):
-                raise ValueError("Invalid cosign policy")
-        if self.storage is not None and (
-            not isinstance(self.storage, StoragePolicy)
-            or self.storage.backend != "r2"
-            or not self.storage.public
-        ):
-            raise ValueError("Storage needs R2 public buckets")
-
-    def public_formats(self) -> tuple[str, ...]:
-        """Configured formats that have a public bucket."""
-        if self.storage is None:
-            return ()
-        return tuple(sorted(self.formats.keys() & self.storage.public.keys()))
 
     def format_policy(self, name: str) -> FormatPolicy:
         format_name(name)
-        architectures = ("amd64", "arm64") if name == "apt" else ("x86_64",)
-        return self.formats.get(name, FormatPolicy(name, architectures=architectures))
+        return FormatPolicy(name, ARCHITECTURES[name])
 
 
 @dataclass(frozen=True)
 class StoragePolicy(Record):
     backend: str = "local"
     public: dict[str, str] = field(default_factory=dict)
-    urls: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.backend not in {"local", "r2"}:
             raise ValueError("Invalid storage backend")
-        if not self.urls.keys() <= self.public.keys():
-            raise ValueError("Each public URL needs a public destination")
-        for name, url in self.urls.items():
-            if urlsplit(_https_url(url, f"{name} public URL")).path not in ("", "/"):
-                raise ValueError(f"The {name} public URL must not have a path")
         locations: list[str] = []
         for name, location in self.public.items():
             format_name(name)
@@ -340,101 +283,16 @@ class Policy(Record):
 
 
 def load_config(path: Path) -> Config:
-    data = _keys(_load(path), {"sources", "formats", "storage"})
-    if not isinstance(data.get("sources"), list):
-        raise ValueError("Expected a list of sources")
-    sources: list[str] = []
-    cosign: dict[str, CosignPolicy] = {}
-    for item in cast(list[object], data["sources"]):
-        if isinstance(item, dict):
-            values = _keys(cast(object, item), {"repository", "cosign"})
-            source = text(values.get("repository"), "source")
-            if "cosign" in values:
-                signer = _keys(values["cosign"], {"bundle_suffix", "issuer", "identity"})
-                cosign[source] = CosignPolicy(
-                    text(signer.get("bundle_suffix"), "cosign bundle suffix"),
-                    text(signer.get("issuer"), "cosign issuer"),
-                    text(signer.get("identity"), "cosign identity"),
-                )
-        else:
-            source = text(item, "source")
-        sources.append(source)
-    policies: dict[str, FormatPolicy] = {}
-    for name, value in _keys(data.get("formats", {}), FORMATS).items():
-        allowed = {"architectures", "trust"}
-        if name == "apt":
-            allowed |= {"suite", "component", "validity_seconds", "renewal_seconds"}
-        values = _keys(value, allowed)
-        architectures = _strings(
-            values.get("architectures", ["amd64", "arm64"] if name == "apt" else ["x86_64"])
+    data = _load(path)
+    unknown = sorted(data.keys() - {"sources"})
+    if unknown:
+        raise ValueError(
+            f"Unknown key {unknown[0]!r} in {path.name}. Only 'sources' is allowed, "
+            "for example sources: [owner/repo]"
         )
-        policies[name] = FormatPolicy(
-            name,
-            architectures,
-            text(values.get("suite", "stable"), "suite"),
-            text(values.get("component", "main"), "component"),
-            integer(values.get("validity_seconds", 604800), "validity", 1),
-            integer(values.get("renewal_seconds", 172800), "renewal", 1),
-            _trust(values.get("trust", {})),
-        )
-    storage = None
-    if "storage" in data:
-        values = _keys(data["storage"], {"public"})
-        public = {
-            name: _keys(value, {"bucket", "url"})
-            for name, value in _keys(values.get("public"), FORMATS).items()
-        }
-        storage = StoragePolicy(
-            "r2",
-            {name: text(value.get("bucket"), "public bucket") for name, value in public.items()},
-            {name: text(value.get("url"), "public URL") for name, value in public.items()},
-        )
-    return Config(tuple(sources), policies, cosign, storage)
-
-
-def _trust(value: object) -> TrustPolicy:
-    data = _keys(
-        value,
-        {
-            "allow_signed_upstream",
-            "upstream_fingerprints",
-            "source_owner",
-            "refs",
-            "runtime",
-        },
-    )
-    runtime = None
-    if "runtime" in data:
-        values = _keys(
-            data["runtime"],
-            {
-                "url",
-                "fingerprint",
-                "collection",
-                "branch",
-                "architecture",
-                "remote",
-                "refs",
-                "extensions",
-            },
-        )
-        collection = values.get("collection", "")
-        if not isinstance(collection, str):
-            raise ValueError("Runtime collection must be a string")
-        runtime = RuntimePolicy(
-            text(values.get("url"), "runtime URL"),
-            _fingerprint(values.get("fingerprint")),
-            collection,
-            _token(values.get("branch")),
-            _token(values.get("architecture")),
-            _token(values.get("remote")),
-            _strings(values.get("refs")),
-            _strings(values.get("extensions", [])),
-        )
-    return TrustPolicy(
-        _bool(data.get("allow_signed_upstream", False)),
-        _strings(data.get("upstream_fingerprints", [])),
-        text(data["source_owner"], "source owner") if "source_owner" in data else None,
-        _strings(data.get("refs", [])),
-        runtime,
-    )
+    items = data.get("sources")
+    if not isinstance(items, list) or not all(
+        isinstance(item, str) for item in cast(list[object], items)
+    ):
+        raise ValueError(f"'sources' in {path.name} must be a list of owner/repo strings")
+    return Config(tuple(cast(list[str], items)))

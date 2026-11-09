@@ -25,6 +25,7 @@ def fixture(
     architecture: str = "x86_64",
     dependency: str | None = None,
     label: str = "normal",
+    extension: str = ".pkg.tar.zst",
 ) -> VerifiedAsset:
     directory = runtime.root / f"build-{name}-{version}-{release}-{label}"
     directory.mkdir()
@@ -36,7 +37,7 @@ def fixture(
         (Path(executable).parent.parent / "etc/makepkg.conf").read_text() + "\n"
         "BUILDENV=(!distcc !color !ccache !check !sign)\n"
         "OPTIONS=(!strip docs libtool staticlibs emptydirs !zipman !purge !debug !lto !autodeps)\n"
-        "PKGEXT='.pkg.tar.zst'\n" + (f"CARCH='{architecture}'\n" if architecture != "any" else "")
+        f"PKGEXT='{extension}'\n" + (f"CARCH='{architecture}'\n" if architecture != "any" else "")
     )
     (directory / "PKGBUILD").write_text(
         f"pkgname={name}\npkgver={version}\npkgrel={release}\n"
@@ -51,7 +52,7 @@ def fixture(
     result = runtime.run(["makepkg", "--nodeps", "--config", str(config)], cwd=directory)
     if result.returncode:
         raise RuntimeError(result.stderr.decode() + result.stdout.decode())
-    package = directory / f"{name}-{version}-{release}-{architecture}.pkg.tar.zst"
+    package = directory / f"{name}-{version}-{release}-{architecture}{extension}"
     members = run(runtime, "bsdtar", "-tf", str(package)).splitlines()
     if b".INSTALL" in members:
         raise RuntimeError("Fixture contains an install script")

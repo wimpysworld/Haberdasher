@@ -6,6 +6,7 @@ import pytest
 from haberdasher.config import (
     MAX_BYTES,
     PRODUCTION_FINGERPRINT,
+    PUBLIC,
     Config,
     FormatPolicy,
     Policy,
@@ -21,19 +22,13 @@ def document(tmp_path: Path, value: str) -> Path:
     return path
 
 
-def test_existing_config_and_defaults() -> None:
+def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
+    assert Path("haberdasher.yaml").read_text() == "sources: [wimpysworld/tailor]\n"
     config = load_config(Path("haberdasher.yaml"))
-    assert config.sources == ("wimpysworld/tailor",)
-    for name in ("arch", "apk"):
+    assert config == Config(("wimpysworld/tailor",))
+    assert config.format_policy("apt").architectures == ("amd64", "arm64")
+    for name in ("rpm", "arch", "apk"):
         assert config.format_policy(name).architectures == ("x86_64", "aarch64")
-    assert config.format_policy("rpm").architectures == ("x86_64", "aarch64")
-    assert "flatpak" not in config.formats
-    signer = config.cosign["wimpysworld/tailor"]
-    assert signer.bundle_suffix == ".sigstore.json"
-    assert signer.issuer == "https://token.actions.githubusercontent.com"
-    assert signer.certificate_identity("v0.6.0") == (
-        "https://github.com/wimpysworld/tailor/.github/workflows/builder.yml@refs/tags/v0.6.0"
-    )
     apt = config.format_policy("apt")
     assert (apt.suite, apt.component, apt.validity_seconds, apt.renewal_seconds) == (
         "stable",
@@ -41,27 +36,42 @@ def test_existing_config_and_defaults() -> None:
         604800,
         172800,
     )
-    assert apt.architectures == ("amd64", "arm64")
-    assert config.storage == StoragePolicy(
-        "r2",
-        {
-            "apt": "haberdasher-apt",
-            "rpm": "haberdasher-rpm",
-            "apk": "haberdasher-apk",
-            "arch": "haberdasher-pkg",
-            "flatpak": "haberdasher-flatpak",
-        },
-        {
-            "apt": "https://apt.wimpys.world",
-            "rpm": "https://rpm.wimpys.world",
-            "apk": "https://apk.wimpys.world",
-            "arch": "https://pkg.wimpys.world",
-            "flatpak": "https://flatpak.wimpys.world",
-        },
-    )
-    assert config.public_formats() == ("apk", "apt", "arch", "rpm")
+    for name in ("rpm", "apk"):
+        assert not config.format_policy(name).trust.allow_signed_upstream
+    assert PUBLIC == {
+        "apt": ("haberdasher-apt", "https://apt.wimpys.world"),
+        "rpm": ("haberdasher-rpm", "https://rpm.wimpys.world"),
+        "arch": ("haberdasher-pkg", "https://pkg.wimpys.world"),
+        "apk": ("haberdasher-apk", "https://apk.wimpys.world"),
+        "flatpak": ("haberdasher-flatpak", "https://flatpak.wimpys.world"),
+    }
+    StoragePolicy("r2", {name: bucket for name, (bucket, _) in PUBLIC.items()})
     with pytest.raises(ValueError):
         Policy().require_remote()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "sources:\n  - wimpysworld/tailor\n  - example/other\n",
+        "sources: [wimpysworld/tailor, example/other]\n",
+    ],
+)
+def test_sources_list_is_the_whole_configuration(tmp_path: Path, value: str) -> None:
+    config = load_config(document(tmp_path, value))
+    assert config.sources == ("wimpysworld/tailor", "example/other")
+
+
+@pytest.mark.parametrize("key", ["formats", "storage", "cosign", "trust"])
+def test_unknown_key_is_one_clear_line(tmp_path: Path, key: str) -> None:
+    with pytest.raises(ValueError) as error:
+        load_config(document(tmp_path, f"sources: [owner/repo]\n{key}: {{}}\n"))
+    message = str(error.value)
+    assert message == (
+        f"Unknown key '{key}' in input.yaml. Only 'sources' is allowed, "
+        "for example sources: [owner/repo]"
+    )
+    assert "\n" not in message
 
 
 @pytest.mark.parametrize(
@@ -143,20 +153,6 @@ def test_duplicate_nested_keys(tmp_path: Path) -> None:
         )
 
 
-def test_config_format_trust(tmp_path: Path) -> None:
-    config = load_config(
-        document(
-            tmp_path,
-            "sources: [owner/repo]\nformats: {rpm: {trust: {allow_signed_upstream: true, "
-            f"upstream_fingerprints: ['{'A' * 40}']}}}}}}",
-        )
-    )
-    rpm = config.format_policy("rpm")
-    assert rpm.trust.allow_signed_upstream
-    assert rpm.trust.upstream_fingerprints == ("A" * 40,)
-    assert not config.format_policy("apt").trust.allow_signed_upstream
-
-
 @pytest.mark.parametrize(
     "value",
     [
@@ -202,19 +198,6 @@ def test_reject_local_storage(apt: str, rpm: str) -> None:
         StoragePolicy("local", {"apt": apt, "rpm": rpm})
 
 
-def test_public_formats_need_configured_format_and_bucket(tmp_path: Path) -> None:
-    config = load_config(
-        document(
-            tmp_path,
-            "sources: [owner/repo]\nformats: {apt: {}, rpm: {}}\n"
-            "storage: {public: {rpm: {bucket: rpm-bucket, url: 'https://rpm.invalid'}, "
-            "apk: {bucket: apk-bucket, url: 'https://apk.invalid'}}}",
-        )
-    )
-    assert config.public_formats() == ("rpm",)
-    assert load_config(document(tmp_path, "sources: [owner/repo]")).public_formats() == ()
-
-
 def test_remote_needs_r2_and_production_key(tmp_path: Path) -> None:
     storage = StoragePolicy("r2", {"apt": "public-apt"})
     Policy(storage, PRODUCTION_FINGERPRINT).require_remote()
@@ -240,35 +223,9 @@ def flatpak_runtime() -> RuntimePolicy:
     )
 
 
-@pytest.mark.parametrize("collection", ["", "world.example.Runtime", " "])
-def test_flatpak_runtime_policy(tmp_path: Path, collection: str) -> None:
-    value = f"""sources: [owner/repo]
-formats:
-  flatpak:
-    trust:
-      source_owner: example
-      refs: [app/org.example.App/x86_64/stable]
-      runtime:
-        url: http://127.0.0.1:12345/runtime
-        fingerprint: '{"A" * 40}'
-        collection: '{collection}'
-        branch: stable
-        architecture: x86_64
-        remote: test-runtime
-        refs: [runtime/org.example.Platform/x86_64/stable]
-        extensions: []
-"""
-    if collection:
-        with pytest.raises(ValueError, match="External runtime collection must be empty"):
-            load_config(document(tmp_path, value))
-        return
-    config = load_config(document(tmp_path, value))
-    trust = config.format_policy("flatpak").trust
-    assert trust.runtime is not None
-    assert trust.runtime.collection == ""
-    assert load_config(document(tmp_path, value.replace("        collection: ''\n", ""))) == config
-    with pytest.raises(ValueError):
-        load_config(document(tmp_path, value.replace("127.0.0.1", "example.invalid")))
+def test_runtime_policy_http_needs_loopback() -> None:
+    with pytest.raises(ValueError, match="loopback"):
+        replace(flatpak_runtime(), url="http://example.invalid/runtime")
 
 
 @pytest.mark.parametrize("collection", ["", "world.example.Runtime", " "])

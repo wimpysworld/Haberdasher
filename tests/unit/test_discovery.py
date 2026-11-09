@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import re
 import subprocess
 from collections.abc import Iterator, Sequence
 from dataclasses import replace
@@ -10,14 +11,15 @@ from urllib.parse import unquote
 
 import pytest
 
-from haberdasher import discovery
-from haberdasher.config import Config, CosignPolicy
+from haberdasher import discovery, publish
+from haberdasher.config import Config
 from haberdasher.core import SourceAsset, canonical_json
 from haberdasher.discovery import (
     ChecksumEntry,
     CompleteScan,
     DiscoveryFailure,
     DiscoveryState,
+    cosign_identity,
     parse_checksums,
     scan_releases,
     verify_asset,
@@ -30,6 +32,8 @@ RELEASES = "repos/example/tool/releases"
 
 
 class RecordedGitHub(Runtime):
+    repository = "example/tool"
+
     def __init__(self, root: Path) -> None:
         super().__init__(root, environ={"PATH": ""})
         self.pages = cast(
@@ -96,7 +100,7 @@ class RecordedGitHub(Runtime):
                 data = canonical_json(next(self.rows(int(endpoint.rsplit("/", 1)[1]))))
             return subprocess.CompletedProcess(argv, 0, data, b"")
         assert argv[1:3] == ["release", "download"]
-        assert argv[argv.index("--repo") + 1] == "https://github.com/example/tool"
+        assert argv[argv.index("--repo") + 1] == f"https://github.com/{self.repository}"
         assert argv[-2] == "--"
         pattern = argv[argv.index("--pattern") + 1]
         name = pattern.replace("\\", "")
@@ -375,14 +379,25 @@ def test_discovery_limits(github: RecordedGitHub, monkeypatch: pytest.MonkeyPatc
         scan(github)
 
 
-def test_ambiguous_checksum_sources(github: RecordedGitHub) -> None:
+def add_checksum(github: RecordedGitHub, identifier: int, name: str, body: bytes) -> None:
+    extra = copy.deepcopy(next(github.rows(202)))
+    extra.update(id=identifier, name=name, size=len(body))
+    github.pages[f"{RELEASES}/20/assets?per_page=100&page=2"].append(extra)
+    github.bodies[f"v2/{name}"] = body
+
+
+def test_agreeing_checksum_sources(github: RecordedGitHub) -> None:
+    add_checksum(github, 204, "SHA256SUMS", github.bodies["v2/checksums.txt"])
+    digest = github.bodies["v2/checksums.txt"].split()[0]
+    add_checksum(github, 205, "app.deb.sha256", digest + b"\n")
+    assert {item.source.asset_id for item in scan(github).changed} == {101, 201}
+
+
+def test_conflicting_checksum_sources(github: RecordedGitHub) -> None:
     previous = scan(github).state
     before = canonical_json(previous)
-    extra = copy.deepcopy(next(github.rows(202)))
-    extra.update(id=204, name="SHA256SUMS")
-    github.pages[f"{RELEASES}/20/assets?per_page=100&page=2"].append(extra)
-    github.bodies["v2/SHA256SUMS"] = github.bodies["v2/checksums.txt"]
-    with pytest.raises(DiscoveryFailure, match="Ambiguous checksum"):
+    add_checksum(github, 204, "app.deb.sha256", ("f" * 64 + "  app.deb\n").encode())
+    with pytest.raises(DiscoveryFailure, match="disagree about app.deb"):
         scan(github, previous)
     assert canonical_json(previous) == before
 
@@ -558,19 +573,14 @@ def test_state_validation(github: RecordedGitHub) -> None:
         replace(state, assets=tuple(asset for asset in state.assets if asset.asset_id != 202))
 
 
-SIGNER = CosignPolicy(
-    ".sigstore.json",
-    "https://token.actions.githubusercontent.com",
-    "https://github.com/example/tool/.github/workflows/release.yml@refs/tags/{tag}",
-)
-SIGNED = Config(("example/tool",), cosign={"example/tool": SIGNER})
-
-
 class CosignGitHub(RecordedGitHub):
     def __init__(self, root: Path) -> None:
         super().__init__(root)
         self.cosign: list[tuple[tuple[str, ...], bytes, bytes]] = []
-        self.cosign_status = 0
+        self.signers = {
+            tag: f"https://github.com/example/tool/.github/workflows/release.yml@refs/tags/{tag}"
+            for tag in ("v1", "v2")
+        }
         for release, checksum, identifier in ((20, "checksums.txt", 204), (10, "SHA256SUMS", 103)):
             tag = "v2" if release == 20 else "v1"
             row = copy.deepcopy(next(self.rows(202)))
@@ -594,7 +604,10 @@ class CosignGitHub(RecordedGitHub):
         assert env_kind == "native" and cwd is None and input is None
         bundle = Path(argv[argv.index("--bundle") + 1])
         self.cosign.append((tuple(argv), bundle.read_bytes(), Path(argv[-1]).read_bytes()))
-        return subprocess.CompletedProcess(argv, self.cosign_status, b"", b"")
+        signer = self.signers[json.loads(bundle.read_bytes())["bundle"]]
+        pattern = argv[argv.index("--certificate-identity-regexp") + 1]
+        status = 0 if re.search(pattern, signer) else 1
+        return subprocess.CompletedProcess(argv, status, b"", b"")
 
 
 @pytest.fixture
@@ -607,38 +620,201 @@ def signed(tmp_path: Path) -> Iterator[CosignGitHub]:
 
 
 def test_cosign_verifies_each_checksum_with_its_release_identity(signed: CosignGitHub) -> None:
-    result = scan_releases(SIGNED, runtime=signed, previous=DiscoveryState())
+    lines: list[str] = []
+    result = scan_releases(CONFIG, runtime=signed, previous=DiscoveryState(), report=lines.append)
     assert {item.source.asset_id for item in result.changed} == {101, 201}
     verified = {
-        argv[argv.index("--certificate-identity") + 1]: (argv, bundle, blob)
+        argv[argv.index("--certificate-identity-regexp") + 1]: (argv, bundle, blob)
         for argv, bundle, blob in signed.cosign
     }
-    prefix = "https://github.com/example/tool/.github/workflows/release.yml@refs/tags/"
-    assert set(verified) == {prefix + "v1", prefix + "v2"}
-    argv, bundle, blob = verified[prefix + "v2"]
+    assert set(verified) == {cosign_identity("example/tool", tag) for tag in ("v1", "v2")}
+    argv, bundle, blob = verified[cosign_identity("example/tool", "v2")]
     assert argv[:2] == ("cosign", "verify-blob")
-    assert argv[argv.index("--certificate-oidc-issuer") + 1] == SIGNER.issuer
+    assert argv[argv.index("--certificate-oidc-issuer") + 1] == discovery.COSIGN_ISSUER
     assert bundle == b'{"bundle":"v2"}'
     assert blob == signed.bodies["v2/checksums.txt"]
+    assert all("cosign OK" in line for line in lines[1:])
     assert not list((signed.root / "downloads").iterdir())
 
 
-def test_missing_cosign_bundle_fails_before_import(signed: CosignGitHub) -> None:
+@pytest.mark.parametrize(
+    "identity,matches",
+    [
+        ("https://github.com/example/tool/.github/workflows/release.yml@refs/tags/v1.0", True),
+        ("https://github.com/example/tool/.github/workflows/builder.yml@refs/tags/v1.0", True),
+        ("https://github.com/example/other/.github/workflows/release.yml@refs/tags/v1.0", False),
+        ("https://github.com/attacker/tool/.github/workflows/release.yml@refs/tags/v1.0", False),
+        ("https://github.com/example/tool/.github/workflows/release.yml@refs/tags/v1.01", False),
+        ("https://github.com/example/tool/.github/workflows/release.yml@refs/tags/v1x0", False),
+        ("https://github.com/example/tool/.github/workflows/release.yml@refs/heads/v1.0", False),
+        ("https://github.com/example/tool/.github/workflows/a@b@refs/tags/v1.0", False),
+        ("https://github.com/example/toolx/.github/workflows/release.yml@refs/tags/v1.0", False),
+    ],
+)
+def test_cosign_identity_pins_repository_and_tag(identity: str, matches: bool) -> None:
+    pattern = cosign_identity("example/tool", "v1.0")
+    assert pattern.startswith("^") and pattern.endswith("$")
+    assert (re.search(pattern, identity) is not None) is matches
+
+
+def test_missing_cosign_bundle_is_allowed_and_shown(signed: CosignGitHub) -> None:
     for page in signed.pages.values():
         page[:] = [row for row in page if row["id"] != 103]
-    with pytest.raises(DiscoveryFailure, match=r"Missing cosign bundle SHA256SUMS\.sigstore\.json"):
-        scan_releases(SIGNED, runtime=signed, previous=DiscoveryState())
+    lines: list[str] = []
+    result = scan_releases(CONFIG, runtime=signed, previous=DiscoveryState(), report=lines.append)
+    assert {item.source.asset_id for item in result.changed} == {101, 201}
+    assert "cosign OK" in lines[1] and "no cosign bundle" in lines[2]
+    assert len(signed.cosign) == 1
 
 
-def test_failed_cosign_verification_fails_before_import(signed: CosignGitHub) -> None:
-    signed.cosign_status = 1
-    with pytest.raises(DiscoveryFailure, match="Cosign bundle verification failed"):
-        scan_releases(SIGNED, runtime=signed, previous=DiscoveryState())
+@pytest.mark.parametrize(
+    "signer",
+    [
+        "https://github.com/example/other/.github/workflows/release.yml@refs/tags/v2",
+        "https://github.com/example/tool/.github/workflows/release.yml@refs/tags/v1",
+    ],
+    ids=["wrong-repository", "wrong-tag"],
+)
+def test_failed_cosign_verification_fails_before_import(signed: CosignGitHub, signer: str) -> None:
+    signed.signers["v2"] = signer
+    with pytest.raises(DiscoveryFailure, match="does not verify for example/tool at tag v2"):
+        scan_releases(CONFIG, runtime=signed, previous=DiscoveryState())
     assert len(signed.cosign) == 1
     assert not list((signed.root / "downloads").iterdir())
 
 
-def test_unconfigured_source_ignores_bundles(signed: CosignGitHub) -> None:
-    result = scan(signed)
-    assert {item.source.asset_id for item in result.changed} == {101, 201}
-    assert not signed.cosign
+OTHER = "repos/example/other/releases"
+
+
+def asset_row(identifier: int, name: str, data: bytes, digest: bool = False) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": identifier,
+        "name": name,
+        "size": len(data),
+        "state": "uploaded",
+        "updated_at": "2026-03-01T00:00:00Z",
+        "browser_download_url": f"https://github.com/example/other/releases/download/{name}",
+    }
+    if digest:
+        row["digest"] = "sha256:" + hashlib.sha256(data).hexdigest()
+    return row
+
+
+class OtherLayout(RecordedGitHub):
+    """A second project: no tag prefix, per-asset and SHA256SUMS checksums, no cosign bundles,
+    architecture-independent packages, a Flatpak bundle, and releases without checksum files."""
+
+    repository = "example/other"
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        packages = {
+            "other_1.2.3_all.deb": b"deb-all",
+            "other-1.2.3-1.noarch.rpm": b"rpm-noarch",
+            "other-1.2.3-1-any.pkg.tar.xz": b"arch-any",
+            "other-1.2.3-r0.apk": b"apk-noarch",
+        }
+        assets: dict[str, bytes] = {
+            **packages,
+            "other_1.2.3_linux.tar.gz": b"tarball",
+            "other-linux-amd64": b"binary",
+            "org.example.Other.flatpak": b"flatpak",
+            "other_1.2.3_all.deb.sha256": hashlib.sha256(b"deb-all").hexdigest().encode() + b"\n",
+            "other-1.2.3-1.noarch.rpm.sha256": (
+                f"{hashlib.sha256(b'rpm-noarch').hexdigest()}  other-1.2.3-1.noarch.rpm\n"
+            ).encode(),
+            "SHA256SUMS": "".join(
+                f"{hashlib.sha256(packages[name]).hexdigest()}  {name}\n"
+                for name in ("other-1.2.3-1-any.pkg.tar.xz", "other-1.2.3-r0.apk")
+            ).encode(),
+        }
+        self.pages = {
+            f"{OTHER}?per_page=100&page=1": [
+                {"id": 70, "tag_name": "1.2.3", "draft": False, "prerelease": False},
+                {"id": 60, "tag_name": "1.2.2", "draft": False, "prerelease": False},
+                {"id": 50, "tag_name": "1.2.1", "draft": False, "prerelease": False},
+            ],
+            f"{OTHER}?per_page=100&page=2": [],
+            f"{OTHER}/70/assets?per_page=100&page=1": [
+                asset_row(700 + index, name, data)
+                for index, (name, data) in enumerate(assets.items())
+            ],
+            f"{OTHER}/70/assets?per_page=100&page=2": [],
+            f"{OTHER}/60/assets?per_page=100&page=1": [
+                asset_row(600, "other_1.2.2_amd64.deb", b"no-checksum"),
+                asset_row(601, "other-1.2.2-1.x86_64.rpm", b"no-checksum-rpm"),
+            ],
+            f"{OTHER}/60/assets?per_page=100&page=2": [],
+            f"{OTHER}/50/assets?per_page=100&page=1": [
+                asset_row(500, "other_1.2.1_arm64.deb", b"digest-only", digest=True),
+            ],
+            f"{OTHER}/50/assets?per_page=100&page=2": [],
+        }
+        self.bodies = {f"1.2.3/{name}": data for name, data in assets.items()}
+        self.bodies["1.2.1/other_1.2.1_arm64.deb"] = b"digest-only"
+
+
+def test_second_source_with_a_different_release_layout(tmp_path: Path) -> None:
+    runtime = OtherLayout(tmp_path / "runtime")
+    lines: list[str] = []
+    try:
+        result = scan_releases(
+            Config(("example/other",)),
+            runtime=runtime,
+            previous=DiscoveryState(),
+            report=lines.append,
+        )
+        changed = {item.source.filename: item for item in result.changed}
+        assert set(changed) == {
+            "other_1.2.3_all.deb",
+            "other-1.2.3-1.noarch.rpm",
+            "other-1.2.3-1-any.pkg.tar.xz",
+            "other-1.2.3-r0.apk",
+            "other_1.2.1_arm64.deb",
+        }
+        assert {item.source.filename for item in result.pending} == {
+            "other_1.2.2_amd64.deb",
+            "other-1.2.2-1.x86_64.rpm",
+        }
+        assert publish.provided(result) == {"apt", "rpm", "arch", "apk"}
+        assert lines == [
+            "example/other: 3 releases",
+            "  1.2.3  checksums OK  no cosign bundle  4 packages",
+            "    org.example.Other.flatpak: Flatpak not supported yet, skipped",
+            "  1.2.2  no checksums  no cosign bundle  2 packages, 2 without a checksum (skipped)",
+            "  1.2.1  GitHub digests OK  no cosign bundle  1 package",
+        ]
+        for item in changed.values():
+            assert item.checksum is not None
+            data = runtime.bodies[
+                f"{'1.2.1' if '1.2.1' in item.source.filename else '1.2.3'}/{item.source.filename}"
+            ]
+            out = runtime.root / f"verified-{item.source.asset_id}"
+            verified = verify_asset(item.source, item.checksum, runtime=runtime, out=out)
+            assert verified.sha256 == hashlib.sha256(data).hexdigest()
+        digest_only = changed["other_1.2.1_arm64.deb"]
+        assert digest_only.checksum is not None
+        assert digest_only.checksum.source == digest_only.source
+        assert not any(call[0] == "cosign" for call in runtime.calls)
+    finally:
+        runtime.close()
+
+
+def test_digest_cross_checks_a_checksum_file(tmp_path: Path) -> None:
+    runtime = OtherLayout(tmp_path / "runtime")
+    try:
+        for row in runtime.pages[f"{OTHER}/70/assets?per_page=100&page=1"]:
+            if row["name"] == "other-1.2.3-r0.apk":
+                row["digest"] = "sha256:" + "f" * 64
+        with pytest.raises(DiscoveryFailure, match="differs from GitHub digest"):
+            scan_releases(Config(("example/other",)), runtime=runtime, previous=DiscoveryState())
+    finally:
+        runtime.close()
+
+
+def test_bare_digest_needs_a_per_asset_checksum_file() -> None:
+    data = ("a" * 64 + "\n").encode()
+    source = replace(checksum_source(data), filename="app.deb.sha256")
+    assert parse_checksums(data, source)[0].filename == "app.deb"
+    with pytest.raises(DiscoveryFailure, match="Malformed"):
+        parse_checksums(data, checksum_source(data))

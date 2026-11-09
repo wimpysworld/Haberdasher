@@ -43,7 +43,7 @@ Architectures: amd64
 Signed-By: /etc/apt/keyrings/haberdasher.gpg
 ```
 
-Match suite, component, and architecture to publisher configuration. The native fixture uses `proof/main/amd64`. The deb822 form expresses the same scoped Signed-By trust.
+Match suite, component, and architecture to publisher configuration. The native fixture uses `stable/main/amd64`. The deb822 form expresses the same scoped Signed-By trust.
 
 After approval, use ordinary `apt-get update`, `apt-get install PACKAGE`, and `apt-get install --only-upgrade PACKAGE`. Keep signature, date, and `Valid-Until` checks enabled. Do not use `apt-key`, global trust, or `trusted=yes`.
 

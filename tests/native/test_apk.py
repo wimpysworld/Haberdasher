@@ -610,9 +610,9 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
                 runtime=runtime,
                 out=runtime.root / "bad-sha",
             )
-        noarch = fixture(runtime, "hd-noarch", "1.0-r0", payload="unqualified", arch="noarch")
-        with pytest.raises(apk.ApkFailure, match="architecture"):
-            accept(noarch, runtime)
+        armv7 = fixture(runtime, "hd-armv7", "1.0-r0", payload="unqualified", arch="armv7")
+        with pytest.raises(apk.ApkFailure, match="unsupported APK architecture 'armv7'"):
+            accept(armv7, runtime)
         v3 = runtime.root / "v3.apk"
         empty = runtime.root / "empty-v3"
         empty.mkdir()
@@ -664,7 +664,7 @@ def test_unsigned_multiarch_without_release_suffix() -> None:
             assert item.inspected.identity.architecture == arch
             assert item.inspected.identity.version == "1.0"
             accepted.append(item)
-        with pytest.raises(apk.ApkFailure, match="Unqualified APK architecture"):
+        with pytest.raises(apk.ApkFailure, match="unsupported APK architecture 'aarch64'"):
             accept(assets["aarch64"], runtime)
         generation1 = apk.prepare(
             accepted,
@@ -738,3 +738,52 @@ def test_unsigned_multiarch_without_release_suffix() -> None:
                     record.path == path and record.status == 200 and record.bytes_sent > 0
                     for record in requests
                 )
+
+
+def test_noarch_package_in_every_architecture_index() -> None:
+    policy = replace(POLICY, architectures=("x86_64", "aarch64"))
+    with (
+        private_workspace() as runtime,
+        disposable_key() as key,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+    ):
+        noarch = fixture(runtime, "hd-noarch", "1.0-r0", payload="shared", arch="noarch")
+        item = accept(noarch, runtime, (), policy)
+        assert item.inspected.identity.architecture == "noarch"
+        prepared = apk.prepare(
+            [item],
+            EMPTY,
+            policy=policy,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "noarch-generation1",
+        )
+        assert [output.ref.key for output in prepared.outputs] == [
+            "keys/haberdasher.rsa.pub",
+            "noarch/hd-noarch-1.0-r0.apk",
+            "aarch64/APKINDEX.tar.gz",
+            "x86_64/APKINDEX.tar.gz",
+        ]
+        apk.validate_retained(committed(prepared), policy=policy, runtime=runtime)
+        public = runtime.root / "noarch-public"
+        public.mkdir()
+        publish(prepared, public)
+        with serve(public) as http:
+            for arch in ("x86_64", "aarch64"):
+                http.set_generation_mtime([public / arch / "APKINDEX.tar.gz"], 1)
+                client = Client(
+                    runtime,
+                    f"noarch-{arch.replace('_', '-')}",
+                    http.url(),
+                    public / "keys/haberdasher.rsa.pub",
+                    arch,
+                )
+                client.run("verify", str(public / arch / "APKINDEX.tar.gz"))
+                client.run("update")
+                client.add("hd-noarch=1.0-r0")
+                client.installed("hd-noarch", "1.0-r0", "shared")
+                fetched = client.fetch("downloads", "hd-noarch=1.0-r0")
+                assert sha256_file(fetched / "hd-noarch-1.0-r0.apk") == (noarch.sha256, noarch.size)
