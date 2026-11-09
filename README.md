@@ -1,6 +1,6 @@
 # Haberdasher
 
-Haberdasher is Martin Wimpress's personal publisher. It takes the prebuilt packages from the GitHub "Latest" release of each listed `wimpysworld` repository and publishes them as signed APT, RPM, Arch, Alpine, and Flatpak repositories on Cloudflare R2. It is not a package builder.
+Haberdasher is Martin Wimpress's personal publisher. It takes the prebuilt packages from the GitHub "Latest" release of each listed repository that Martin controls and publishes them as signed APT, RPM, Arch, Alpine, and Flatpak repositories on Cloudflare R2. It is not a package builder.
 
 ## Use
 
