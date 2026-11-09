@@ -5,7 +5,7 @@ import hashlib
 import io
 import subprocess
 import tarfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,6 +50,7 @@ class FakeRuntime(Runtime):
         input: bytes | None = None,
         timeout: float = 120,
         env_kind: str = "native",
+        progress: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         self.calls.append(tuple(argv))
         return subprocess.CompletedProcess(argv, self.code, self.stdout, b"failure")
@@ -346,6 +347,7 @@ class NativeApk(FakeRuntime):
         input: bytes | None = None,
         timeout: float = 120,
         env_kind: str = "native",
+        progress: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         argv = tuple(argv)
         self.calls.append(argv)

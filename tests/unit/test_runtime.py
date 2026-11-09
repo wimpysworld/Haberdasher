@@ -374,3 +374,22 @@ def test_explicit_environment_never_reads_gh_login(
         assert "GH_TOKEN" not in runtime.environment_for("github")
     finally:
         runtime.close()
+
+
+def test_progress_receives_redacted_stderr_lines_as_they_arrive(tmp_path: Path) -> None:
+    runtime = Runtime(
+        tmp_path, environ={"PATH": os.defpath, "HD_CLOUDFLARE_ACCESS_KEY_ID": "synthetic-id"}
+    )
+    lines: list[str] = []
+    script = (
+        "import sys, time\n"
+        "sys.stderr.write('first synthetic-id\\nsec'); sys.stderr.flush(); time.sleep(0.1)\n"
+        "sys.stderr.write('ond\\nunterminated'); print('stdout')\n"
+    )
+    try:
+        result = runtime.run([sys.executable, "-c", script], progress=lines.append)
+    finally:
+        runtime.close()
+    assert lines == ["first [REDACTED]", "second"]
+    assert result.stderr == b"first [REDACTED]\nsecond\nunterminated"
+    assert result.stdout == b"stdout\n"

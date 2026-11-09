@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
 
@@ -28,6 +28,11 @@ STORAGE_VARIABLES = (
 
 class RuntimeFailure(RuntimeError):
     pass
+
+
+def transfer_timeout(size: int) -> float:
+    """Allow 120 seconds plus a slow 64 KiB/s for each transfer of `size` bytes."""
+    return 120 + size / 65536
 
 
 def _gh_login_token(path: str) -> str | None:
@@ -165,7 +170,9 @@ class Runtime:
         input: bytes | None = None,
         timeout: float = 120,
         env_kind: str = "native",
+        progress: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
+        """Run one native command. `progress` receives each redacted stderr line as it arrives."""
         if self._closed:
             raise RuntimeFailure("Runtime is closed")
         if (
@@ -195,7 +202,7 @@ class Runtime:
             raise RuntimeFailure("Could not start native command") from None
         self._children.add(process)
         outputs = {"stdout": bytearray(), "stderr": bytearray()}
-        total = sent = 0
+        total = sent = streamed = 0
         try:
             with selectors.DefaultSelector() as selector:
                 for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
@@ -212,7 +219,9 @@ class Runtime:
                 while selector.get_map():
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise RuntimeFailure("Native command timed out")
+                        raise RuntimeFailure(
+                            f"Native command timed out after {timeout:.0f} seconds"
+                        )
                     for key, _ in selector.select(remaining):
                         if key.data == "stdin":
                             try:
@@ -232,10 +241,17 @@ class Runtime:
                             if total > self.max_output:
                                 raise RuntimeFailure("Native command exceeded the output limit")
                             outputs[key.data].extend(block)
+                            if progress is not None and key.data == "stderr":
+                                lines = outputs["stderr"][streamed:].split(b"\n")
+                                for line in lines[:-1]:
+                                    progress(self.redact(bytes(line)).decode(errors="replace"))
+                                streamed = len(outputs["stderr"]) - len(lines[-1])
                 try:
                     process.wait(timeout=max(0, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
-                    raise RuntimeFailure("Native command timed out") from None
+                    raise RuntimeFailure(
+                        f"Native command timed out after {timeout:.0f} seconds"
+                    ) from None
             return subprocess.CompletedProcess(
                 [self.redact(arg.encode()).decode() for arg in argv],
                 process.returncode,

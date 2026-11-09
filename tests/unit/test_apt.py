@@ -3,7 +3,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -28,8 +28,10 @@ from haberdasher.core import (
 )
 from haberdasher.formats import apt
 from haberdasher.formats.apt import (
+    _check_names,  # pyright: ignore[reportPrivateUsage]
     _indexes,  # pyright: ignore[reportPrivateUsage]
     _policy,  # pyright: ignore[reportPrivateUsage]
+    _pool_key,  # pyright: ignore[reportPrivateUsage]
     _verify_signatures,  # pyright: ignore[reportPrivateUsage]
 )
 from haberdasher.runtime import Runtime
@@ -50,6 +52,7 @@ class Commands(Runtime):
         input: bytes | None = None,
         timeout: float = 120,
         env_kind: str = "native",
+        progress: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         self.commands.append(tuple(argv))
         if not self.replies:
@@ -74,15 +77,29 @@ def asset(root: Path) -> VerifiedAsset:
     return VerifiedAsset(source, path, sha, size, 3, "0" * 64)
 
 
-def control(arch: str = "amd64") -> bytes:
-    return f"Package: hd-test\nVersion: 1.0\nArchitecture: {arch}\n".encode()
+def control(arch: str = "amd64", name: str = "hd-test", version: str = "1.0") -> bytes:
+    return f"Package: {name}\nVersion: {version}\nArchitecture: {arch}\n".encode()
 
 
-def record(verified: VerifiedAsset, arch: str = "amd64") -> bytes:
+def pool(
+    arch: str = "amd64", name: str = "hd-test", version: str = "1.0", source: str | None = None
+) -> str:
+    source = source or name
+    return f"pool/main/h/{source}/{name}_{version.partition(':')[2] or version}_{arch}.deb"
+
+
+def record(
+    verified: VerifiedAsset,
+    arch: str = "amd64",
+    name: str = "hd-test",
+    version: str = "1.0",
+    source: str | None = None,
+) -> bytes:
     return (
-        control(arch)
+        control(arch, name, version)
+        + (f"Source: {source}\n" if source else "").encode()
         + (
-            f"Filename: pool/{verified.sha256}.deb\nSize: {verified.size}\nSHA256: {verified.sha256}\n"
+            f"Filename: {pool(arch, name, version, source)}\nSize: {verified.size}\nSHA256: {verified.sha256}\n"
             "Depends: hd-one (>= 1),\n hd-two\nDescription: Test\n Full description.\n"
             "X-Custom: retained\n\n"
         ).encode()
@@ -138,13 +155,13 @@ def test_complete_record_and_multiline_dependencies_are_preserved(tmp_path: Path
     assert inspected.metadata == {"record": raw.decode()}
     assert inspected.evidence == {"dependencies": {"Depends": "hd-one (>= 1),\n hd-two"}}
     assert inspected.verified == verified
-    assert sha256_file(tmp_path / f"inspection/pool/{verified.sha256}.deb") == (
+    assert sha256_file(tmp_path / "inspection" / pool()) == (
         verified.sha256,
         verified.size,
     )
     assert runtime.commands == [
         ("dpkg-deb", "-f", str(verified.local_path)),
-        ("apt-ftparchive", "packages", f"pool/{verified.sha256}.deb"),
+        ("apt-ftparchive", "packages", pool()),
     ]
 
 
@@ -383,12 +400,10 @@ def retained_history(
             sha256=hashlib.sha256(data).hexdigest(),
             size=len(data),
         )
-        raw = (
-            record(current, identity.architecture)
-            .decode()
-            .replace("Package: hd-test", f"Package: {identity.name}")
-            .replace("Version: 1.0", f"Version: {identity.version}")
-        )
+        source = f"hd-source-{index}"
+        raw = record(
+            current, identity.architecture, identity.name, identity.version, source
+        ).decode()
         history.append(
             AdmittedAsset(
                 InspectedAsset(current, identity, {"record": raw}, {}, "unsigned"),
@@ -397,7 +412,9 @@ def retained_history(
                 current.sha256,
             )
         )
-        reference(f"pool/{current.sha256}.deb", data, "package")
+        reference(
+            pool(identity.architecture, identity.name, identity.version, source), data, "package"
+        )
     indexes = _indexes(history, config)
     now = datetime(2026, 1, 1, tzinfo=UTC)
     expiry = now + timedelta(seconds=config.validity_seconds)
@@ -524,3 +541,65 @@ def test_all_is_not_a_concrete_index_architecture(tmp_path: Path) -> None:
             policy=FormatPolicy("apt", ("all",)),
             runtime=runtime,
         )
+
+
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        (
+            {"Package": "sidra", "Version": "1.3.0", "Architecture": "amd64"},
+            "pool/main/s/sidra/sidra_1.3.0_amd64.deb",
+        ),
+        (
+            {"Package": "hd-tool", "Version": "1:2.0-1", "Architecture": "all"},
+            "pool/main/h/hd-tool/hd-tool_2.0-1_all.deb",
+        ),
+        (
+            {
+                "Package": "libhd-data",
+                "Source": "libhd (1.0)",
+                "Version": "1.0",
+                "Architecture": "arm64",
+            },
+            "pool/main/libh/libhd/libhd-data_1.0_arm64.deb",
+        ),
+        (
+            {"Package": "lib", "Version": "1.0", "Architecture": "amd64"},
+            "pool/main/lib/lib/lib_1.0_amd64.deb",
+        ),
+    ],
+)
+def test_pool_names_follow_debian_layout(fields: dict[str, str], expected: str) -> None:
+    assert _pool_key(fields, FormatPolicy("apt", ("amd64",))) == expected
+
+
+def test_two_sources_with_one_pool_name_fail_with_one_line(tmp_path: Path) -> None:
+    config = FormatPolicy("apt", ("amd64",))
+    verified = asset(tmp_path)
+    history: list[AdmittedAsset] = []
+    for index, (repository, version) in enumerate((("one/tool", "1.0"), ("two/tool", "1:1.0"))):
+        data = f"different bytes {index}".encode()
+        current = replace(
+            verified,
+            source=replace(
+                verified.source, repository=repository, asset_id=index + 1, size=len(data)
+            ),
+            sha256=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+        )
+        identity = NativeIdentity("apt", "hd-test", "amd64", version)
+        raw = record(current, version=version).decode()
+        history.append(
+            AdmittedAsset(
+                InspectedAsset(current, identity, {"record": raw}, {}, "unsigned"),
+                "preserve",
+                f"history-{index}",
+            )
+        )
+    with pytest.raises(apt.AptFailure) as error:
+        _check_names(history, config)
+    assert str(error.value) == (
+        "pool/main/h/hd-test/hd-test_1.0_amd64.deb comes from both one/tool (fixture.deb)"
+        " and two/tool (fixture.deb); publish one of them"
+    )
+    _check_names(history[:1] * 2, config)

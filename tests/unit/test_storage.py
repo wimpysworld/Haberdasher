@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing
 import os
 import stat
 import subprocess
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -14,8 +15,8 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from haberdasher import storage
-from haberdasher.core import ObjectStat, WriteReceipt
-from haberdasher.runtime import Runtime, RuntimeFailure
+from haberdasher.core import ObjectStat, OutputObject, WriteReceipt
+from haberdasher.runtime import Runtime, RuntimeFailure, transfer_timeout
 from haberdasher.storage import (
     MAX_OBJECT_SIZE,
     LocalStore,
@@ -35,8 +36,8 @@ class CommandRuntime(Runtime):
     def __init__(self, root: Path) -> None:
         super().__init__(root, environ=synthetic_environment("https://storage.invalid", os.defpath))
         self.calls: list[list[str]] = []
+        self.timeouts: list[float] = []
         self.objects: dict[str, tuple[bytes, str]] = {}
-        self.revision = 0
         self.failure = ""
         self.bad_download = False
         self.change_on_download = False
@@ -50,10 +51,12 @@ class CommandRuntime(Runtime):
         input: bytes | None = None,
         timeout: float = 120,
         env_kind: str = "native",
+        progress: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         assert env_kind == "storage"
         command = list(argv)
         self.calls.append(command)
+        self.timeouts.append(timeout)
         if command[0] == "rclone":
             key = command[2].split("/", 1)[1]
             data, etag = self.objects[key]
@@ -121,13 +124,23 @@ class CommandRuntime(Runtime):
                 b"",
                 b"An error occurred (PreconditionFailed) when calling the PutObject operation",
             )
+        timed_out = RuntimeFailure(f"Native command timed out after {timeout:.0f} seconds")
         if self.failure == "before":
-            raise RuntimeFailure("Native command timed out")
-        self.revision += 1
-        etag = f'"revision-{self.revision}"'
-        self.objects[key] = Path(command[command.index("--body") + 1]).read_bytes(), etag
-        if self.failure == "after":
-            raise RuntimeFailure("Native command timed out")
+            raise timed_out
+        if self.failure == "unavailable":
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                b"",
+                b"An error occurred (ServiceUnavailable) when calling the PutObject operation",
+            )
+        data = Path(command[command.index("--body") + 1]).read_bytes()
+        if self.failure in {"other", "corrupt"}:
+            data = b"other bytes" if self.failure == "other" else data[:-1]
+        etag = f'"{hashlib.md5(data, usedforsecurity=False).hexdigest()}"'
+        self.objects[key] = data, etag
+        if self.failure in {"after", "other"}:
+            raise timed_out
         if self.failure == "nonzero":
             return subprocess.CompletedProcess(command, 1, b"", b"Lost response")
         if self.failure == "malformed":
@@ -242,7 +255,8 @@ def test_cleanup_does_not_change_precondition_rejection(
         assert error.value.__cause__ is (cleanup if remote else None)
     assert len(command_runtime.calls) == calls + int(remote)
     assert store.stat(ref) == ObjectStat(first.etag, ref.size)
-    assert store.replace(ref, source, expected_etag=first.etag).etag != first.etag
+    replaced = store.replace(ref, source, expected_etag=first.etag)
+    assert (replaced.etag == first.etag) == remote
 
 
 @pytest.mark.parametrize("remote", [False, True])
@@ -457,7 +471,8 @@ def test_remote_roundtrip_and_arguments(tmp_path: Path, command_runtime: Command
     assert store.stat(ref) is None
     first = store.create(ref, source)
     second = store.replace(ref, source, expected_etag=first.etag)
-    assert first.etag != second.etag
+    assert first.etag == second.etag == f'"{hashlib.md5(b"fixture").hexdigest()}"'
+    assert not any(call[0] == "rclone" or "get-object" in call for call in command_runtime.calls)
     puts = [call for call in command_runtime.calls if call[0] == "aws" and call[2] == "put-object"]
     first_args = json.loads(puts[0][puts[0].index("--cli-input-json") + 1])
     second_args = json.loads(puts[1][puts[1].index("--cli-input-json") + 1])
@@ -475,34 +490,100 @@ def test_remote_roundtrip_and_arguments(tmp_path: Path, command_runtime: Command
             assert "--retries=1" in call and "--low-level-retries=1" in call
 
 
-@pytest.mark.parametrize("failure", ["before", "after", "nonzero", "malformed", "etag"])
+@pytest.fixture(autouse=True)
+def no_retry_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(storage, "WRITE_RETRY_SECONDS", 0)
+
+
+def test_transfer_timeout_scales_with_size(tmp_path: Path, command_runtime: CommandRuntime) -> None:
+    assert transfer_timeout(0) == 120
+    assert transfer_timeout(105_000_000) == pytest.approx(1722.2, abs=0.1)
+    store = R2Store(remote_policy(), runtime=command_runtime)
+    store.create(object_ref(), source_file(tmp_path))
+    store.download(object_ref(), tmp_path / "download")
+    calls = list(zip(command_runtime.calls, command_runtime.timeouts, strict=True))
+    puts = [timeout for call, timeout in calls if "put-object" in call]
+    rclone = [timeout for call, timeout in calls if call[0] == "rclone"]
+    assert puts == rclone == [transfer_timeout(7)]
+
+
+@pytest.mark.parametrize(
+    ("failure", "replacement", "puts"),
+    [
+        ("after", False, 2),
+        ("nonzero", False, 2),
+        ("malformed", False, 1),
+        ("after", True, 1),
+        ("nonzero", True, 1),
+    ],
+)
+def test_committed_attempt_is_confirmed_by_head_and_md5(
+    tmp_path: Path, command_runtime: CommandRuntime, failure: str, replacement: bool, puts: int
+) -> None:
+    store = R2Store(remote_policy(), runtime=command_runtime)
+    source = source_file(tmp_path)
+    ref = object_ref()
+    first = store.create(ref, source) if replacement else None
+    command_runtime.calls.clear()
+    command_runtime.failure = failure
+    if first is None:
+        receipt = store.create(ref, source)
+    else:
+        receipt = store.replace(ref, source, expected_etag=first.etag)
+    assert receipt == WriteReceipt(command_runtime.objects[ref.key][1], ref.sha256, ref.size)
+    assert len([call for call in command_runtime.calls if "put-object" in call]) == puts
+    command_runtime.failure = ""
+    store.create(object_ref(key="next-object"), source)
+
+
+@pytest.mark.parametrize(
+    ("failure", "replacement", "puts", "cause"),
+    [
+        ("before", False, 3, "Native command timed out after 120 seconds"),
+        ("unavailable", False, 3, "ServiceUnavailable"),
+        ("other", False, 2, "PreconditionFailed on retry"),
+        ("etag", False, 1, "stored object differs from the upload"),
+        ("before", True, 1, "Native command timed out after 120 seconds"),
+        ("other", True, 1, "Native command timed out after 120 seconds"),
+    ],
+)
 @pytest.mark.parametrize("cleanup_failure", [False, True])
-def test_unknown_response_never_retries_or_claims_success(
+def test_unconfirmed_write_is_unknown_and_blocks_writes(
     tmp_path: Path,
     command_runtime: CommandRuntime,
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
+    replacement: bool,
+    puts: int,
+    cause: str,
     cleanup_failure: bool,
 ) -> None:
     store = R2Store(remote_policy(), runtime=command_runtime)
-    command_runtime.failure = failure
+    old = object_ref(b"first")
+    first = store.create(old, source_file(tmp_path, b"first")) if replacement else None
     source = source_file(tmp_path)
     ref = object_ref()
+    command_runtime.calls.clear()
+    command_runtime.failure = failure
     cleanup = fail_write_cleanup(monkeypatch) if cleanup_failure else None
     with pytest.raises(UnknownWrite) as error:
-        store.create(ref, source)
-    assert (error.value.observation is None) == (failure == "before")
+        if first is None:
+            store.create(ref, source)
+        else:
+            store.replace(ref, source, expected_etag=first.etag)
+    message = str(error.value)
+    assert (
+        message
+        == f"Write outcome is unknown for apt object nested/object ({cause}); rerun the publication"
+    )
+    assert error.value.observation is None
     if cleanup is not None:
         assert error.value.__cause__ is cleanup
-    if failure != "before":
-        data, etag = command_runtime.objects[ref.key]
-        assert data == source.read_bytes()
-        assert error.value.observation == WriteReceipt(etag, ref.sha256, ref.size)
+    assert len([call for call in command_runtime.calls if "put-object" in call]) == puts
     calls = len(command_runtime.calls)
-    with pytest.raises(UnknownWrite):
-        store.create(object_ref(key="next-object"), source_file(tmp_path))
+    with pytest.raises(UnknownWrite, match=r"^Write outcome is unknown \(an earlier"):
+        store.create(object_ref(key="next-object"), source)
     assert len(command_runtime.calls) == calls
-    assert len([call for call in command_runtime.calls if "put-object" in call]) == 1
 
 
 def test_precondition_conflict_does_not_reconcile_equal_bytes(
@@ -544,7 +625,7 @@ def test_failed_write_verification_is_unknown(
     monkeypatch: pytest.MonkeyPatch,
     cleanup_failure: bool,
 ) -> None:
-    command_runtime.bad_download = True
+    command_runtime.failure = "corrupt"
     store = R2Store(remote_policy(), runtime=command_runtime)
     cleanup = fail_write_cleanup(monkeypatch) if cleanup_failure else None
     source = source_file(tmp_path)
@@ -765,7 +846,9 @@ def test_remote_bounded_read_failures_are_not_absence(
     command_runtime.objects["control"] = b"fixture", '"original"'
     original = command_runtime.run
 
-    def run(argv: Sequence[str], *, env_kind: str = "native") -> subprocess.CompletedProcess[bytes]:
+    def run(
+        argv: Sequence[str], *, timeout: float = 120, env_kind: str = "native"
+    ) -> subprocess.CompletedProcess[bytes]:
         command = list(argv)
         if command[2] == "get-object":
             if failure == "replace":
@@ -774,7 +857,7 @@ def test_remote_bounded_read_failures_are_not_absence(
                 return subprocess.CompletedProcess(
                     command, 1, b"", b"404" if failure == "remove" else b"403"
                 )
-        result = original(argv, env_kind=env_kind)
+        result = original(argv, timeout=timeout, env_kind=env_kind)
         if command[2] == "get-object":
             if failure == "etag":
                 result.stdout = b'{"ETag":"wrong","ContentLength":7}'
@@ -834,3 +917,20 @@ def test_conditional_delete(tmp_path: Path, command_runtime: CommandRuntime, rem
         assert [json.loads(call[call.index("--cli-input-json") + 1]) for call in deletes] == [
             {"Bucket": "test-rpm", "Key": "haberdasher.lock", "IfMatch": first.etag}
         ]
+
+
+def test_local_upload_overwrites_an_unreferenced_leftover(tmp_path: Path) -> None:
+    store = LocalStore(local_policy(tmp_path))
+    outputs: list[OutputObject] = []
+    for index in range(2):
+        data = f"package {index}".encode()
+        ref = replace(object_ref(data, key=f"pool/package-{index}.deb"), object_class="package")
+        path = tmp_path / f"source-{index}"
+        path.write_bytes(data)
+        outputs.append(OutputObject(ref, path, "create", None, index))
+    store.create(outputs[0].ref, outputs[0].local_path)
+    leftover = tmp_path / "public/apt/pool/package-0.deb"
+    leftover.write_bytes(b"interrupted run")
+    store.upload(outputs)
+    assert leftover.read_bytes() == b"package 0"
+    assert (tmp_path / "public/apt/pool/package-1.deb").read_bytes() == b"package 1"

@@ -550,20 +550,38 @@ def test_publish_reports_each_step_and_an_unchanged_rerun(
 ) -> None:
     fixture = Fixture(tmp_path, monkeypatch, ("arch",))
     fixture.releases.add("tool", "1")
+    clock = iter((10.0, 202.0))
+    monkeypatch.setattr(publish.time, "monotonic", lambda: next(clock))
     lines: list[str] = []
     result = fixture.run(lines.append)
     assert (result.packages, result.repositories) == (1, 1)
+    assert result.published_objects == 5
     assert lines == [
         "arch  locked",
         "arch  preparing 1 new package",
         "arch  signed metadata",
-        "arch  uploaded 4 objects",
+        f"arch  uploading 3 objects ({2 * len(EXPORT) + 18} bytes)",
+        "arch  uploaded 3 objects in 3m12s",
+        "arch  wrote 1 metadata object",
         "arch  wrote haberdasher.json",
         "arch  unlocked",
     ]
     lines.clear()
     assert not fixture.run(lines.append).changed
     assert lines == ["arch  locked", "arch  unchanged", "arch  unlocked"]
+
+
+def test_publish_reports_batch_size_and_large_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("big", "1", b"x" * 2_000_000)
+    lines: list[str] = []
+    fixture.run(lines.append)
+    assert [line.rsplit(" in ", 1)[0] for line in lines if "upload" in line] == [
+        "arch  uploading 3 objects (2 MB)",
+        "arch  uploaded 3 objects",
+    ]
 
 
 def test_plan_counts_published_and_new_packages_from_the_public_inventory(

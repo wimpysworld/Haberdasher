@@ -32,7 +32,7 @@ from haberdasher.core import (
     sha256_file,
     text,
 )
-from haberdasher.runtime import Runtime
+from haberdasher.runtime import Runtime, transfer_timeout
 
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_SECONDS = 2
@@ -358,7 +358,7 @@ def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[tu
                     tag,
                 ],
                 env_kind="github",
-                timeout=600,
+                timeout=transfer_timeout(source.size),
             )
             if result.returncode == 0:
                 break

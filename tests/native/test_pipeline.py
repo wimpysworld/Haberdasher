@@ -57,7 +57,9 @@ def printed_result(output: str) -> publish.RunResult:
     lines = output.splitlines()
     assert lines and "{" not in output
     objects = sum(
-        int(line.split()[2]) for line in lines if line.split()[1:2] == ["uploaded"]
+        int(line.split()[2])
+        for line in lines
+        if line.split()[1:2] == ["uploaded"] or "metadata object" in line
     ) + sum(1 for line in lines if line.endswith(f"wrote {state.INVENTORY_KEY}"))
     pending = next((int(line.split()[1]) for line in lines if line.startswith("Skipped ")), 0)
     changed = lines[-1].startswith("Published ")

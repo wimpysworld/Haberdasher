@@ -21,6 +21,9 @@ from tests.native.fixtures.apt import Client, build, policy, publish
 from tests.support.http import serve
 from tests.support.keys import disposable_key
 
+# The epoch stays out of the pool name, as in Debian.
+SECOND = "pool/main/h/hd-application/hd-application_2.0_amd64.deb"
+
 
 def test_client_configures_runtime_gpgv(monkeypatch: pytest.MonkeyPatch) -> None:
     with private_workspace() as runtime:
@@ -49,7 +52,9 @@ def test_production_apt_install_update_and_rejections() -> None:
         empty = RetainedFormat("apt", None, (), (), {}, ())
         apt.validate_retained(empty, policy=config, runtime=runtime)
         dep = build(runtime, "hd-dependency", "1.0", "dependency", arch="all", asset_id=1)
-        second_dep = build(runtime, "hd-extra", "1.0", "extra", arch="all", asset_id=2)
+        second_dep = build(
+            runtime, "hd-extra", "1.0", "extra", arch="all", source="libhd-extra", asset_id=2
+        )
         first = build(
             runtime,
             "hd-application",
@@ -61,7 +66,7 @@ def test_production_apt_install_update_and_rejections() -> None:
         second = build(
             runtime,
             "hd-application",
-            "2.0",
+            "1:2.0",
             "second",
             depends="hd-dependency (>= 1.0), hd-extra",
             asset_id=4,
@@ -213,12 +218,18 @@ def test_production_apt_install_update_and_rejections() -> None:
                 retained_two = publish(updated, live, 2)
                 client.apt("update")
                 client.apt("upgrade", "-y")
-                client.installed("hd-application", "2.0", "second")
+                client.installed("hd-application", "1:2.0", "second")
                 client.installed("hd-dependency", "1.0", "dependency")
-                assert sha256_file(live / f"pool/{first.sha256}.deb") == (first.sha256, first.size)
-                assert sha256_file(live / f"pool/{second.sha256}.deb") == (
-                    second.sha256,
-                    second.size,
+                assert sha256_file(
+                    live / "pool/main/h/hd-application/hd-application_1.0_amd64.deb"
+                ) == (
+                    first.sha256,
+                    first.size,
+                )
+                assert sha256_file(live / SECOND) == (second.sha256, second.size)
+                assert sha256_file(live / "pool/main/libh/libhd-extra/hd-extra_1.0_all.deb") == (
+                    second_dep.sha256,
+                    second_dep.size,
                 )
                 delayed = http_root / "delayed"
                 shutil.copytree(live, delayed)
@@ -247,7 +258,7 @@ def test_production_apt_install_update_and_rejections() -> None:
                 fallback = Client(runtime, "detached", server.url("detached"), key.public_file)
                 fallback.apt("update")
                 fallback.apt("install", "-y", "hd-application")
-                fallback.installed("hd-application", "2.0", "second")
+                fallback.installed("hd-application", "1:2.0", "second")
                 assert any(
                     record.path == "/detached/dists/stable/Release.gpg" and record.status == 200
                     for record in server.requests()
@@ -269,7 +280,7 @@ def test_production_apt_install_update_and_rejections() -> None:
                 for name, target in (
                     ("signature", "dists/stable/InRelease"),
                     ("index", f"dists/stable/main/binary-amd64/by-hash/SHA256/{new_hash}"),
-                    ("package", f"pool/{second.sha256}.deb"),
+                    ("package", SECOND),
                 ):
                     damaged = http_root / name
                     shutil.copytree(live, damaged)
@@ -324,8 +335,7 @@ def test_production_apt_install_update_and_rejections() -> None:
                         )
                 fetched = server.requests()
                 assert any(
-                    record.path == f"/live/pool/{second.sha256}.deb"
-                    and record.bytes_sent == second.size
+                    record.path == f"/live/{SECOND}" and record.bytes_sent == second.size
                     for record in fetched
                 )
                 print(

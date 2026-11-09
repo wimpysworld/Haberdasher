@@ -92,6 +92,17 @@ def _identity(fields: dict[str, str], policy: FormatPolicy) -> NativeIdentity:
     return NativeIdentity("apt", name, arch, version)
 
 
+def _pool_key(fields: dict[str, str], policy: FormatPolicy) -> str:
+    """Return the Debian pool path, without the epoch, as `dak` names packages."""
+    name, version, arch = fields["Package"], fields["Version"], fields["Architecture"]
+    source = fields.get("Source", name).split(" ", 1)[0]
+    if re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", source) is None:
+        raise AptFailure("Invalid Debian source name")
+    prefix = source[:4] if source.startswith("lib") else source[0]
+    version = version.partition(":")[2] or version
+    return f"pool/{policy.component}/{prefix}/{source}/{name}_{version}_{arch}.deb"
+
+
 def _record(asset: AdmittedAsset, policy: FormatPolicy) -> str:
     inspected = asset.inspected
     record = inspected.metadata.get("record")
@@ -102,12 +113,27 @@ def _record(asset: AdmittedAsset, policy: FormatPolicy) -> str:
         _identity(fields, policy) != inspected.identity
         or fields.get("SHA256") != inspected.verified.sha256
         or fields.get("Size") != str(inspected.verified.size)
-        or fields.get("Filename") != f"pool/{inspected.verified.sha256}.deb"
+        or fields.get("Filename") != _pool_key(fields, policy)
         or asset.transformation_policy != "preserve"
         or asset.published_sha256 not in (None, inspected.verified.sha256)
     ):
         raise AptFailure("APT record differs from accepted identity or bytes")
     return record.rstrip("\n") + "\n\n"
+
+
+def _check_names(history: Sequence[AdmittedAsset], policy: FormatPolicy) -> None:
+    """Reject two packages that differ in bytes but share one pool file name."""
+    names: dict[str, AdmittedAsset] = {}
+    for asset in history:
+        key = _pool_key(_fields(_record(asset, policy)), policy)
+        prior = names.setdefault(key, asset)
+        if prior.inspected.verified.sha256 != asset.inspected.verified.sha256:
+            raise AptFailure(
+                f"{key} comes from both {prior.inspected.verified.source.repository}"
+                f" ({prior.inspected.verified.source.filename}) and"
+                f" {asset.inspected.verified.source.repository}"
+                f" ({asset.inspected.verified.source.filename}); publish one of them"
+            )
 
 
 def inspect(
@@ -121,7 +147,7 @@ def inspect(
     if arch not in (*policy.architectures, "all"):
         raise AptFailure(f"{asset.source.filename}: unsupported APT architecture {arch!r}")
     identity = _identity(control, policy)
-    filename = f"pool/{asset.sha256}.deb"
+    filename = _pool_key(control, policy)
     target = safe_path(out, filename)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     shutil.copyfile(asset.local_path, target)
@@ -288,7 +314,7 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
     for asset in retained.accepted_history:
         _record(asset, policy)
         verified = asset.inspected.verified
-        ref = refs.get(f"pool/{verified.sha256}.deb")
+        ref = refs.get(_pool_key(_fields(_record(asset, policy)), policy))
         if ref is None or (ref.sha256, ref.size, ref.object_class) != (
             verified.sha256,
             verified.size,
@@ -369,6 +395,7 @@ def prepare(
             additions.append(accepted)
     if not history:
         return PreparedFormat("apt", retained, (), retained.objects)
+    _check_names(history, policy)
     if retained.accepted_history and not additions:
         expires = _string(retained.metadata, "expires_at")
         if datetime.fromisoformat(expires) - now > timedelta(seconds=policy.renewal_seconds):
@@ -424,7 +451,7 @@ def prepare(
         verified = asset.inspected.verified
         if sha256_file(verified.local_path) != (verified.sha256, verified.size):
             raise AptFailure("Admitted DEB bytes changed")
-        key = f"pool/{verified.sha256}.deb"
+        key = _pool_key(_fields(_record(asset, policy)), policy)
         path = safe_path(out, key)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         shutil.copyfile(verified.local_path, path)

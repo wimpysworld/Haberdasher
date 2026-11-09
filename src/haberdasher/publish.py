@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -190,6 +191,17 @@ def _write(store: Store, output: OutputObject) -> None:
         store.replace(output.ref, output.local_path, expected_etag=observed.etag)
 
 
+def _size(size: int) -> str:
+    if size >= 1_000_000:
+        return f"{size / 1_000_000:.0f} MB"
+    return f"{size / 1_000:.0f} kB" if size >= 1_000 else plural(size, "byte")
+
+
+def _duration(seconds: float) -> str:
+    minutes, seconds = divmod(round(seconds), 60)
+    return f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
+
+
 def _unchanged(published: Published) -> PreparedFormat:
     expiry = published.retained.metadata.get("expires_at")
     return PreparedFormat(
@@ -339,17 +351,44 @@ def _reconcile(
             )
             if not outputs and hashlib.sha256(data).hexdigest() == current.sha256:
                 continue
+            batch = [
+                output
+                for output in outputs
+                if output.mode == "create" and output.ref.object_class != "entry"
+            ]
+            if batch:
+                size = sum(output.ref.size for output in batch)
+                step(
+                    report, item.format, f"uploading {plural(len(batch), 'object')} ({_size(size)})"
+                )
+                started = time.monotonic()
+                store.upload(
+                    batch, progress=lambda line, name=item.format: step(report, name, line)
+                )
+                elapsed = _duration(time.monotonic() - started)
+                step(report, item.format, f"uploaded {plural(len(batch), 'object')} in {elapsed}")
+                count += len(batch)
+            written = 0
             for output in outputs:
+                if output in batch:
+                    continue
                 if (
                     output.ref.object_class == "entry"
                     and item.expires_at is not None
                     and datetime.fromisoformat(item.expires_at) <= utc_now()
                 ):
                     raise StateError("APT metadata expired before publication; rerun")
+                if output.ref.size > 1_000_000:
+                    step(
+                        report,
+                        item.format,
+                        f"uploading {output.ref.key} ({_size(output.ref.size)})",
+                    )
                 _write(store, output)
-                count += 1
-            if outputs:
-                step(report, item.format, f"uploaded {plural(len(outputs), 'object')}")
+                written += 1
+            if written:
+                step(report, item.format, f"wrote {plural(written, 'metadata object')}")
+            count += written
             state.write_inventory(store, current, data)
             step(report, item.format, f"wrote {state.INVENTORY_KEY}")
             count += 1

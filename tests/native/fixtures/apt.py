@@ -34,6 +34,7 @@ def build(
     *,
     arch: str = "amd64",
     depends: str = "",
+    source: str = "",
     asset_id: int = 1,
 ) -> VerifiedAsset:
     root = runtime.root / f"build-{asset_id}"
@@ -43,7 +44,8 @@ def build(
     destination.parent.mkdir(parents=True)
     control.write_text(
         f"Package: {name}\nVersion: {version}\nArchitecture: {arch}\n"
-        "Maintainer: Synthetic test <test@invalid>\n"
+        + (f"Source: {source}\n" if source else "")
+        + "Maintainer: Synthetic test <test@invalid>\n"
         + (f"Depends: {depends}\n" if depends else "")
         + "Description: Disposable APT fixture\n Complete multiline description.\n"
         "X-Haberdasher-Fixture: preserved-extension\n"

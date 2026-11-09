@@ -81,6 +81,16 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
             asset.published_sha256 != asset.inspected.verified.sha256
             for asset in first.retained.accepted_history
         )
+        assert [item.ref.key for item in first.outputs if item.ref.object_class == "package"] == [
+            "packages/hd-proof-data-1-1.noarch.rpm",
+            "packages/hd-proof-app-1-1.noarch.rpm",
+        ]
+        primary = gzip.decompress(
+            (
+                runtime.root / "one" / rpm.metadata_documents(runtime.root / "one")["primary"][0]
+            ).read_bytes()
+        )
+        assert b'<location href="packages/hd-proof-app-1-1.noarch.rpm"/>' in primary
         assert first.outputs[-2].ref.key == "repodata/repomd.xml"
         assert first.outputs[-1].ref.key == "repodata/repomd.xml.asc"
         first_root = runtime.root / "one"
@@ -437,3 +447,41 @@ def test_signed_upstream_rpm_installs_with_haberdasher_trust() -> None:
             out=runtime.root / "two",
         )
         assert unchanged.outputs == () and unchanged.retained == prepared.retained
+
+
+def test_two_sources_with_one_rpm_file_name_fail_with_one_line() -> None:
+    with (
+        disposable_key() as key,
+        private_workspace() as runtime,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+    ):
+        first = build(runtime, "hd-proof-app", "1", "application-v1", number=1)
+        second = build(runtime, "hd-proof-app", "1", "conflicting-payload", epoch=1, number=2)
+        second = replace(second, source=replace(second.source, repository="example/other"))
+        admissions = [
+            admit(
+                rpm.inspect(asset, policy=POLICY, runtime=runtime, out=runtime.root / str(index)),
+                (),
+                compare=rpm.compare,
+                policy=POLICY,
+                runtime=runtime,
+            )
+            for index, asset in enumerate((first, second))
+        ]
+        with pytest.raises(rpm.RpmFailure) as error:
+            rpm.prepare(
+                admissions,
+                RetainedFormat("rpm", None, (), (), {}, ()),
+                policy=POLICY,
+                runtime=runtime,
+                signer=signer,
+                now=NOW,
+                out=runtime.root / "out",
+            )
+        assert str(error.value) == (
+            f"packages/hd-proof-app-1-1.noarch.rpm comes from both {first.source.repository}"
+            f" ({first.source.filename}) and example/other ({second.source.filename});"
+            " publish one of them"
+        )

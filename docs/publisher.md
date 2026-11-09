@@ -106,7 +106,10 @@ apt   locked
 apt   preparing 18 new packages
 apt   signed metadata
 ...
-apt   uploaded 20 objects
+apt   uploading 18 objects (214 MB)
+apt   107.000 MiB / 204.090 MiB, 52%, 10.512 MiB/s, ETA 9s
+apt   uploaded 18 objects in 21s
+apt   wrote 7 metadata objects
 apt   wrote haberdasher.json
 ...
 apt   unlocked
@@ -128,6 +131,10 @@ Production local signing reads the existing SOPS-managed path through `HD_SIGNIN
 `just publish` checks the storage credentials before discovery. It always signs with the production fingerprint `PRODUCTION_FINGERPRINT` in `src/haberdasher/config.py`. The signing key must match that fingerprint.
 
 Storage subprocesses receive only the three documented `HD_CLOUDFLARE_*` storage variables through an isolated AWS configuration. Conditional create requires absence. Conditional replace requires the exact observed ETag. An ETag identifies a revision, not a SHA256 digest.
+
+Each format uploads its new packages, signatures, dependency metadata, keys, and Flatpak objects with one `rclone copy` run for each content type and cache policy, 16 transfers at a time, then confirms their sizes and MD5 checksums with one `rclone lsjson` run. While `rclone` runs, the format prints its transfer statistics every 10 seconds. Locks, entry metadata, and `haberdasher.json` use conditional single-object writes with `aws s3api`.
+
+APT places each package at `pool/main/<prefix>/<source>/<package>_<version>_<arch>.deb`, without the epoch, for example `pool/main/s/sidra/sidra_1.3.0_amd64.deb`. RPM places each package at `packages/<name>-<version>-<release>.<arch>.rpm`, for example `packages/sidra-1.3.0-1.x86_64.rpm`. When two packages need one file name, the run stops with one line that names the file and both sources.
 
 ## Publication and state
 

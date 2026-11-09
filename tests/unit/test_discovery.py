@@ -3,7 +3,7 @@ import hashlib
 import json
 import re
 import subprocess
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -69,6 +69,7 @@ class RecordedGitHub(Runtime):
         input: bytes | None = None,
         timeout: float = 120,
         env_kind: str = "native",
+        progress: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         assert cwd is None and input is None and timeout > 0
         assert env_kind == "github"
@@ -609,6 +610,7 @@ class CosignGitHub(RecordedGitHub):
         input: bytes | None = None,
         timeout: float = 120,
         env_kind: str = "native",
+        progress: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         if argv[0] != "cosign":
             return super().run(argv, cwd=cwd, input=input, timeout=timeout, env_kind=env_kind)

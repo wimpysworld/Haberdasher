@@ -428,6 +428,14 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
             raise RpmFailure("Retained metadata reference mismatch")
 
 
+def _location(identity: NativeIdentity) -> str:
+    """Name a package `<name>-<version>-<release>.<arch>.rpm`, without the epoch, as Fedora does."""
+    return safe_key(
+        f"packages/{identity.name}-{identity.version}-{identity.release}"
+        f".{identity.architecture}.rpm"
+    )
+
+
 def _ref(path: Path, key: str, kind: str) -> ObjectRef:
     digest, size = sha256_file(path)
     content_type = {
@@ -509,12 +517,16 @@ def prepare(
         identity = asset.inspected.identity
         if _identity(source.local_path, runtime) != identity:
             raise RpmFailure("RPM identity changed before signing")
-        filename = (
-            f"{identity.name}-{identity.version}-{identity.release}.{identity.architecture}.rpm"
-        )
-        key = safe_key(f"packages/{source.sha256}/{filename}")
+        key = _location(identity)
+        for prior in history:
+            if _location(prior.inspected.identity) == key:
+                raise RpmFailure(
+                    f"{key} comes from both {prior.inspected.verified.source.repository}"
+                    f" ({prior.inspected.verified.source.filename}) and {source.source.repository}"
+                    f" ({source.source.filename}); publish one of them"
+                )
         target = safe_path(out, key)
-        target.parent.mkdir(mode=0o700, parents=True)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if _unsign(source.local_path, target, runtime) != asset.inspected.upstream_signature:
             raise RpmFailure("RPM upstream signature status changed before signing")
         gpg = shutil.which("gpg", path=runtime.environment["PATH"])

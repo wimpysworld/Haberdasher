@@ -44,6 +44,8 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
 - Publish every format that the sources provide, plus formats already published, in one run.
 - Verify each package against a release checksum file or its GitHub asset digest before import.
 - Derive package identity from package metadata under each ecosystem's rules, not filenames or release tags alone.
+- Name and place published packages by each ecosystem's standard layout, built from package metadata.
+  For example, APT uses `pool/main/<prefix>/<source>/<name>_<version>_<arch>.deb`. Never name packages by digest.
 - Reject changed upstream bytes for an existing package identity.
   Require a new package version or release identity under that ecosystem's rules.
   When Haberdasher changes package bytes, record the upstream digest separately from the published digest.
@@ -56,6 +58,8 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
   Create each lock with a conditional write, in a fixed bucket order, and delete the locks when the run ends.
   Release a stale lock only with `just unlock`.
 - Publish immutable packages and dependency metadata before each format's entry metadata.
+- Upload packages and other content-addressed objects in parallel with one `rclone` run per format.
+  Keep conditional single-object writes for locks, entry metadata, and `haberdasher.json`.
 - Publish each format's allow-listed inventory after its entry metadata.
 - Recover from an interrupted run with a full rerun.
   Do not add replay, write journals, or crash-recovery state.
