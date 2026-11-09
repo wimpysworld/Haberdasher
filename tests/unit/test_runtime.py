@@ -1,6 +1,7 @@
 import json
 import os
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -9,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from haberdasher.runtime import Runtime, RuntimeFailure, private_workspace
+from haberdasher.runtime import (
+    STORAGE_VARIABLES,
+    Runtime,
+    RuntimeFailure,
+    _gh_login_token,  # pyright: ignore[reportPrivateUsage]
+    private_workspace,
+)
 
 
 @pytest.mark.parametrize("kind", ["native", "github", "storage"])
@@ -360,6 +367,30 @@ def test_github_falls_back_to_stored_gh_login(
         assert len(calls) == 1
     finally:
         runtime.close()
+
+
+def test_gh_login_token_gets_only_login_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    gh = binary / "gh"
+    gh.write_text(
+        f"#!{shutil.which('sh')}\n"
+        f"{shutil.which('env')} -0 >'{tmp_path / 'env'}'\n"
+        "echo synthetic-login-token\n"
+    )
+    gh.chmod(0o700)
+    for key in (*STORAGE_VARIABLES, "HD_SIGNING_KEY", "HD_SIGNING_KEY_FILE", "UNRELATED"):
+        monkeypatch.setenv(key, "do-not-inherit")
+    for key in ("HOME", "GH_CONFIG_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
+        monkeypatch.setenv(key, f"synthetic-{key}")
+    assert _gh_login_token(str(binary)) == "synthetic-login-token"
+    env = dict(line.split("=", 1) for line in (tmp_path / "env").read_text().split("\0") if line)
+    assert "do-not-inherit" not in env.values()
+    assert env["GH_CONFIG_DIR"] == "synthetic-GH_CONFIG_DIR"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "synthetic-DBUS_SESSION_BUS_ADDRESS"
+    assert (env["PATH"], env["GH_PROMPT_DISABLED"]) == (str(binary), "1")
 
 
 def test_explicit_environment_never_reads_gh_login(

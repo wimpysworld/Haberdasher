@@ -100,8 +100,6 @@ def _token(value: object) -> str:
 class FormatPolicy(Record):
     format: str
     architectures: tuple[str, ...] = ("x86_64",)
-    suite: str = "stable"
-    component: str = "main"
 
     def __post_init__(self) -> None:
         format_name(self.format)
@@ -109,8 +107,6 @@ class FormatPolicy(Record):
             raise ValueError("Architectures must be non-empty and unique")
         for architecture in self.architectures:
             _token(architecture)
-        _token(self.suite)
-        _token(self.component)
 
 
 # Bucket and public URL for each format. Plans read the URL; publication writes the bucket.
@@ -199,14 +195,6 @@ class Policy(Record):
             raise ValueError("Invalid storage policy")
         if self.expected_signing_fingerprint is not None:
             _fingerprint(self.expected_signing_fingerprint)
-
-    def require_remote(self) -> None:
-        if (
-            not self.storage.public
-            or self.storage.backend != "r2"
-            or self.expected_signing_fingerprint != PRODUCTION_FINGERPRINT
-        ):
-            raise ValueError("Remote publication needs R2 storage and the production signing key")
 
 
 def load_config(path: Path) -> Config:

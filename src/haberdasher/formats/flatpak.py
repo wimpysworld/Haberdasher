@@ -26,6 +26,7 @@ from haberdasher.core import (
     OutputObject,
     PreparedFormat,
     RetainedFormat,
+    UnsupportedAsset,
     VerifiedAsset,
     canonical_json,
     digest,
@@ -33,6 +34,7 @@ from haberdasher.core import (
     safe_key,
     safe_path,
     sha256_file,
+    stale_entries,
 )
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
@@ -149,15 +151,6 @@ def _flatpakrefs(
         branch, title, runtime_repo = values.pop()
         result[f"{app}.flatpakref"] = _flatpakref(app, branch, title, public, runtime_repo)
     return result
-
-
-def missing_entries(retained: RetainedFormat) -> bool:
-    """Whether published state lacks an application's flatpakref, so a run must add it."""
-    keys = {ref.key for ref in retained.objects}
-    return any(
-        f"{identity.name.split('/')[1]}.flatpakref" not in keys
-        for identity in retained.active_identities
-    )
 
 
 def compare(left: NativeIdentity, right: NativeIdentity, *, runtime: Runtime) -> int | None:
@@ -312,7 +305,7 @@ def inspect(
     if match is None:
         raise FlatpakFailure(f"{asset.source.filename}: not an application bundle: {ref!r}")
     if match[2] not in policy.architectures:
-        raise FlatpakFailure(
+        raise UnsupportedAsset(
             f"{asset.source.filename}: unsupported Flatpak architecture {match[2]!r}"
         )
     if bundle.get("collection") != "":
@@ -437,19 +430,22 @@ def _verify_signatures(
             or valid[0][8:10] != [b"1", b"8"]
             or valid[0][11] != fingerprint.encode()
         ):
-            raise FlatpakFailure("Signature must use the approved primary and SHA256")
+            raise FlatpakFailure("Signature must use the Haberdasher signing primary and SHA256")
 
 
 def _validate_repo(
     retained: RetainedFormat, policy: FormatPolicy, runtime: Runtime, repo: Path
 ) -> None:
+    stale = stale_entries(retained)
     config = repo / "config"
     with config.open("rb") as stream:
         data = stream.read(MAX_METADATA + 1)
-    if len(data) > MAX_METADATA or _native(runtime, metadata=data.decode()).get("keyfile") != {
-        "core": {"repo_version": "1", "mode": "archive-z2", "indexed-deltas": "true"}
-    }:
-        raise FlatpakFailure("Unapproved retained repository configuration")
+    if "config" not in stale and (
+        len(data) > MAX_METADATA
+        or _native(runtime, metadata=data.decode()).get("keyfile")
+        != {"core": {"repo_version": "1", "mode": "archive-z2", "indexed-deltas": "true"}}
+    ):
+        raise FlatpakFailure("Unsupported retained repository configuration")
     heads = _heads(runtime, repo)
     if heads != retained.metadata.get("heads"):
         raise FlatpakFailure("Retained heads differ from native refs")
@@ -471,7 +467,7 @@ def _validate_repo(
         )
         fingerprint = _string(retained.metadata.get("fingerprint"))
         expected_repo = _flatpakrepo(public.read_bytes(), _runtime_repos(retained.accepted_history))
-        if (repo / FLATPAKREPO).read_bytes() != expected_repo:
+        if FLATPAKREPO not in stale and (repo / FLATPAKREPO).read_bytes() != expected_repo:
             raise FlatpakFailure(f"Retained {FLATPAKREPO} differs from the signing key or runtime")
         refs = _flatpakrefs(runtime, repo, retained.accepted_history, public.read_bytes(), work)
         for path in repo.glob("*.flatpakref"):
@@ -494,6 +490,8 @@ def _validate_repo(
                 ):
                     raise FlatpakFailure("Retained version differs from application payload")
         for name in ("summary", "summary.idx"):
+            if {name, name + ".sig"} & stale:
+                continue
             data = _native(runtime, summary_signature=str(repo / (name + ".sig")))
             _verify_signatures(
                 runtime, repo / name, data.get("signatures"), public, fingerprint, work
@@ -503,15 +501,14 @@ def _validate_repo(
 def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
     if policy.format != "flatpak" or retained.format != "flatpak":
         raise FlatpakFailure("Wrong retained format")
-    if retained.prior_generation is None and not retained.accepted_history and not retained.objects:
+    if not retained.accepted_history and not retained.objects:
         if retained.metadata or retained.active_identities:
             raise FlatpakFailure("Incomplete initial state")
         return
     if not retained.objects or not retained.accepted_history:
         raise FlatpakFailure("Missing retained history or objects")
-    if retained.metadata.get("policy") != json.loads(canonical_json(policy)):
-        raise FlatpakFailure("Retained policy changed")
     files = _mapping(retained.metadata.get("files"))
+    stale = stale_entries(retained)
     objects = {ref.key: ref for ref in retained.objects}
     # The files are the working set that the next preparation restores, not every object.
     if not set(files) <= set(objects) or any(
@@ -520,7 +517,11 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
         raise FlatpakFailure("Retained object closure is incomplete")
     for key, ref in objects.items():
         _classify(key)
-        if key in files and sha256_file(Path(_string(files[key]))) != (ref.sha256, ref.size):
+        if (
+            key in files
+            and key not in stale
+            and sha256_file(Path(_string(files[key]))) != (ref.sha256, ref.size)
+        ):
             raise FlatpakFailure("Retained file is missing or corrupt")
     active = {identity.name: identity for identity in retained.active_identities}
     if len(active) != len(retained.active_identities):
@@ -545,13 +546,19 @@ def _restore(runtime: Runtime, retained: RetainedFormat, repo: Path) -> None:
     _run(runtime, "ostree", f"--repo={repo}", "init", "--mode=archive-z2")
     if retained.objects:
         files = _mapping(retained.metadata.get("files"))
+        heads = _mapping(retained.metadata.get("heads", {}))
+        stale = stale_entries(retained)
         for key, path in files.items():
             target = safe_path(repo, key)
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            shutil.copyfile(Path(_string(path)), target)
+            if key not in stale:
+                shutil.copyfile(Path(_string(path)), target)
+            elif key.startswith("refs/heads/"):
+                # A head names its commit, which the retained heads record.
+                target.write_text(digest(heads.get(key.removeprefix("refs/heads/"))) + "\n")
         # Restored application heads hold only their AppStream and metadata paths.
         # The partial marker makes fsck verify what is present instead of failing on the rest.
-        for ref, commit in _mapping(retained.metadata.get("heads", {})).items():
+        for ref, commit in heads.items():
             if ref.startswith("app/"):
                 commit = digest(commit)
                 safe_path(repo, f"state/{commit}.commitpartial").write_bytes(b"")
@@ -613,7 +620,7 @@ def prepare(
             raise FlatpakFailure("Admission evidence changed")
         accepted = admit(inspected, history, compare=compare, policy=policy, runtime=runtime)
         if accepted != asset:
-            raise FlatpakFailure("Admission record differs from the approved transformation")
+            raise FlatpakFailure("Admission record differs from the expected transformation")
         _run(
             runtime,
             "flatpak",
@@ -674,6 +681,7 @@ def prepare(
     refs: list[ObjectRef] = []
     outputs: list[OutputObject] = []
     etags = _mapping(retained.metadata.get("etags", {}))
+    stale = stale_entries(retained)
     # Published objects that this run did not restore stay referenced, unchanged.
     for key in sorted(old.keys() | files.keys(), key=lambda key: (_classify(key)[2], key)):
         if key not in files:
@@ -692,7 +700,7 @@ def prepare(
         )
         refs.append(ref)
         prior = old.get(key)
-        if prior is not None and prior.sha256 == sha and prior.size == size:
+        if prior is not None and (prior.sha256, prior.size) == (sha, size) and key not in stale:
             continue
         if prior is not None and not mutable:
             raise FlatpakFailure("Immutable repository object changed")
@@ -702,7 +710,6 @@ def prepare(
         )
     result = RetainedFormat(
         "flatpak",
-        retained.prior_generation,
         tuple(history),
         tuple(active.values()),
         {
@@ -710,19 +717,16 @@ def prepare(
             "heads": json_value(_heads(runtime, repo)),
             "public_key": base64.b64encode(public).decode(),
             "fingerprint": signer.fingerprint,
-            "policy": json.loads(canonical_json(policy)),
             "etags": {},
         },
         tuple(refs),
     )
     prepared = PreparedFormat("flatpak", result, tuple(outputs), tuple(refs))
-    validate_prepared(prepared, policy=policy, runtime=runtime, now=now)
+    validate_prepared(prepared, policy=policy, runtime=runtime)
     return prepared
 
 
-def validate_prepared(
-    prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
-) -> None:
+def validate_prepared(prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
     if prepared.format != "flatpak" or prepared.referenced_objects != prepared.retained.objects:
         raise FlatpakFailure("Prepared object closure differs from retained state")
     files = _mapping(prepared.retained.metadata.get("files"))

@@ -35,15 +35,29 @@ def transfer_timeout(size: int) -> float:
     return 120 + size / 65536
 
 
+# The variables that locate a stored `gh` login and its system keyring.
+GH_LOGIN_VARIABLES = (
+    "HOME",
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+)
+
+
 def _gh_login_token(path: str) -> str | None:
     """Read the token of the operator's stored `gh` login, when one exists."""
     executable = shutil.which("gh", path=path)
     if executable is None:
         return None
+    login = {key: os.environ[key] for key in GH_LOGIN_VARIABLES if key in os.environ}
     try:
         result = subprocess.run(
             [executable, "auth", "token", "--hostname", "github.com"],
-            env={**os.environ, "PATH": path, "GH_PROMPT_DISABLED": "1"},
+            env={**login, "PATH": path, "GH_PROMPT_DISABLED": "1"},
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,

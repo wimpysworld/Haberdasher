@@ -79,7 +79,7 @@ just lint
 
 Haberdasher needs Python 3.14 or later and PyYAML with the LibYAML `CSafeLoader`.
 
-`just proof` runs the shell proof of each format and the native test suite against disposable keys and loopback servers. `just proof apt` runs the proof and tests for one format. Proofs need an `x86_64-linux` Nix shell.
+`just proof` runs the native test suite against disposable keys and loopback servers. `just proof apt` runs the native tests for one format. The tests need an `x86_64-linux` Nix shell.
 
 - [Validation](docs/validation.md): checks and evidence
 - [Proof guides](docs/proofs/README.md): evidence for each format

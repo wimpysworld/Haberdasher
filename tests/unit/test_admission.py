@@ -205,14 +205,6 @@ def test_comparator_failure_preserves_history(tmp_path: Path) -> None:
     assert canonical_json(history) == before
 
 
-@pytest.mark.parametrize("status", ["unknown", "invalid"])
-def test_untrusted_signatures_reject(tmp_path: Path, status: str) -> None:
-    runtime = Runtime(tmp_path, environ={"PATH": ""})
-    item = replace(inspected(tmp_path), upstream_signature=status)
-    with pytest.raises(AdmissionFailure, match="not trusted"):
-        admit(item, (), compare=NativeDouble(), policy=FormatPolicy("apt"), runtime=runtime)
-
-
 @pytest.mark.parametrize(("format", "transformation"), [("rpm", "rpm-sign"), ("apk", "apk-unsign")])
 def test_signed_upstream_inputs_admit_without_trust(
     tmp_path: Path, format: str, transformation: str

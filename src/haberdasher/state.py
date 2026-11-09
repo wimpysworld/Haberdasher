@@ -32,7 +32,7 @@ from haberdasher.core import (
     text,
     utc_now,
 )
-from haberdasher.storage import LocalStore, PreconditionFailed, R2Store
+from haberdasher.storage import LocalStore, ObjectChanged, PreconditionFailed, R2Store
 
 type Store = LocalStore | R2Store
 LOCK_KEY = "haberdasher.lock"
@@ -302,7 +302,7 @@ def _paths(
 
 
 def unpublished(name: str) -> Published:
-    return Published(name, None, None, (), RetainedFormat(name, None, (), (), {}, ()))
+    return Published(name, None, None, (), RetainedFormat(name, (), (), {}, ()))
 
 
 def read(store: Store, name: str) -> Published:
@@ -328,7 +328,6 @@ def decode_published(name: str, data: bytes, etag: str | None) -> Published:
         )
         retained = RetainedFormat(
             name,
-            None,
             history,
             active,
             mapping(record.get("metadata")),
@@ -344,22 +343,43 @@ def decode_published(name: str, data: bytes, etag: str | None) -> Published:
 
 
 def materialise(store: Store, published: Published, *, out: Path) -> RetainedFormat:
-    """Download the published metadata that adapters read, and observe entry ETags."""
+    """Download the published metadata that adapters read, and observe entry ETags.
+
+    An entry whose bytes differ from the inventory is left out and listed as stale. Under the
+    bucket lock only an interrupted run of this publisher writes entries, so the adapter
+    rebuilds stale entries from the accepted history and replaces them on the observed ETag.
+    """
     retained = published.retained
     if not retained.metadata:
         return retained
     refs = {ref.key: ref for ref in published.objects}
     out = safe_path(out.parent, out.name)
     out.mkdir(mode=0o700, parents=True)
+    etags: dict[str, JSONValue] = {}
+    stale: set[str] = set()
+    for ref in retained.objects:
+        if ref.object_class != "entry":
+            continue
+        observed = store.stat(ref)
+        if observed is None:
+            raise StateError(f"Published {published.format} entry {ref.key} is missing")
+        etags[ref.key] = observed.etag
+        if observed.size != ref.size:
+            stale.add(ref.key)
 
     def fetch(key: str) -> Path:
         ref = refs.get(key)
         if ref is None:
             raise StateError(f"Published {published.format} metadata names an absent object")
         path = safe_path(out, key)
-        if not path.exists():
+        if not path.exists() and key not in stale:
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            store.download(ref, path)
+            try:
+                store.download(ref, path)
+            except ObjectChanged:
+                if ref.object_class != "entry":
+                    raise
+                stale.add(key)
         return path
 
     def move(value: str, key: str) -> str:
@@ -373,15 +393,8 @@ def materialise(store: Store, published: Published, *, out: Path) -> RetainedFor
         return str(fetch(key))
 
     metadata = _paths(retained.format, retained.metadata, move)
-    etags: dict[str, JSONValue] = {}
-    for ref in retained.objects:
-        if ref.object_class != "entry":
-            continue
-        observed = store.stat(ref)
-        if observed is None or observed.size != ref.size:
-            raise StateError(f"Published {published.format} entry {ref.key} is missing or changed")
-        etags[ref.key] = observed.etag
     metadata["etags"] = etags
+    metadata["stale"] = list[JSONValue](sorted(stale))
     if retained.format == "apk":
         metadata["indexes"] = {
             arch: {**mapping(value), "etag": etags[f"{arch}/APKINDEX.tar.gz"]}
@@ -403,6 +416,7 @@ def _record(retained: RetainedFormat, objects: tuple[ObjectRef, ...]) -> dict[st
 
     metadata = dict(retained.metadata)
     metadata.pop("etags", None)
+    metadata.pop("stale", None)
     if retained.format == "apk" and metadata:
         metadata["indexes"] = {
             arch: {key: item for key, item in mapping(value).items() if key != "etag"}

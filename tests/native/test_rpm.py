@@ -55,7 +55,7 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
         data = build(runtime, "hd-proof-data", "1", "dependency-v1", number=1)
         app = build(runtime, "hd-proof-app", "1", "application-v1", number=2)
         update = build(runtime, "hd-proof-app", "2", "application-v2", epoch=0, number=3)
-        empty = RetainedFormat("rpm", None, (), (), {}, ())
+        empty = RetainedFormat("rpm", (), (), {}, ())
         admissions = [
             admit(
                 rpm.inspect(asset, policy=POLICY, runtime=runtime, out=runtime.root),
@@ -134,7 +134,6 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
             assert rpm.compare(left, replace(left, epoch=1), runtime=runtime) == -1
             retained = replace(
                 first.retained,
-                prior_generation="one",
                 metadata={
                     **first.retained.metadata,
                     "etags": {key: "first-etag" for key in rpm.ENTRIES},
@@ -178,7 +177,7 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
             ):
                 assert old == current
             assert len(second.retained.accepted_history) == 3
-            frozen = {item.ref.key: item.local_path.read_bytes() for item in second.outputs}
+            before = {item.ref.key: item.local_path.read_bytes() for item in second.outputs}
             publish(second, installed, server, 2)
             client.run("upgrade", "hd-proof-app")
             client.state("2")
@@ -204,7 +203,7 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
                     target = negative_root / path.relative_to(installed)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(path, target)
-                # Frozen generation one package outputs are unavailable, but their published bytes remain.
+                # Generation one package outputs are unavailable, but their published bytes remain.
                 for output in first.outputs:
                     if output.ref.object_class != "package":
                         target = negative_root / output.ref.key
@@ -250,15 +249,15 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
                 publish(second, negative_root, server, 13)
                 negative.run("upgrade", "hd-proof-app")
                 negative.state("2")
-            assert frozen == {item.ref.key: item.local_path.read_bytes() for item in second.outputs}
+            assert before == {item.ref.key: item.local_path.read_bytes() for item in second.outputs}
             assert first_hash == hashlib.sha256(canonical_json(first)).hexdigest()
             original_sign = signer.sign_file
 
             def forbidden(*args: object, **kwargs: object) -> None:
-                raise AssertionError("Frozen validation called a signer")
+                raise AssertionError("Validation called a signer")
 
             monkeypatch.setattr(signer, "sign_file", forbidden)
-            rpm.validate_prepared(second, policy=POLICY, runtime=runtime, now=NOW)
+            rpm.validate_prepared(second, policy=POLICY, runtime=runtime)
             monkeypatch.setattr(signer, "sign_file", original_sign)
             print(
                 "RPM STATE: same-client app 1 -> 2; dependency 1; both payloads; file provider; HTTP package hashes"
@@ -321,9 +320,9 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
             with pytest.raises(rpm.RpmFailure):
                 rpm._verify_package(package.local_path, wrong.public_file, runtime)
         second_package = next(item for item in second.outputs if item.ref.object_class == "package")
-        second_package.local_path.write_bytes(b"changed frozen bytes")
+        second_package.local_path.write_bytes(b"changed prepared bytes")
         with pytest.raises(rpm.RpmFailure, match="Prepared"):
-            rpm.validate_prepared(second, policy=POLICY, runtime=runtime, now=NOW)
+            rpm.validate_prepared(second, policy=POLICY, runtime=runtime)
 
 
 def test_signer_failure_does_not_produce_prepared_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,7 +341,7 @@ def test_signer_failure_does_not_produce_prepared_state(monkeypatch: pytest.Monk
             policy=POLICY,
             runtime=runtime,
         )
-        empty = RetainedFormat("rpm", None, (), (), {}, ())
+        empty = RetainedFormat("rpm", (), (), {}, ())
         before = canonical_json(empty)
 
         def fail(source: Path, output: Path, *, clear: bool = False, armour: bool = True) -> None:
@@ -394,7 +393,7 @@ def test_signed_upstream_rpm_installs_with_haberdasher_trust() -> None:
         ]
         prepared = rpm.prepare(
             admissions,
-            RetainedFormat("rpm", None, (), (), {}, ()),
+            RetainedFormat("rpm", (), (), {}, ()),
             policy=POLICY,
             runtime=runtime,
             signer=signer,
@@ -473,7 +472,7 @@ def test_two_sources_with_one_rpm_file_name_fail_with_one_line() -> None:
         with pytest.raises(rpm.RpmFailure) as error:
             rpm.prepare(
                 admissions,
-                RetainedFormat("rpm", None, (), (), {}, ()),
+                RetainedFormat("rpm", (), (), {}, ()),
                 policy=POLICY,
                 runtime=runtime,
                 signer=signer,

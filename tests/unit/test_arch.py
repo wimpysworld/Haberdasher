@@ -22,6 +22,7 @@ from haberdasher.core import (
     NativeIdentity,
     RetainedFormat,
     SourceAsset,
+    UnsupportedAsset,
     VerifiedAsset,
     sha256_file,
 )
@@ -78,7 +79,7 @@ def test_distinct_slots_do_not_compare() -> None:
 def test_unqualified_placement(architectures: tuple[str, ...]) -> None:
     with private_workspace() as runtime, pytest.raises(arch.ArchFailure, match="qualified"):
         arch.validate_retained(
-            RetainedFormat("arch", None, (), (), {}, ()),
+            RetainedFormat("arch", (), (), {}, ()),
             policy=FormatPolicy("arch", architectures),
             runtime=runtime,
         )
@@ -88,17 +89,14 @@ def test_unqualified_placement(architectures: tuple[str, ...]) -> None:
 def test_qualified_placement(architectures: tuple[str, ...]) -> None:
     with private_workspace() as runtime:
         arch.validate_retained(
-            RetainedFormat("arch", None, (), (), {}, ()),
+            RetainedFormat("arch", (), (), {}, ()),
             policy=FormatPolicy("arch", architectures),
             runtime=runtime,
         )
 
 
-@pytest.mark.parametrize("metadata,prior", [({}, "previous"), ({"paths": {}}, None)])
-def test_incomplete_retained(metadata: dict[str, object], prior: str | None) -> None:
-    state = RetainedFormat("arch", prior, (), (), {}, ())
-    if metadata:
-        state.metadata["paths"] = {}
+def test_incomplete_retained() -> None:
+    state = RetainedFormat("arch", (), (), {"paths": {}}, ())
     with private_workspace() as runtime, pytest.raises(arch.ArchFailure, match="Incomplete"):
         arch.validate_retained(state, policy=FormatPolicy("arch"), runtime=runtime)
 
@@ -106,15 +104,10 @@ def test_incomplete_retained(metadata: dict[str, object], prior: str | None) -> 
 def test_empty_retained() -> None:
     with private_workspace() as runtime:
         arch.validate_retained(
-            RetainedFormat("arch", None, (), (), {}, ()),
+            RetainedFormat("arch", (), (), {}, ()),
             policy=FormatPolicy("arch"),
             runtime=runtime,
         )
-
-
-def test_no_shell_proof_dependency() -> None:
-    assert "tests.proofs" not in Path(arch.__file__).read_text()
-    assert "arch.sh" not in Path(arch.__file__).read_text()
 
 
 FINGERPRINT = "A" * 40
@@ -266,7 +259,7 @@ def test_inspect_rejects_unconfigured_architecture(
     native, runtime = native_arch(tmp_path, monkeypatch)
     unsupported = "aarch64" if "arm64" in filename else "x86_64"
     with pytest.raises(
-        arch.ArchFailure, match=f"^{filename}: unsupported Arch architecture '{unsupported}'$"
+        UnsupportedAsset, match=f"^{filename}: unsupported Arch architecture '{unsupported}'$"
     ):
         arch.inspect(
             native.asset(filename),
@@ -289,7 +282,7 @@ def test_mixed_architecture_publication(tmp_path: Path, monkeypatch: pytest.Monk
         inspected(native, runtime, f"tailor_0.6.0_linux_{label}.pkg.tar.zst")
         for label in ("amd64", "arm64")
     ]
-    empty = RetainedFormat("arch", None, (), (), {}, ())
+    empty = RetainedFormat("arch", (), (), {}, ())
     first = arch.prepare(
         items,
         empty,
@@ -320,7 +313,6 @@ def test_mixed_architecture_publication(tmp_path: Path, monkeypatch: pytest.Monk
         )
     state = replace(
         first.retained,
-        prior_generation="one",
         metadata={
             **first.retained.metadata,
             "etags": {output.ref.key: "opaque" for output in first.outputs},
@@ -351,4 +343,4 @@ def test_mixed_architecture_publication(tmp_path: Path, monkeypatch: pytest.Monk
         (identity.architecture, identity.version) for identity in second.retained.active_identities
     ) == [("aarch64", "0.6.1-1"), ("x86_64", "0.6.0-1")]
     assert {ref.key for ref in second.referenced_objects} >= set(packages)
-    arch.validate_prepared(second, policy=ARCH_POLICY, runtime=runtime, now=NOW)
+    arch.validate_prepared(second, policy=ARCH_POLICY, runtime=runtime)

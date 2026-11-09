@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import stat
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
@@ -22,7 +23,7 @@ from haberdasher.config import (
     load_config,
 )
 from haberdasher.core import plural, step, utc_now
-from haberdasher.runtime import private_workspace
+from haberdasher.runtime import Runtime, private_workspace
 from haberdasher.storage import LocalStore, R2Store, Store
 
 CONFIG = Path("haberdasher.yaml")
@@ -107,6 +108,10 @@ def _repositories(count: int) -> str:
     return f"{count} {'repository' if count == 1 else 'repositories'}"
 
 
+def _names(names: Sequence[str]) -> str:
+    return " and ".join((", ".join(names[:-1]), names[-1])) if len(names) > 1 else names[0]
+
+
 def read_published(name: str, url: str) -> state.Published:
     """Read one format's public haberdasher.json without credentials. HTTP 404 is empty."""
     request = urllib.request.Request(
@@ -128,8 +133,16 @@ def _urls() -> dict[str, str]:
     return {name: url for name, (_, url) in PUBLIC.items()}
 
 
-def show_plan(scan: discovery.CompleteScan, urls: Mapping[str, str] | None = None) -> None:
-    """Print published and new package counts for each format found or already published."""
+def show_plan(
+    scan: discovery.CompleteScan,
+    config: Config,
+    runtime: Runtime,
+    urls: Mapping[str, str] | None = None,
+) -> None:
+    """Print published and new package counts for each format found or already published.
+
+    New assets are downloaded and inspected, so the plan skips the assets that publish skips.
+    """
     urls = _urls() if urls is None else urls
     hosts = {name: urlsplit(url).hostname or url for name, url in urls.items()}
     say(f"Reading published state from {', '.join(hosts.values())}")
@@ -149,11 +162,25 @@ def show_plan(scan: discovery.CompleteScan, urls: Mapping[str, str] | None = Non
         for name in urls
         if name in found or name not in published or published[name].sha256 is not None
     ]
-    new = publish.new_assets(scan, {name: published[name] for name in names if name in published})
     if not names:
         say("")
         say("No packages found. Nothing written.")
         return
+    changed = publish.new_assets(
+        scan, {name: published[name] for name in names if name in published}
+    )
+    with tempfile.TemporaryDirectory(prefix="hd-plan-", dir=runtime.root) as temporary:
+        new = {
+            name: publish.inspect_new(
+                name,
+                items,
+                policy=config.format_policy(name),
+                runtime=runtime,
+                out=Path(temporary) / name,
+                report=say,
+            )
+            for name, items in changed.items()
+        }
     rows = [("Format", "Repository", "Published", "New")]
     for name in names:
         if name in published:
@@ -172,21 +199,14 @@ def show_plan(scan: discovery.CompleteScan, urls: Mapping[str, str] | None = Non
     say("")
     total = sum(len(items) for items in new.values())
     missing = [name for name in names if name not in published]
-    stale = [name for name in names if name in published and publish.has_expiry(published[name])]
-    for name in stale:
-        step(say, name, "pending: refresh metadata without Valid-Until")
     if total:
         summary = f"{plural(total, 'new package')}. Nothing written."
-    elif stale:
-        summary = f"No new packages. {', '.join(stale)} metadata needs a refresh. Nothing written."
     else:
         summary = "No new packages. Nothing written."
     if missing:
         summary += f" Could not read {', '.join(missing)}, so the plan is incomplete."
     elif total:
         summary += " Run `just publish` to publish them."
-    elif stale:
-        summary += " Run `just publish` to refresh it."
     say(summary)
 
 
@@ -215,7 +235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             scan = discovery.scan_releases(config, runtime=runtime, report=say)
             if args.command == "plan":
-                show_plan(scan)
+                show_plan(scan, config, runtime)
                 return 0
             found = publish.provided(scan)
             names = tuple(name for name in PUBLIC if name in found or _published(name, root))
@@ -238,11 +258,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if result.pending_assets:
                 say(f"Skipped {plural(result.pending_assets, 'package')} without a checksum.")
-            if result.changed:
+            if result.packages:
                 say(
                     f"Published {plural(result.packages, 'package')} to "
-                    f"{_repositories(result.repositories)}."
+                    f"{_repositories(len(result.repositories))}."
                 )
+            elif result.changed:
+                say(f"Refreshed {_names(result.repositories)} metadata.")
             else:
                 say(f"Nothing changed in {_repositories(len(storage.public))}.")
         return 0

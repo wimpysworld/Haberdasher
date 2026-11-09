@@ -23,10 +23,12 @@ from haberdasher.core import (
     OutputObject,
     PreparedFormat,
     RetainedFormat,
+    UnsupportedAsset,
     VerifiedAsset,
     safe_key,
     safe_path,
     sha256_file,
+    stale_entries,
 )
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
@@ -208,7 +210,7 @@ def inspect(
     if len(identity_fields) != 2 or len(architectures) != 1:
         raise ArchFailure("Package lacks qualified Arch metadata")
     if architectures[0] not in (*policy.architectures, "any"):
-        raise ArchFailure(
+        raise UnsupportedAsset(
             f"{asset.source.filename}: unsupported Arch architecture {architectures[0]!r}"
         )
     identity = NativeIdentity("arch", identity_fields[0], architectures[0], identity_fields[1])
@@ -282,7 +284,7 @@ def _verify(
         or signatures[0][8:10] != [b"1", b"8"]
         or signatures[0][11] != fingerprint.encode()
     ):
-        raise ArchFailure("Expected the approved SHA256 primary signature")
+        raise ArchFailure("Expected a SHA256 signature by the Haberdasher signing primary")
 
 
 def _heads(
@@ -304,12 +306,7 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
     if retained.format != "arch":
         raise ArchFailure("Wrong retained format")
     if not retained.accepted_history:
-        if (
-            retained.prior_generation is not None
-            or retained.active_identities
-            or retained.metadata
-            or retained.objects
-        ):
+        if retained.active_identities or retained.metadata or retained.objects:
             raise ArchFailure("Incomplete retained Arch state")
         return
     paths = _mapping(retained.metadata.get("paths"))
@@ -338,26 +335,32 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
         or set(records) != set(architectures)
     ):
         raise ArchFailure("Incomplete retained object references")
+    stale = stale_entries(retained)
     for key in all_entries:
         path = Path(_string(paths[key]))
         ref = refs.get(key)
         if (
             ref is None
             or ref.object_class != "entry"
-            or sha256_file(path) != (ref.sha256, ref.size)
+            or (key not in stale and sha256_file(path) != (ref.sha256, ref.size))
         ):
             raise ArchFailure("Retained metadata bytes changed")
     for architecture in architectures:
         for kind in ("db", "files"):
             key = f"{architecture}/{REPOSITORY}.{kind}"
-            archive = Path(_string(paths[key + ".tar.gz"]))
-            signature = Path(_string(paths[key + ".tar.gz.sig"]))
-            _verify(runtime, archive, signature, public, fingerprint)
             if (
                 refs[key].sha256 != refs[key + ".tar.gz"].sha256
                 or refs[key + ".sig"].sha256 != refs[key + ".tar.gz.sig"].sha256
             ):
                 raise ArchFailure("Published aliases differ from archive bytes")
+        # The prepared state rebuilds an architecture with a stale entry from its records.
+        if stale & set(entries(architecture)):
+            continue
+        for kind in ("db", "files"):
+            key = f"{architecture}/{REPOSITORY}.{kind}"
+            archive = Path(_string(paths[key + ".tar.gz"]))
+            signature = Path(_string(paths[key + ".tar.gz.sig"]))
+            _verify(runtime, archive, signature, public, fingerprint)
         directory = Path(_string(paths[entries(architecture)[0]])).parent
         if _archives(directory) != records[architecture]:
             raise ArchFailure("Retained complete records differ from native archives")
@@ -429,6 +432,24 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
                 raise ArchFailure("Native records lost accepted metadata")
 
 
+def _seed(directory: Path, records: dict[str, JSONValue], runtime: Runtime) -> None:
+    """Write the database and files archives of retained records, as repo-add lays them out."""
+    content = directory / "seed"
+    for kind in ("db", "files"):
+        for name, value in records.items():
+            record = _mapping(value)
+            desc = _string(record.get("desc"))
+            entry = safe_path(content, f"{name}-{_fields(desc)['%VERSION%'][0]}")
+            entry.mkdir(mode=0o700, parents=True, exist_ok=True)
+            (entry / "desc").write_text(desc)
+            if kind == "files":
+                (entry / "files").write_text(_string(record.get("files")))
+        archive = directory / f"{REPOSITORY}.{kind}.tar.gz"
+        members = sorted(path.name for path in content.iterdir())
+        _run(runtime, ["tar", "-czf", str(archive), "-C", str(content), *members])
+    shutil.rmtree(content)
+
+
 def _ref(path: Path, key: str, category: str) -> ObjectRef:
     digest, size = sha256_file(path)
     return ObjectRef(
@@ -464,7 +485,8 @@ def prepare(
         accepted = replace(accepted, published_sha256=accepted.inspected.verified.sha256)
         history.append(accepted)
         additions.append(accepted)
-    if not additions:
+    stale = stale_entries(retained)
+    if not additions and not stale:
         return PreparedFormat("arch", retained, (), retained.objects)
     changed = sorted(
         {
@@ -472,6 +494,7 @@ def prepare(
             for item in additions
             for slot in _slots(item.inspected.identity.architecture, policy)
         }
+        | {key.split("/", 1)[0] for key in stale}
     )
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     for architecture in changed:
@@ -518,13 +541,7 @@ def prepare(
                 for key in entries(architecture):
                     paths[key] = old_paths[key]
                 continue
-            for kind in ("db", "files"):
-                for suffix in (".tar.gz", ".tar.gz.sig"):
-                    name = f"{REPOSITORY}.{kind}{suffix}"
-                    shutil.copyfile(
-                        Path(_string(old_paths[f"{architecture}/{name}"])),
-                        out / architecture / name,
-                    )
+            _seed(out / architecture, _mapping(value), runtime)
     for item in additions:
         asset = item.inspected.verified
         if sha256_file(asset.local_path) != (asset.sha256, asset.size):
@@ -569,6 +586,10 @@ def prepare(
                 ],
                 cwd=directory,
             )
+        else:
+            for kind in ("db", "files"):
+                archive = directory / f"{REPOSITORY}.{kind}.tar.gz"
+                signer.sign_file(archive, archive.with_name(archive.name + ".sig"), armour=False)
         for kind in ("db", "files"):
             name = f"{REPOSITORY}.{kind}"
             archive = directory / (name + ".tar.gz")
@@ -584,7 +605,6 @@ def prepare(
         records[architecture] = _archives(directory)
     state = RetainedFormat(
         "arch",
-        retained.prior_generation,
         tuple(history),
         tuple(heads[slot].inspected.identity for slot in sorted(heads)),
         {
@@ -596,13 +616,11 @@ def prepare(
         tuple(refs[key] for key in sorted(refs)),
     )
     prepared = PreparedFormat("arch", state, tuple(outputs), state.objects)
-    validate_prepared(prepared, policy=policy, runtime=runtime, now=now)
+    validate_prepared(prepared, policy=policy, runtime=runtime)
     return prepared
 
 
-def validate_prepared(
-    prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
-) -> None:
+def validate_prepared(prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
     if prepared.format != "arch":
         raise ArchFailure("Invalid prepared Arch state")
     validate_retained(prepared.retained, policy=policy, runtime=runtime)
@@ -635,12 +653,6 @@ def validate_prepared(
                 Path(_string(public_value)),
                 _string(prepared.retained.metadata.get("fingerprint")),
             )
-    changed = sorted(
-        {
-            output.ref.key.split("/", 1)[0]
-            for output in prepared.outputs
-            if output.ref.object_class == "package"
-        }
-    )
+    changed = sorted({output.ref.key.split("/", 1)[0] for output in prepared.outputs})
     if entry_keys != [key for architecture in changed for key in entries(architecture)]:
         raise ArchFailure("Incomplete or reordered prepared Arch entries")

@@ -1,6 +1,6 @@
 # Publisher operations
 
-Haberdasher defaults to a read-only plan. Write modes require an explicit destination. A run takes a lock in each bucket that it writes. A full rerun is the only recovery.
+`just plan` is read-only. `just publish` writes to the R2 buckets in the `PUBLIC` table of `src/haberdasher/config.py`. A run takes a lock in each bucket that it writes. A full rerun is the only recovery.
 
 ## Configuration
 
@@ -21,10 +21,10 @@ Haberdasher derives every other setting:
 | Format | Asset suffix: `.deb` APT, `.rpm` RPM, `.pkg.tar.zst` and `.pkg.tar.xz` Arch, `.apk` Alpine, `.flatpak` Flatpak. Native inspection confirms the type. Other assets are ignored. |
 | Architecture | Package metadata, never the file name |
 | Bucket and public URL | The `PUBLIC` table in `src/haberdasher/config.py` |
-| APT suite and component | Code defaults: `stable` and `main`. `Release` has a `Date` and no `Valid-Until`. |
+| APT suite and component | Constants in `src/haberdasher/formats/apt.py`: `stable` and `main`. `Release` has a `Date` and no `Valid-Until`. |
 | Upstream signatures | Not checked. RPM inputs lose upstream signatures before Haberdasher signs them. APK inputs lose their `.SIGN.*` stream. Arch ignores release `.sig` assets. APT publishes `.deb` packages unchanged. Flatpak commits lose their detached upstream signatures. |
 
-A `.flatpak` bundle supplies its own settings. The application ref gives the app ID, architecture, and branch. The application metadata gives the runtime. The bundle's `runtime-repo` gives the runtime repository, or Flathub (`https://dl.flathub.org/repo/flathub.flatpakrepo`) when the bundle has none. All applications go into one OSTree repository, with `wimpysworld.flatpakrepo` and one `<app-id>.flatpakref` per application at its root. The `.flatpakref` file takes its `Title` from the AppStream name and its `RuntimeRepo` from the bundle. A run fails when bundles name different runtime repositories, because `wimpysworld.flatpakrepo` holds one `RuntimeRepo`. When published state lacks a `.flatpakref` file for an application, the next run adds it without a new bundle.
+A `.flatpak` bundle supplies its own settings. The application ref gives the app ID, architecture, and branch. The application metadata gives the runtime. The bundle's `runtime-repo` gives the runtime repository, or Flathub (`https://dl.flathub.org/repo/flathub.flatpakrepo`) when the bundle has none. All applications go into one OSTree repository, with `wimpysworld.flatpakrepo` and one `<app-id>.flatpakref` per application at its root. The `.flatpakref` file takes its `Title` from the AppStream name and its `RuntimeRepo` from the bundle. A run fails when bundles name different runtime repositories, because `wimpysworld.flatpakrepo` holds one `RuntimeRepo`.
 
 ### Architectures
 
@@ -37,7 +37,7 @@ Each format accepts these architectures:
 | Arch | `x86_64`, `aarch64`, `any` | `any` packages appear in every `<arch>/` directory and database |
 | Alpine | `x86_64`, `aarch64`, `noarch` | `noarch/` holds the package, and every `<arch>/APKINDEX.tar.gz` lists it, because `apk` fetches from the directory of the package architecture |
 
-Another architecture stops the run with one line that names the package and the architecture.
+Flatpak accepts application bundles for `x86_64` and `aarch64`. A package with another architecture is skipped with one line that names the file and the architecture, for example `apt   skipped tool_1.0_armhf.deb: unsupported APT architecture 'armhf'`. An Android `.apk` is skipped the same way. `just plan` and `just publish` print the same line, and continue with the other assets and sources.
 
 ### Releases
 
@@ -69,7 +69,7 @@ just publish
 just unlock
 ```
 
-`just plan` needs runtime `GH_TOKEN` or `GITHUB_TOKEN` and uses no storage credentials or signing. GitHub subprocesses use an isolated configuration, not a stored personal login. Native subprocesses receive neither GitHub nor storage credentials.
+`just plan` uses runtime `GH_TOKEN` or `GITHUB_TOKEN`. When both are unset, Haberdasher reads the token of the stored `gh` login with `gh auth token`. That command receives only `PATH`, `HOME`, and the `gh` configuration and keyring variables, never the storage or signing variables. The plan uses no storage credentials or signing. Other GitHub subprocesses use an isolated configuration. Native subprocesses receive neither GitHub nor storage credentials.
 
 `just publish` publishes each format in the publication scope to its R2 bucket. `just unlock` deletes stale locks, as described in [Locks](#locks).
 
@@ -95,7 +95,7 @@ flatpak  flatpak.wimpys.world          0    2
 14 new packages. Nothing written. Run `just publish` to publish them.
 ```
 
-The plan matches packages to the published state by the SHA256 checksum of each release asset, the same test that `just publish` uses to skip a download. It does not download packages, so it cannot inspect their native identities.
+The plan matches packages to the published state by the SHA256 checksum of each release asset, the same test that `just publish` uses to skip a download. It downloads and inspects each new asset, so it skips the same unsupported assets as `just publish`. It does not compare native identities with the published history.
 
 `just publish` prints the same discovery lines and one line for each format step:
 
@@ -133,11 +133,11 @@ Published 72 packages to 4 repositories.
 
 Each upload lists every object by key and size before `rclone` starts. Flatpak lists OSTree `objects/` as one line. Each metadata line names the key before its write. `rclone` reports progress every 10 seconds while an upload runs. An upload that ends within 10 seconds prints no progress lines, and no upload prints the final total. When the byte count does not change, one `upload stalled, waiting` line replaces the repeated progress lines until the upload continues.
 
-When nothing is new, each format prints `unchanged` and the summary is `Nothing changed in 4 repositories.`
+When nothing is new, each format prints `unchanged` and the summary is `Nothing changed in 4 repositories.` A run that writes metadata but no new packages, for example the first public keys of a bucket, ends with `Refreshed apt metadata.`
 
 ### Local test root
 
-Tests and proofs use a hidden `--local-root PATH` option on `python -m haberdasher publish` and `unlock`. It ignores the R2 buckets and writes to `<root>/public/<format>`. A local root must be disposable, outside the checkout, and distinct from the home root. Symlink paths reject. A local run uses the same publication scope, and treats a format as published when `<root>/public/<format>/haberdasher.json` exists.
+Tests use a hidden `--local-root PATH` option on `python -m haberdasher publish` and `unlock`. It ignores the R2 buckets and writes to `<root>/public/<format>`. A local root must be disposable, outside the checkout, and distinct from the home root. Symlink paths reject. A local run uses the same publication scope, and treats a format as published when `<root>/public/<format>/haberdasher.json` exists.
 
 A local run takes its signing fingerprint from the key in `HD_SIGNING_KEY_FILE` or `HD_SIGNING_KEY`. Use a disposable test key outside the checkout, in a private file with mode `0400` or `0600`. Without a key, a local run can publish only output that needs no signature. Do not copy or decrypt the canonical SOPS key for this fixture.
 
@@ -157,7 +157,7 @@ APT places each package at `pool/main/<prefix>/<source>/<package>_<version>_<arc
 
 `discovery.py` scans the latest release of each source and its assets, including assets added to that release later. Assets without a matching release checksum are skipped. Admission verifies source SHA256 before native import and rejects changed bytes under equivalent native identities.
 
-Each bucket's public `haberdasher.json` is the publication state for its format. It holds the inventory allow-list (package identity, source, published digests, and referenced objects) and the accepted history and metadata keys that the native adapter needs. There is no private state bucket. A run reads each inventory first. An asset whose bytes are already in the inventory needs no download. When a format changes, the run downloads only the published metadata that the inventory references, not the package pool. Unchanged runs avoid package downloads, inspection, indexing, and signing, and write nothing except the locks. When the published APT `Release` has a `Valid-Until` from an earlier version, the next run signs it again without that field and does not upload packages. Flatpak restoration downloads only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. `flatpak build-update-repo` needs those AppStream paths to keep unchanged applications in the AppStream catalogue. Payload files and earlier commits stay published and are not downloaded again.
+Each bucket's public `haberdasher.json` is the publication state for its format. It holds the inventory allow-list (package identity, source, published digests, and referenced objects) and the accepted history and metadata keys that the native adapter needs. There is no private state bucket. A run reads each inventory first. An asset whose bytes are already in the inventory needs no download. When a format changes, the run downloads only the published metadata that the inventory references, not the package pool. Unchanged runs avoid package downloads, inspection, indexing, and signing, and write nothing except the locks. Flatpak restoration downloads only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. `flatpak build-update-repo` needs those AppStream paths to keep unchanged applications in the AppStream catalogue. Payload files and earlier commits stay published and are not downloaded again.
 
 Both OpenPGP exports appear in every published bucket. The native APK public key appears only with the first APK index. An empty APK bucket does not claim native APK trust. Changed public export bytes reject even when the fingerprint stays unchanged. Key rotation is not supported.
 
@@ -187,6 +187,8 @@ apt   removed lock from builder started 2026-11-09T10:00:00+00:00
 ## Recovery
 
 Recover from an interrupted run with a full rerun of `just publish`. The rerun reads the last complete `haberdasher.json`, prepares and signs again, overwrites leftover unreferenced objects, and publishes new metadata. There is no write journal or crash-recovery state.
+
+An interrupted run can stop after it replaced some entry metadata and before it wrote `haberdasher.json`. Under the bucket lock, only that run can have changed those entries. The rerun accepts each entry whose bytes differ from the inventory, rebuilds it from the accepted history and the new packages, and replaces it on its current ETag. Changed bytes for a published package identity still stop the run. The rerun finds the changed entries only when it prepares that format, so the assets of the interrupted run must still be in the latest releases.
 
 An unknown write outcome stops the run. Delete a stale lock with `just unlock` first when the run could not release it.
 

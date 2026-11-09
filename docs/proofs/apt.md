@@ -1,6 +1,6 @@
 # APT proof
 
-The WW-371 shell proof and the Python adapter tests check that APT clients verify signed `Release` metadata from a local HTTP repository. Neither uses public service.
+The native APT tests check that APT clients verify signed `Release` metadata from a local HTTP repository. They use no public service.
 
 ## Reproduce
 
@@ -10,77 +10,27 @@ In the Linux Nix development shell, use an ordinary user account:
 just proof apt
 ```
 
-This command runs the [shell proof](../../tests/proofs/apt.sh) and `tests/native/test_apt.py`. `tests/native/test_pipeline.py` separately checks the complete publisher path.
-
-The shell proof ran with APT **3.3.5**, dpkg **1.23.7**, and GnuPG **2.4.9**. Its scope
-is `proof/main/amd64`, with data-only synthetic DEBs. It does not cover Noble,
-Trixie, or native arm64 installation.
-
-## Admission and retained state
-
-Admission requires a matching whole-file SHA256. Native metadata supplies
-package/version/architecture identity, with `dpkg --compare-versions`
-equality. Missing/wrong checksums, changed bytes for an existing identity,
-and equivalent `1.0-0` are rejected. Identical repeated input causes no
-extraction, signing, or duplicate record.
-
-The proof retains complete `apt-ftparchive packages` records in
-`state/records/<SHA256>`, the `state/assets` ledger, and `state/history`
-inventory. Generation two concatenates exact old and new records.
-The proof removes the historical publisher DEBs and makes other historical copies
-inaccessible, so any read of them fails during generation-two preparation.
-
-Source DEB bytes equal published DEB bytes. Packages stay unsigned.
-GnuPG signs `Release` with SHA256 as `InRelease` and detached armoured
-`Release.gpg`. APT verifies both entry forms with scoped `signed-by` trust,
-without global trust or disabled checks.
-
-`Release` declares `Acquire-By-Hash: yes` and SHA256 checksums. It has a
-`Date` and no `Valid-Until`, so it does not expire. Date checks stay enabled.
-
-## Native client evidence
-
-One disposable client installs `1.0`/`first`, then updates to
-`2.0`/`second`. Native dpkg status and installed payload confirm both versions.
-
-After generation two, a delayed client uses the old `InRelease`. The server
-records its exact old SHA256 by-hash index request. Installation selects
-version one. Immutable pool and by-hash objects stay available.
-
-Missing trust, wrong trust, altered `InRelease`, corrupt index, and corrupt
-package each reject installation. All five clients retain no installed dpkg
-state or payload. Rejection leaves the accepted publication unchanged.
-
-## Frozen retry and cleanup
-
-The retry inputs are frozen package objects, `Packages`, `Packages.gz`,
-their by-hash copies, `Release`, `Release.gpg`, and `InRelease`. Frozen
-`order`, `assets`, `objects`, `inventory`, and `control.sha256` define the retry
-and its verification. The retry also keeps historical objects from the prior
-publication.
-
-Six real signing calls precede freeze. Index, entry, and inventory
-interruptions return 75 without advancing completion. Retries verify frozen
-checksums and native signatures, add no signing calls, retain history, and
-pass native installation.
-
-Failure, INT, and TERM tests return 1, 130, and 143. Each stops the loopback
-server and both owned agents, then removes private files.
-
-## Limits
-
-The [loopback helper](../../tests/proofs/apt/server.py) uses shared `miniserve`
-with deterministic, distinct modification times and normal conditional `304`
-and range `206` responses. It does not delete request headers.
-Local HTTP proves acquisition paths and these request semantics, not production
-cache behaviour, remote recovery, or crash durability.
+This command runs `tests/native/test_apt.py`. `tests/native/test_pipeline.py` separately checks the complete publisher path.
 
 ## Publisher adapter
 
-`src/haberdasher/formats/apt.py` uses admitted new inputs and retained package records. It signs both Release forms and publishes immutable by-hash dependencies before entries. `Release` has no `Valid-Until`.
+`src/haberdasher/formats/apt.py` admits new DEBs by whole-file SHA256 and native package, version, and architecture identity, with `dpkg --compare-versions` equality. It keeps the complete `apt-ftparchive packages` record of each package in the inventory, so a run rebuilds every `Packages` index and `Release` from the accepted history without historical DEBs.
 
-`tests/native/test_apt.py` covers HTTP install/update, strict rejection, delayed by-hash clients, retained records, and a `Release` with an old `Date`. `tests/native/test_pipeline.py` adds real CLI publication, served-key trust, late assets, no-op, and a full rerun after an interruption.
+Published DEB bytes equal the source DEB bytes. Packages stay unsigned. GnuPG signs `Release` with SHA256 as `InRelease` and detached `Release.gpg`. `Release` declares `Acquire-By-Hash: yes` and SHA256 checksums. It has a `Date` and no `Valid-Until`, so it does not expire. Immutable by-hash indexes precede the entries.
 
-When the published `Release` has a `Valid-Until` from an earlier version, the next run signs it again without that field, writes only the entry metadata and `haberdasher.json`, and `just plan` reports the pending refresh. Later runs without new packages write nothing.
+## Native client evidence
+
+`tests/native/test_apt.py` runs APT clients in private dpkg roots with scoped `signed-by` trust:
+
+- A client installs version `1.0` with its dependencies, then updates to version `2.0`. A second update gets HTTP `304` for `InRelease`.
+- A delayed client with the old `InRelease` fetches the old by-hash index and installs version `1.0`.
+- Without `InRelease`, a client falls back to `Release.gpg` and installs version `2.0`.
+- A wrong key, a missing key, an altered `InRelease`, a corrupt by-hash index, and a corrupt package each stop installation.
+- A `Release` with a `Date` 400 days old still updates, because it does not expire.
+- A failed signer produces no prepared state. Retained validation checks both signature forms, and indexes are the same across roots and times.
+
+## Limits
+
+The loopback server uses shared `miniserve` with distinct modification times and normal conditional `304` and range `206` responses. Local HTTP proves acquisition paths and these request semantics, not production cache behaviour or crash durability. The tests do not cover native arm64 installation.
 
 See [client setup](../clients.md#apt) for the client configuration.

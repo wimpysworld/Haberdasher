@@ -26,16 +26,6 @@ if [[ -z ${HABERDASHER_TOOL_PATH:-} ]]; then
 fi
 export PATH="$HABERDASHER_TOOL_PATH"
 
-for format in "${formats[@]}"; do
-    script="tests/proofs/$format.sh"
-    if [[ ! -f $script ]]; then
-        printf 'Error: proof script is not available: %s\n' "$script" >&2
-        exit 1
-    fi
-    env -i PATH="$PATH" HABERDASHER_TOOL_PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
-        bash --noprofile --norc "$script"
-done
-
 native=()
 for format in "${formats[@]}"; do
     native+=("tests/native/test_$format.py")

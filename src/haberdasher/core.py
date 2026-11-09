@@ -22,6 +22,10 @@ type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, J
 type Report = Callable[[str], None]
 
 
+class UnsupportedAsset(ValueError):
+    """A release asset that its format cannot publish, such as an unsupported architecture."""
+
+
 def quiet(line: str) -> None:
     """A Report that prints nothing."""
 
@@ -278,7 +282,7 @@ class InspectedAsset(Record):
             raise ValueError("Expected complete metadata and evidence mappings")
         canonical_json(self.metadata)
         canonical_json(self.evidence)
-        if self.upstream_signature not in {"unsigned", "signed", "verified", "unknown", "invalid"}:
+        if self.upstream_signature not in {"unsigned", "signed"}:
             raise ValueError("Invalid upstream signature status")
 
 
@@ -341,7 +345,6 @@ class OutputObject(Record):
 @dataclass(frozen=True)
 class RetainedFormat(Record):
     format: str
-    prior_generation: str | None
     accepted_history: tuple[AdmittedAsset, ...]
     active_identities: tuple[NativeIdentity, ...]
     metadata: dict[str, JSONValue]
@@ -349,8 +352,6 @@ class RetainedFormat(Record):
 
     def __post_init__(self) -> None:
         format_name(self.format)
-        if self.prior_generation is not None:
-            safe_key(self.prior_generation)
         if not isinstance(self.metadata, dict):
             raise ValueError("Invalid retained metadata")
         canonical_json(self.metadata)
@@ -363,6 +364,14 @@ class RetainedFormat(Record):
         for ref in self.objects:
             if not isinstance(ref, ObjectRef) or ref.bucket_role != self.format:
                 raise ValueError("Invalid retained public object")
+
+
+def stale_entries(retained: RetainedFormat) -> frozenset[str]:
+    """Entry keys whose published bytes differ from the inventory, after an interrupted run."""
+    value = retained.metadata.get("stale", [])
+    if not isinstance(value, list) or not all(isinstance(key, str) for key in value):
+        raise ValueError("Invalid stale entry list")
+    return frozenset(key for key in value if isinstance(key, str))
 
 
 @dataclass(frozen=True)

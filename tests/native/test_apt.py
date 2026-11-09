@@ -49,7 +49,7 @@ def test_production_apt_install_update_and_rejections() -> None:
     with private_workspace() as runtime, disposable_key() as key:
         config = policy()
         now = datetime.now(UTC).replace(microsecond=0)
-        empty = RetainedFormat("apt", None, (), (), {}, ())
+        empty = RetainedFormat("apt", (), (), {}, ())
         apt.validate_retained(empty, policy=config, runtime=runtime)
         dep = build(runtime, "hd-dependency", "1.0", "dependency", arch="all", asset_id=1)
         second_dep = build(
@@ -111,7 +111,7 @@ def test_production_apt_install_update_and_rejections() -> None:
                 out=runtime.root / "generation-one",
             )
             with patch.object(runtime, "run", wraps=runtime.run) as commands:
-                apt.validate_prepared(initial, policy=config, runtime=runtime, now=now)
+                apt.validate_prepared(initial, policy=config, runtime=runtime)
             assert [call.args[0][0] for call in commands.call_args_list] == ["gpgv", "gpgv"]
             assert all(
                 item.published_sha256 == item.inspected.verified.sha256
@@ -314,7 +314,7 @@ def test_production_apt_install_update_and_rejections() -> None:
                 print(
                     f"Installed: 1.0 -> 2.0; delayed=1.0; dependencies=hd-dependency,hd-extra; HTTP requests={len(fetched)}"
                 )
-        apt.validate_prepared(updated, policy=config, runtime=runtime, now=now)
+        apt.validate_prepared(updated, policy=config, runtime=runtime)
         broken = replace(
             updated.retained,
             objects=tuple(
@@ -323,10 +323,10 @@ def test_production_apt_install_update_and_rejections() -> None:
         )
         with pytest.raises(apt.AptFailure, match="incomplete"):
             apt.validate_retained(broken, policy=config, runtime=runtime)
-        frozen = runtime.root / "generation-two/dists/stable/InRelease"
-        frozen.write_bytes(frozen.read_bytes() + b"corruption")
+        inrelease = runtime.root / "generation-two/dists/stable/InRelease"
+        inrelease.write_bytes(inrelease.read_bytes() + b"corruption")
         with pytest.raises(apt.AptFailure, match="changed"):
-            apt.validate_prepared(updated, policy=config, runtime=runtime, now=now)
+            apt.validate_prepared(updated, policy=config, runtime=runtime)
         print(client.apt("--version").decode().splitlines()[0])
         for command in (["dpkg-query", "--version"], ["gpg", "--version"]):
             result = runtime.run(command)
@@ -349,7 +349,7 @@ def test_retained_validation_checks_hash_consistent_signatures() -> None:
         ) as signer:
             prepared = apt.prepare(
                 [accepted],
-                RetainedFormat("apt", None, (), (), {}, ()),
+                RetainedFormat("apt", (), (), {}, ()),
                 policy=config,
                 runtime=runtime,
                 signer=signer,
@@ -463,7 +463,7 @@ def test_indexes_are_deterministic_across_roots_and_times() -> None:
                 ):
                     prepared = apt.prepare(
                         [accepted],
-                        RetainedFormat("apt", None, (), (), {}, ()),
+                        RetainedFormat("apt", (), (), {}, ()),
                         policy=config,
                         runtime=runtime,
                         signer=signer,
@@ -473,12 +473,12 @@ def test_indexes_are_deterministic_across_roots_and_times() -> None:
                 assert any(item.ref.key.endswith("/Packages.gz") for item in prepared.outputs)
         expected = str(inspected.metadata["record"]).rstrip("\n").encode() + b"\n\n"
         for arch in config.architectures:
-            relative = f"dists/{config.suite}/{config.component}/binary-{arch}/Packages"
+            relative = f"dists/{apt.SUITE}/{apt.COMPONENT}/binary-{arch}/Packages"
             left = (roots[0] / (relative + ".gz")).read_bytes()
             right = (roots[1] / (relative + ".gz")).read_bytes()
             assert left == right
             assert gzip.decompress(left) == gzip.decompress(right) == expected
             assert (roots[0] / relative).read_bytes() == expected
             assert (roots[1] / relative).read_bytes() == expected
-        release = f"dists/{config.suite}/Release"
+        release = f"dists/{apt.SUITE}/Release"
         assert (roots[0] / release).read_bytes() != (roots[1] / release).read_bytes()

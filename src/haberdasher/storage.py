@@ -50,6 +50,10 @@ class PreconditionFailed(StorageError):
     pass
 
 
+class ObjectChanged(StorageError):
+    """Stored or local bytes differ from the expected SHA256 or size."""
+
+
 class UnknownWrite(StorageError):
     """A write may or may not have committed. The run stops, and a full rerun converges."""
 
@@ -88,7 +92,7 @@ def _etag(value: str) -> str:
 
 def _verify(ref: ObjectRef, source: Path) -> None:
     if sha256_file(source) != (ref.sha256, ref.size):
-        raise StorageError("Object bytes differ from the expected SHA256 or size")
+        raise ObjectChanged("Object bytes differ from the expected SHA256 or size")
 
 
 def _stats(progress: Report) -> Report:
@@ -374,7 +378,7 @@ class R2Store:
         self._runtime = runtime
         environment = runtime.environment_for("storage")
         if any(not environment.get(name) for name in STORAGE_VARIABLES):
-            raise ValueError("The three approved storage environment variables are required")
+            raise ValueError("The three HD_CLOUDFLARE storage environment variables are required")
         self._endpoint = text(environment[STORAGE_VARIABLES[0]], "storage endpoint")
         parsed = urlsplit(self._endpoint)
         if (

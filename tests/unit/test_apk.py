@@ -21,6 +21,7 @@ from haberdasher.core import (
     NativeIdentity,
     RetainedFormat,
     SourceAsset,
+    UnsupportedAsset,
     VerifiedAsset,
     sha256_file,
 )
@@ -134,7 +135,7 @@ def test_prepare_normalises_relative_output(
         def prepare() -> apk.PreparedFormat:
             return apk.prepare(
                 [AdmittedAsset(inspected, "preserve", "synthetic")],
-                RetainedFormat("apk", None, (), (), {}, ()),
+                RetainedFormat("apk", (), (), {}, ()),
                 policy=FormatPolicy("apk"),
                 runtime=runtime,
                 signer=signer,
@@ -262,14 +263,12 @@ def test_sha256_precedes_all_native_parsing(tmp_path: Path) -> None:
 def test_empty_state_is_distinct_from_missing_retained_state(tmp_path: Path) -> None:
     runtime = FakeRuntime(tmp_path)
     policy = FormatPolicy("apk")
-    empty = RetainedFormat("apk", None, (), (), {}, ())
+    empty = RetainedFormat("apk", (), (), {}, ())
     apk.validate_retained(empty, policy=policy, runtime=runtime)
-    for retained in (
-        replace(empty, prior_generation="prior"),
-        replace(empty, metadata={"indexes": {}}),
-    ):
-        with pytest.raises(apk.ApkFailure, match="Incomplete"):
-            apk.validate_retained(retained, policy=policy, runtime=runtime)
+    with pytest.raises(apk.ApkFailure, match="Incomplete"):
+        apk.validate_retained(
+            replace(empty, metadata={"indexes": {}}), policy=policy, runtime=runtime
+        )
     assert runtime.calls == []
 
 
@@ -277,7 +276,7 @@ def test_empty_state_is_distinct_from_missing_retained_state(tmp_path: Path) -> 
 def test_unqualified_placements_reject(tmp_path: Path, architectures: tuple[str, ...]) -> None:
     with pytest.raises(apk.ApkFailure, match="qualified"):
         apk.validate_retained(
-            RetainedFormat("apk", None, (), (), {}, ()),
+            RetainedFormat("apk", (), (), {}, ()),
             policy=FormatPolicy("apk", architectures=architectures),
             runtime=FakeRuntime(tmp_path),
         )
@@ -286,7 +285,7 @@ def test_unqualified_placements_reject(tmp_path: Path, architectures: tuple[str,
 @pytest.mark.parametrize("architectures", [("x86_64",), ("aarch64",), ("x86_64", "aarch64")])
 def test_qualified_placements_accept(tmp_path: Path, architectures: tuple[str, ...]) -> None:
     apk.validate_retained(
-        RetainedFormat("apk", None, (), (), {}, ()),
+        RetainedFormat("apk", (), (), {}, ()),
         policy=FormatPolicy("apk", architectures=architectures),
         runtime=FakeRuntime(tmp_path),
     )
@@ -407,7 +406,7 @@ def test_inspect_rejects_unconfigured_architecture(
     runtime = NativeApk(tmp_path / "runtime")
     asset = runtime.asset("tailor", "0.6.0", arch)
     with pytest.raises(
-        apk.ApkFailure, match=f"^{asset.source.filename}: unsupported APK architecture '{arch}'$"
+        UnsupportedAsset, match=f"^{asset.source.filename}: unsupported APK architecture '{arch}'$"
     ):
         apk.inspect(
             asset,
@@ -440,7 +439,7 @@ def test_mixed_architecture_publication(tmp_path: Path) -> None:
     ):
         prepared = apk.prepare(
             history,
-            RetainedFormat("apk", None, (), (), {}, ()),
+            RetainedFormat("apk", (), (), {}, ()),
             policy=APK_POLICY,
             runtime=runtime,
             signer=signer,

@@ -20,6 +20,7 @@ from haberdasher.core import (
     JSONValue,
     PreparedFormat,
     RetainedFormat,
+    UnsupportedAsset,
     VerifiedAsset,
     atomic_write,
     canonical_json,
@@ -42,7 +43,7 @@ from tests.support.keys import disposable_key, run
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 POLICY = FormatPolicy("apk")
-EMPTY = RetainedFormat("apk", None, (), (), {}, ())
+EMPTY = RetainedFormat("apk", (), (), {}, ())
 
 
 def publish(prepared: PreparedFormat, root: Path) -> list[Path]:
@@ -171,17 +172,17 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
                 for identity, text in records.items()
                 if identity[0] == "hd-main"
             )
-            frozen = canonical_json(generation2)
+            before = canonical_json(generation2)
             with (
                 patch.object(apk, "prepare", side_effect=AssertionError("No retry preparation")),
                 patch.object(
                     type(signer), "alpine_key", side_effect=AssertionError("No retry signing")
                 ),
             ):
-                apk.validate_prepared(generation2, policy=POLICY, runtime=runtime, now=NOW)
+                apk.validate_prepared(generation2, policy=POLICY, runtime=runtime)
                 http.set_generation_mtime(publish(generation2, public), 2)
-                apk.validate_prepared(generation2, policy=POLICY, runtime=runtime, now=NOW)
-            assert canonical_json(generation2) == frozen
+                apk.validate_prepared(generation2, policy=POLICY, runtime=runtime)
+            assert canonical_json(generation2) == before
             client.run("update")
             client.add("hd-main=2.0-r0")
             client.installed("hd-main", "2.0-r0", "version-two")
@@ -386,7 +387,6 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
                 replace(generation2, outputs=reversed_outputs),
                 policy=POLICY,
                 runtime=runtime,
-                now=NOW,
             )
         incomplete = replace(
             state.accepted_history[0],
@@ -420,7 +420,7 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
             )
         assert unchanged.outputs == () and unchanged.retained == state
         print(
-            "Observed: two unsigned HTTP generations, dependency payloads, exact fetched SHA256, complete records, frozen validation, and trust/corruption rejection."
+            "Observed: two unsigned HTTP generations, dependency payloads, exact fetched SHA256, complete records, prepared validation, and trust/corruption rejection."
         )
 
 
@@ -568,7 +568,7 @@ def test_signed_upstream_loses_its_signature(mixed_order: str | None) -> None:
                 "x86_64/APKINDEX.tar.gz",
             ]
             apk.validate_retained(generation2.retained, policy=policy, runtime=runtime)
-            apk.validate_prepared(generation2, policy=policy, runtime=runtime, now=NOW)
+            apk.validate_prepared(generation2, policy=policy, runtime=runtime)
             assert len(generation2.retained.accepted_history) == len(inputs) + 1
             http.set_generation_mtime(publish(generation2, root), 2)
             client.run("update")
@@ -631,7 +631,7 @@ def test_signed_upstream_loses_its_signature(mixed_order: str | None) -> None:
                 out=runtime.root / "bad-sha",
             )
         armv7 = fixture(runtime, "hd-armv7", "1.0-r0", payload="unqualified", arch="armv7")
-        with pytest.raises(apk.ApkFailure, match="unsupported APK architecture 'armv7'"):
+        with pytest.raises(UnsupportedAsset, match="unsupported APK architecture 'armv7'"):
             accept(armv7, runtime)
         v3 = runtime.root / "v3.apk"
         empty = runtime.root / "empty-v3"
@@ -684,7 +684,7 @@ def test_unsigned_multiarch_without_release_suffix() -> None:
             assert item.inspected.identity.architecture == arch
             assert item.inspected.identity.version == "1.0"
             accepted.append(item)
-        with pytest.raises(apk.ApkFailure, match="unsupported APK architecture 'aarch64'"):
+        with pytest.raises(UnsupportedAsset, match="unsupported APK architecture 'aarch64'"):
             accept(assets["aarch64"], runtime)
         generation1 = apk.prepare(
             accepted,

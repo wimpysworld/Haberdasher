@@ -1,8 +1,8 @@
-# Arch local proof
+# Arch proof
 
-The WW-373 shell proof and the Python adapter tests check that pacman verifies signed packages and signed databases from a local HTTP repository. They use a pinned Nix pacman, not an official Arch image.
+The native Arch tests check that pacman verifies signed packages and signed databases from a local HTTP repository. They use a pinned Nix pacman, not an official Arch image.
 
-## Run and environment
+## Reproduce
 
 In the Linux Nix development shell, use an ordinary account:
 
@@ -10,72 +10,23 @@ In the Linux Nix development shell, use an ordinary account:
 just proof arch
 ```
 
-This command runs the shell proof and `tests/native/test_arch.py`. The native tests also publish one x86_64 and one aarch64 package in a single generation. A pacman client with `Architecture = aarch64` installs the aarch64 package on the x86_64 host. No aarch64 host or emulation runs the installed files. The shell evidence below uses x86_64 Linux. Pacman, repo-add, and vercmp use version
-7.1.0 from this exact Nix build:
-
-```text
-/nix/store/02qab8gqfkg4r51dwwdiqwxfhx8z0y1n-pacman-7.1.0-unstable-2026-01-25
-```
-
-Pacman reports libalpm 16.0.1.
-
-The [common helper](../../tests/proofs/common.sh) clears inherited credentials
-and creates disposable RSA4096 signing keys, private temporary state, and
-isolated client paths.
-Cleanup removes that state and stops its GnuPG agents.
-The [Arch script](../../tests/proofs/arch.sh) uses local `file://` publication.
-`fakeroot` emulates root user identity and file ownership for native operations.
-This fake user ID (UID) support is emulation, not a security boundary.
-
-## Inputs, signatures, and retained state
-
-Admission checks whole-package SHA256 and native name, version, and architecture.
-Unchanged identity is a no-op. Changed bytes reject, including versions `1-1` and
-`1-01` that native `vercmp` considers equal.
-Detached SHA256 OpenPGP signatures preserve `.pkg.tar.zst` bytes.
-Packages receive signatures before `repo-add --include-sigs --sign` indexes them.
-
-Generation two indexes only the new `updateable` package with retained signed
-`proof.db.tar.gz` and `proof.files.tar.gz` archives.
-Historical package inputs are absent from the indexer.
-Both archives retain byte-identical `keeper` records and the non-empty dependency
-`updateable>=1`. File records remain unchanged.
-
-The output gate checks both archive signatures, aliases, two-record counts,
-package sidecars, and embedded `%PGPSIG%` bytes and validity.
-A real two-record signer passes the positive control.
-Failed signing and zero-output signing return native status `0`, but explicit
-signature checks reject both archives before inventory completion.
-Signature-only repairs pass the full gate, without record repairs.
-Missing outputs also reject.
-
-Retained state includes admission `history`, both signed archives, aliases,
-package bytes/signatures, `inventory`, and frozen `generation.sha256` checksums.
-The client retains public-key trust and native configuration, without a secret key.
-Frozen generations include historical objects for retry, not routine indexing
-input.
-
-## Native acceptance and recovery
-
-All signature settings use `Required TrustedOnly`.
-Native refresh, dependency-resolved installation, update, queries, payload checks,
-and file search pass.
-Invalid or missing package and archive signatures reject.
-An untrusted signing key rejects.
-Package-fault tests retain valid signed metadata and correct package checksums.
-
-Both split-generation orders reject for `.db` and `.files`: old data/new signature
-and new data/old signature.
-Matching frozen bytes restore strict refresh.
-Interruptions after packages, `.db`, `.files`, and before inventory preserve the
-previous completion inventory.
-An exact frozen retry restores packages, signatures, both archives, and inventory
-without re-signing or deletion.
+This command runs `tests/native/test_arch.py`. `tests/native/test_pipeline.py` separately checks the complete publisher path.
 
 ## Publisher adapter
 
-`src/haberdasher/formats/arch.py` implements admitted new packages, verified retained archives, and signature gates. `tests/native/test_arch.py` checks HTTP installation, update, file search, dependencies, and rejection under strict trust.
+`src/haberdasher/formats/arch.py` admits new packages by whole-package SHA256 and native name, version, and architecture. Changed bytes stop the run, including versions such as `1-1` and `1-01` that `vercmp` considers equal. Detached SHA256 OpenPGP signatures preserve the package bytes.
 
-`tests/native/test_pipeline.py` adds real CLI publication, served public keys, fresh/existing clients, no-op, late assets, and a full rerun after an interruption.
+The inventory keeps the complete `desc` and `files` records of each database. A run rebuilds the database and files archives of each changed architecture from those records, then indexes only the new packages with `repo-add --include-sigs --sign`. Historical package files are not indexer inputs. `any` packages appear in every architecture directory and database.
 
-The client `GPGDir` is global to the selected pacman invocation, not a per-repository signer allow-list. [Arch setup](../clients.md#arch) explains the dedicated configuration/root boundary.
+## Native client evidence
+
+`tests/native/test_arch.py` runs pacman with `SigLevel = Required TrustedOnly`:
+
+- A client refreshes, installs a package with its dependency, searches files with `pacman -F`, then updates to the next version.
+- Both split orders of `.db` and `.files` with their signatures stop refresh: old data with a new signature, and new data with an old signature.
+- An untrusted key, an invalid or missing package signature, and missing database outputs each stop installation or preparation. A signer that fails, or that exits `0` without output, produces no prepared state.
+- One generation publishes an x86_64 and an aarch64 package. A client with `Architecture = aarch64` installs the aarch64 package on the x86_64 host. No aarch64 host or emulation runs the installed files.
+
+## Limits
+
+`fakeroot` emulates root identity and file ownership for native operations. It is not a security boundary. The client `GPGDir` is global to the selected pacman invocation, not a per-repository signer allow-list. [Arch setup](../clients.md#arch) explains the dedicated configuration and root boundary.

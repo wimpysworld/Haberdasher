@@ -25,5 +25,5 @@ jobs:
         run: >-
           nix develop --no-write-lock-file --command
           just check-tools build test lint
-      - name: Run shell proofs and native acceptance
+      - name: Run native acceptance
         run: nix develop --no-write-lock-file --command just proof

@@ -445,7 +445,7 @@ def test_local_fsync_and_uncertain_commit(
 
 def test_remote_missing_credentials_never_falls_back(tmp_path: Path) -> None:
     runtime = Runtime(tmp_path / "runtime", environ={"AWS_PROFILE": "unread"})
-    with pytest.raises(ValueError, match="three approved"):
+    with pytest.raises(ValueError, match="three HD_CLOUDFLARE"):
         R2Store(remote_policy(), runtime=runtime)
 
 

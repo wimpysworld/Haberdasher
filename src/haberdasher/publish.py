@@ -23,10 +23,12 @@ from haberdasher.core import (
     PreparedFormat,
     Report,
     RetainedFormat,
+    UnsupportedAsset,
     VerifiedAsset,
     plural,
     quiet,
     sha256_file,
+    stale_entries,
     step,
     utc_now,
 )
@@ -57,7 +59,7 @@ class Adapter(Protocol):
         out: Path,
     ) -> PreparedFormat: ...
     def validate_prepared(
-        self, prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
+        self, prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime
     ) -> None: ...
 
 
@@ -93,7 +95,7 @@ class RunResult:
     published_objects: int
     pending_assets: int = 0
     packages: int = 0
-    repositories: int = 0
+    repositories: tuple[str, ...] = ()
 
 
 def _format(filename: str) -> str | None:
@@ -153,9 +155,11 @@ def prepare_bootstrap(
                     ref for ref in item.referenced_objects if ref.key == "keys/haberdasher.rsa.pub"
                 )
                 if sha256_file(rsa) != (native.sha256, native.size):
-                    raise StateError("APK bootstrap key differs from the approved signing primary")
+                    raise StateError(
+                        "APK bootstrap key differs from the Haberdasher signing primary"
+                    )
             elif item.retained.metadata.get("fingerprint") != signer.fingerprint:
-                raise StateError("Native metadata differs from the approved signing fingerprint")
+                raise StateError("Native metadata differs from the expected signing fingerprint")
         for path in (armoured, binary):
             sha, size = sha256_file(path)
             ref = ObjectRef(
@@ -219,13 +223,6 @@ def _unchanged(published: Published) -> PreparedFormat:
     return PreparedFormat(published.format, published.retained, (), published.retained.objects)
 
 
-def has_expiry(published: Published) -> bool:
-    """Whether published APT metadata still has Valid-Until, so a run must rewrite it."""
-    from haberdasher.formats import apt
-
-    return published.format == "apt" and apt.has_expiry(published.retained)
-
-
 def reconcile(
     config: Config,
     policy: Policy,
@@ -239,8 +236,6 @@ def reconcile(
     now = utc_now(lambda: now)
     if not policy.storage.public:
         raise ValueError("Publication needs explicit public destinations")
-    if policy.storage.backend == "r2":
-        policy.require_remote()
     names = sorted(policy.storage.public)
     lock = state.acquire(store, policy.storage.public, now=now)
     for name in names:
@@ -259,6 +254,38 @@ def reconcile(
     for name in names:
         step(report, name, "unlocked")
     return result
+
+
+def inspect_new(
+    name: str,
+    changed: Sequence[discovery.DiscoveredAsset],
+    *,
+    policy: FormatPolicy,
+    runtime: Runtime,
+    out: Path,
+    report: Report = quiet,
+) -> list[InspectedAsset]:
+    """Download, verify, and inspect new assets. Skip an unsupported asset with one line."""
+    adapter = _adapter(name)
+    inspected: list[InspectedAsset] = []
+    for index, item in enumerate(changed):
+        if item.checksum is None:
+            raise StateError("Changed input lacks a verified checksum")
+        verified = discovery.verify_asset(
+            item.source, item.checksum, runtime=runtime, out=out.with_name(f"{name}-{index}-asset")
+        )
+        try:
+            inspected.append(
+                adapter.inspect(
+                    verified,
+                    policy=policy,
+                    runtime=runtime,
+                    out=out.with_name(f"{name}-{index}-inspect"),
+                )
+            )
+        except UnsupportedAsset as error:
+            step(report, name, f"skipped {error}")
+    return inspected
 
 
 def _reconcile(
@@ -284,30 +311,34 @@ def _reconcile(
     if scan is None:
         scan = discovery.scan_releases(config, runtime=runtime, report=report)
     changed = new_assets(scan, published)
-    renew = {name for name in names if has_expiry(published[name])}
-    if "flatpak" in published and published["flatpak"].retained.metadata:
-        from haberdasher.formats import flatpak
-
-        if flatpak.missing_entries(published["flatpak"].retained):
-            renew.add("flatpak")
     missing_bootstrap: set[str] = (
         {name for name in names if len(published[name].bootstrap) != 2}
         if fingerprint is not None
         else set()
     )
-    needed = {name for name in names if changed[name]} | renew
-    if not missing_bootstrap and not needed:
-        for name in names:
-            step(report, name, "unchanged")
-        return RunResult(False, 0, len(scan.pending))
-    if fingerprint is None:
-        raise ValueError("Publication requires the expected signing fingerprint")
     with tempfile.TemporaryDirectory(prefix="hd-reconcile-", dir=runtime.root) as temporary:
         root = Path(temporary)
+        inspected = {
+            name: inspect_new(
+                name,
+                changed[name],
+                policy=policies[name],
+                runtime=runtime,
+                out=root / name,
+                report=report,
+            )
+            for name in names
+        }
+        if not missing_bootstrap and not any(inspected.values()):
+            for name in names:
+                step(report, name, "unchanged")
+            return RunResult(False, 0, len(scan.pending))
+        if fingerprint is None:
+            raise ValueError("Publication requires the expected signing fingerprint")
         prepared: list[PreparedFormat] = []
         with signing_session(runtime, expected_fingerprint=fingerprint) as signer:
             for name in names:
-                if name not in needed:
+                if not inspected[name]:
                     step(
                         report,
                         name,
@@ -315,21 +346,12 @@ def _reconcile(
                     )
                     prepared.append(_unchanged(published[name]))
                     continue
-                step(
-                    report,
-                    name,
-                    f"preparing {plural(len(changed[name]), 'new package')}"
-                    if changed[name]
-                    else "refreshing metadata without Valid-Until"
-                    if name == "apt"
-                    else "renewing metadata",
-                )
+                step(report, name, f"preparing {plural(len(inspected[name]), 'new package')}")
                 prepared.append(
                     _prepare(
                         name,
-                        changed[name],
+                        inspected[name],
                         state.materialise(store, published[name], out=root / f"{name}-published"),
-                        renew=name in renew,
                         policy=policies[name],
                         runtime=runtime,
                         signer=signer,
@@ -347,7 +369,7 @@ def _reconcile(
             )
         count = 0
         packages = 0
-        repositories = 0
+        repositories: list[str] = []
         for item in prepared:
             current = published[item.format]
             bootstrap = tuple(ref for ref in bootstrap_objects if ref.bucket_role == item.format)
@@ -386,17 +408,16 @@ def _reconcile(
             state.write_inventory(store, current, data)
             step(report, item.format, f"wrote {state.INVENTORY_KEY}")
             count += 1
-            repositories += 1
+            repositories.append(item.format)
             packages += len(item.retained.accepted_history) - len(current.retained.accepted_history)
-        return RunResult(True, count, len(scan.pending), packages, repositories)
+        return RunResult(True, count, len(scan.pending), packages, tuple(repositories))
 
 
 def _prepare(
     name: str,
-    changed: Sequence[discovery.DiscoveredAsset],
+    inspected_assets: Sequence[InspectedAsset],
     retained: RetainedFormat,
     *,
-    renew: bool,
     policy: FormatPolicy,
     runtime: Runtime,
     signer: SigningSession,
@@ -406,21 +427,6 @@ def _prepare(
     adapter = _adapter(name)
     adapter.validate_retained(retained, policy=policy, runtime=runtime)
     additions: list[AdmittedAsset] = []
-    inspected_assets: list[InspectedAsset] = []
-    for index, item in enumerate(changed):
-        if item.checksum is None:
-            raise StateError("Changed input lacks a verified checksum")
-        verified = discovery.verify_asset(
-            item.source, item.checksum, runtime=runtime, out=out.with_name(f"{name}-{index}-asset")
-        )
-        inspected_assets.append(
-            adapter.inspect(
-                verified,
-                policy=policy,
-                runtime=runtime,
-                out=out.with_name(f"{name}-{index}-inspect"),
-            )
-        )
     for inspected in inspected_assets:
         accepted = admission.admit(
             inspected,
@@ -431,7 +437,7 @@ def _prepare(
         )
         if accepted not in retained.accepted_history and accepted not in additions:
             additions.append(accepted)
-    if not additions and not renew:
+    if not additions and not stale_entries(retained):
         return PreparedFormat(name, retained, (), retained.objects)
     result = adapter.prepare(
         additions, retained, policy=policy, runtime=runtime, signer=signer, now=now, out=out
@@ -444,5 +450,5 @@ def _prepare(
                 raise StateError("Adapter changed the observed prior write precondition")
         elif output.mode != "create":
             raise StateError("A new object requires conditional creation")
-    adapter.validate_prepared(result, policy=policy, runtime=runtime, now=now)
+    adapter.validate_prepared(result, policy=policy, runtime=runtime)
     return result

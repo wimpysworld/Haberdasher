@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import io
 import json
 import os
 import shutil
@@ -14,7 +13,7 @@ import tempfile
 from collections.abc import Callable, Generator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import CompletedProcess
 from typing import cast
@@ -23,7 +22,7 @@ from urllib.request import urlopen
 
 import pytest
 
-from haberdasher import cli, core, discovery, publish, state
+from haberdasher import cli, publish, state
 from haberdasher.config import (
     Config,
     Policy,
@@ -298,14 +297,18 @@ os.execv({target!r},[{target!r},*sys.argv[1:]])
 
 
 class InterruptedStore(LocalStore):
-    """Fail the first entry write, after the run uploaded its packages and dependencies."""
-
-    interrupt = False
+    """Fail a run after a set number of its entry writes, once packages are uploaded."""
 
     def __init__(self, policy: StoragePolicy) -> None:
         super().__init__(policy)
         self.downloads: list[ObjectRef] = []
         self.writes: list[ObjectRef] = []
+        self.entries_before_failure: int | None = None
+        self.entries = 0
+
+    def interrupt_after(self, entries: int) -> None:
+        self.entries_before_failure = entries
+        self.entries = 0
 
     def download(self, ref: ObjectRef, destination: Path) -> ObjectStat:
         self.downloads.append(ref)
@@ -313,9 +316,12 @@ class InterruptedStore(LocalStore):
 
     def _check(self, ref: ObjectRef) -> None:
         self.writes.append(ref)
-        if self.interrupt and ref.object_class == "entry":
-            self.interrupt = False
-            raise RuntimeError("synthetic interruption before entry metadata")
+        if ref.object_class != "entry":
+            return
+        if self.entries == self.entries_before_failure:
+            self.entries_before_failure = None
+            raise RuntimeError(f"synthetic interruption after {self.entries} entry writes")
+        self.entries += 1
 
     def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
         self._check(ref)
@@ -654,20 +660,32 @@ def test_recorded_pipeline_and_full_rerun(
         recorded.downloads.clear()
         recorded.native.clear()
         if interrupted:
-            inventory = (bucket / state.INVENTORY_KEY).read_bytes()
-            store.interrupt = True
-            with pytest.raises(RuntimeError, match="synthetic interruption"):
-                reconcile()
-            assert (bucket / state.INVENTORY_KEY).read_bytes() == inventory
-            assert not (bucket / state.LOCK_KEY).exists()
-            leftovers = {
-                ref.key for ref in store.writes if ref.object_class in {"package", "dependency"}
-            }
-            assert leftovers and all((bucket / key).exists() for key in leftovers)
-            assert recorded.downloads == ["SHA256SUMS", assets[-1].source.filename]
-            recorded.downloads.clear()
-            recorded.inspected.clear()
-        second = reconcile()
+            # Each rerun stops after one more entry write than the last, so that a full rerun
+            # recovers from an interruption before and after every entry write of the run.
+            entries = 0
+            while True:
+                inventory = (bucket / state.INVENTORY_KEY).read_bytes()
+                store.writes.clear()
+                store.interrupt_after(entries)
+                try:
+                    second = reconcile()
+                    break
+                except RuntimeError as error:
+                    assert str(error) == f"synthetic interruption after {entries} entry writes"
+                assert (bucket / state.INVENTORY_KEY).read_bytes() == inventory
+                assert not (bucket / state.LOCK_KEY).exists()
+                leftovers = {
+                    ref.key for ref in store.writes if ref.object_class in {"package", "dependency"}
+                }
+                assert leftovers and all((bucket / key).exists() for key in leftovers)
+                assert recorded.downloads == ["SHA256SUMS", assets[-1].source.filename]
+                recorded.downloads.clear()
+                recorded.inspected.clear()
+                entries += 1
+            store.entries_before_failure = None
+            assert entries == sum(ref.object_class == "entry" for ref in store.writes) > 0
+        else:
+            second = reconcile()
         assert second.changed and second.pending_assets == 0
         assert recorded.downloads == ["SHA256SUMS", assets[-1].source.filename]
         assert {Path(path).name for path in recorded.inspected} == {f"{name}-0-asset"}
@@ -850,78 +868,6 @@ def test_public_bootstrap_interruption_converges_with_a_full_rerun(
         with serve(fixtures.root / "store/public") as http:
             client = native_client("apt", fixtures, "rerun", http.url("apt"), key, "", ("", ""))
             client(retained, 1)
-
-
-def test_published_valid_until_is_rewritten_once(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    with private_workspace() as fixtures, disposable_key() as key:
-        recorded = RecordedGitHub(assets_for("apt", fixtures))
-        storage = StoragePolicy("local", {"apt": str(fixtures.root / "store/public/apt")})
-        bucket = Path(storage.public["apt"])
-        store = LocalStore(storage)
-        config = Config(("wimpysworld/fixture",))
-        policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
-        monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
-        lines: list[str] = []
-
-        def reconcile() -> publish.RunResult:
-            lines.clear()
-            recorded.downloads.clear()
-            with private_workspace() as runtime:
-                recorded.bind(runtime)
-                return publish.reconcile(
-                    config,
-                    policy,
-                    store=store,
-                    runtime=runtime,
-                    now=datetime.now(UTC),
-                    report=lines.append,
-                )
-
-        assert reconcile().changed
-        with signing_session(
-            fixtures, expected_fingerprint=key.fingerprint, key_file=key.key_file
-        ) as signer:
-            apt.add_valid_until(
-                bucket, signer, datetime.now(UTC).replace(microsecond=0) + timedelta(days=7)
-            )
-        inventory = (bucket / state.INVENTORY_KEY).read_bytes()
-        with private_workspace() as runtime:
-            recorded.bind(runtime)
-            scan = discovery.scan_releases(config, runtime=runtime, report=core.quiet)
-        with patch("urllib.request.urlopen", return_value=io.BytesIO(inventory)):
-            cli.show_plan(scan, {"apt": "https://apt.example.invalid"})
-        assert capsys.readouterr().out.splitlines()[-2:] == [
-            "apt   pending: refresh metadata without Valid-Until",
-            "No new packages. apt metadata needs a refresh. Nothing written."
-            " Run `just publish` to refresh it.",
-        ]
-        with serve(fixtures.root / "store/public") as http:
-            client = native_client("apt", fixtures, "migrated", http.url("apt"), key, "", ("", ""))
-            with private_workspace() as runtime:
-                client(committed(store, runtime, "apt"), 1)
-            before = snapshot(bucket)
-            assert reconcile().changed
-            assert "apt   refreshing metadata without Valid-Until" in lines
-            assert recorded.downloads == ["SHA256SUMS"]
-            after = snapshot(bucket)
-            assert {path for path in after if after[path] != before.get(path)} == {
-                bucket / "dists/stable/Release",
-                bucket / "dists/stable/Release.gpg",
-                bucket / "dists/stable/InRelease",
-                bucket / state.INVENTORY_KEY,
-            }
-            for name in ("Release", "InRelease"):
-                assert b"Valid-Until" not in (bucket / "dists/stable" / name).read_bytes()
-            assert (
-                "expires_at"
-                not in json.loads(after[bucket / state.INVENTORY_KEY][0])["state"]["metadata"]
-            )
-            with private_workspace() as runtime:
-                client(committed(store, runtime, "apt"), 1)
-        assert not reconcile().changed
-        assert lines[-2:] == ["apt   unchanged", "apt   unlocked"]
 
 
 def test_flatpak_runs_download_only_the_working_set() -> None:

@@ -4,11 +4,9 @@ import pytest
 
 from haberdasher.config import (
     MAX_BYTES,
-    PRODUCTION_FINGERPRINT,
     PUBLIC,
     Config,
     FormatPolicy,
-    Policy,
     StoragePolicy,
     load_config,
 )
@@ -29,8 +27,6 @@ def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
     assert config.format_policy("apt").architectures == ("amd64", "arm64")
     for name in ("rpm", "arch", "apk", "flatpak"):
         assert config.format_policy(name).architectures == ("x86_64", "aarch64")
-    apt = config.format_policy("apt")
-    assert (apt.suite, apt.component) == ("stable", "main")
     assert PUBLIC == {
         "apt": ("haberdasher-apt", "https://apt.wimpys.world"),
         "rpm": ("haberdasher-rpm", "https://rpm.wimpys.world"),
@@ -39,8 +35,6 @@ def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
         "flatpak": ("haberdasher-flatpak", "https://flatpak.wimpys.world"),
     }
     StoragePolicy("r2", {name: bucket for name, (bucket, _) in PUBLIC.items()})
-    with pytest.raises(ValueError):
-        Policy().require_remote()
 
 
 @pytest.mark.parametrize(
@@ -189,21 +183,8 @@ def test_reject_local_storage(apt: str, rpm: str) -> None:
         StoragePolicy("local", {"apt": apt, "rpm": rpm})
 
 
-def test_remote_needs_r2_and_production_key(tmp_path: Path) -> None:
-    storage = StoragePolicy("r2", {"apt": "public-apt"})
-    Policy(storage, PRODUCTION_FINGERPRINT).require_remote()
-    for policy in (
-        Policy(storage, "A" * 40),
-        Policy(storage),
-        Policy(StoragePolicy("r2"), PRODUCTION_FINGERPRINT),
-        Policy(StoragePolicy("local", {"apt": str(tmp_path / "apt")}), PRODUCTION_FINGERPRINT),
-    ):
-        with pytest.raises(ValueError, match="production signing key"):
-            policy.require_remote()
-
-
 def test_direct_policy_validation() -> None:
     with pytest.raises(ValueError):
-        FormatPolicy("apt", suite="../escape")
+        FormatPolicy("apt", architectures=("../escape",))
     with pytest.raises(ValueError):
         Config(("owner/repo", "OWNER/REPO"))

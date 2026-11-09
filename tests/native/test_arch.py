@@ -16,7 +16,13 @@ import pytest
 
 from haberdasher.admission import AdmissionFailure, admit
 from haberdasher.config import FormatPolicy
-from haberdasher.core import AdmittedAsset, PreparedFormat, RetainedFormat, sha256_file
+from haberdasher.core import (
+    AdmittedAsset,
+    PreparedFormat,
+    RetainedFormat,
+    UnsupportedAsset,
+    sha256_file,
+)
 from haberdasher.formats import arch
 from haberdasher.runtime import Runtime, private_workspace
 from haberdasher.signing import signing_session
@@ -173,7 +179,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
         print(run(runtime, "pacman", "--version").decode())
         print(run(runtime, "repo-add", "--version").decode())
         print("pacman:", shutil.which("pacman", path=runtime.environment["PATH"]))
-        empty = RetainedFormat("arch", None, (), (), {}, ())
+        empty = RetainedFormat("arch", (), (), {}, ())
         arch.validate_retained(empty, policy=POLICY, runtime=runtime)
         assets = [
             fixture(runtime, "keeper", "1", dependency="updateable>=1"),
@@ -199,7 +205,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
             admit(inspected, accepted, compare=arch.compare, policy=POLICY, runtime=runtime)
         unqualified = fixture(runtime, "unqualified", "1", architecture="armv7h")
         with pytest.raises(
-            arch.ArchFailure,
+            UnsupportedAsset,
             match="^unqualified-1-1-armv7h.pkg.tar.zst: unsupported Arch architecture 'armv7h'$",
         ):
             arch.inspect(
@@ -216,7 +222,6 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         state = replace(
             first.retained,
-            prior_generation="one",
             metadata={
                 **first.retained.metadata,
                 "etags": {output.ref.key: "opaque-one" for output in first.outputs},
@@ -239,7 +244,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
             now=NOW,
             out=runtime.root / "generation2",
         )
-        arch.validate_prepared(second, policy=POLICY, runtime=runtime, now=NOW)
+        arch.validate_prepared(second, policy=POLICY, runtime=runtime)
         assert len(second.retained.accepted_history) == 3
         assert len(second.retained.active_identities) == 2
         assert [
@@ -409,7 +414,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
             saved = path.read_bytes()
             path.write_bytes(b"")
             with pytest.raises((arch.ArchFailure, ValueError)):
-                arch.validate_prepared(second, policy=POLICY, runtime=runtime, now=NOW)
+                arch.validate_prepared(second, policy=POLICY, runtime=runtime)
             path.write_bytes(saved)
         reordered = replace(
             second,
@@ -419,7 +424,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
             ),
         )
         with pytest.raises(arch.ArchFailure):
-            arch.validate_prepared(reordered, policy=POLICY, runtime=runtime, now=NOW)
+            arch.validate_prepared(reordered, policy=POLICY, runtime=runtime)
         real_run = runtime.run
         real_gpg = shutil.which("gpg", path=runtime.environment["PATH"])
         shell = shutil.which("bash", path=runtime.environment["PATH"])
@@ -489,7 +494,7 @@ def test_arch_native_multiarch() -> None:
             runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
         ) as signer,
     ):
-        empty = RetainedFormat("arch", None, (), (), {}, ())
+        empty = RetainedFormat("arch", (), (), {}, ())
         accepted: list[AdmittedAsset] = []
         for architecture in ("x86_64", "aarch64"):
             asset = fixture(
@@ -507,7 +512,7 @@ def test_arch_native_multiarch() -> None:
             accepted.append(
                 admit(inspected, accepted, compare=arch.compare, policy=policy, runtime=runtime)
             )
-        with pytest.raises(arch.ArchFailure, match="unsupported Arch architecture 'aarch64'"):
+        with pytest.raises(UnsupportedAsset, match="unsupported Arch architecture 'aarch64'"):
             arch.inspect(
                 accepted[1].inspected.verified,
                 policy=POLICY,
@@ -573,7 +578,7 @@ def test_arch_native_any_package_in_every_architecture() -> None:
             runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
         ) as signer,
     ):
-        empty = RetainedFormat("arch", None, (), (), {}, ())
+        empty = RetainedFormat("arch", (), (), {}, ())
         accepted: list[AdmittedAsset] = []
         for name, architecture, extension in (
             ("native", "x86_64", ".pkg.tar.zst"),

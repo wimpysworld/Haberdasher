@@ -406,7 +406,7 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
 
 
 def test_plan_treats_404_as_unpublished_and_continues_past_an_unreachable_domain(
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     urls = {"apt": "https://apt.example.invalid", "rpm": "https://127.0.0.1:1"}
     real = urllib.request.urlopen
@@ -416,8 +416,14 @@ def test_plan_treats_404_as_unpublished_and_continues_past_an_unreachable_domain
             raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
         return real(request, timeout=timeout)
 
-    with patch.object(urllib.request, "urlopen", side_effect=answer):
-        cli.show_plan(scan_with("app.deb"), urls)
+    def inspect(name: str, items: list[object], **_: object) -> list[object]:
+        return items
+
+    with (
+        patch.object(urllib.request, "urlopen", side_effect=answer),
+        patch.object(publish, "inspect_new", side_effect=inspect),
+    ):
+        cli.show_plan(scan_with("app.deb"), Config(("synthetic/test",)), Runtime(tmp_path), urls)
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "Reading published state from apt.example.invalid, 127.0.0.1"
     assert lines[1].startswith("rpm   cannot reach 127.0.0.1: ")
@@ -440,3 +446,35 @@ def test_errors_print_one_line_without_a_traceback(
         assert cli.main(["plan"]) == 1
     captured = capsys.readouterr()
     assert captured.err == "Error: synthetic/test v1, checksums.txt: Cosign failed\n"
+
+
+@pytest.mark.parametrize(
+    "result,summary",
+    [
+        (
+            publish.RunResult(True, 5, 0, 2, ("apt", "rpm")),
+            "Published 2 packages to 2 repositories.",
+        ),
+        (publish.RunResult(True, 4, 0, 0, ("apt",)), "Refreshed apt metadata."),
+        (
+            publish.RunResult(True, 9, 0, 0, ("apk", "apt", "rpm")),
+            "Refreshed apk, apt and rpm metadata.",
+        ),
+        (publish.RunResult(False, 0), "Nothing changed in 1 repository."),
+    ],
+)
+def test_publish_summary_names_refreshed_metadata(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    result: publish.RunResult,
+    summary: str,
+) -> None:
+    with (
+        patch.object(cli, "load_config", return_value=Config(("synthetic/test",))),
+        patch.object(discovery, "scan_releases", return_value=scan_with("app.deb")),
+        patch.object(cli, "LocalStore"),
+        patch.object(signing, "key_fingerprint", return_value="A" * 40),
+        patch.object(publish, "reconcile", return_value=result),
+    ):
+        assert cli.main(["publish", "--local-root", str(tmp_path / "store")]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == summary

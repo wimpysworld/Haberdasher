@@ -137,7 +137,7 @@ def test_compare_rejects_unqualified_version(runtime: Runtime, version: str) -> 
         ),
     ],
 )
-def test_rejects_unapproved_metadata(field: str, value: JSONValue) -> None:
+def test_rejects_unsupported_metadata(field: str, value: JSONValue) -> None:
     data: dict[str, JSONValue] = {
         "commit": {"ostree.ref-binding": [REF], "ostree.collection-binding": ""},
         "keyfile": {
@@ -200,18 +200,14 @@ def test_summary_dependencies_are_immutable() -> None:
     ):
         assert flatpak._classify(key)[1] is True
     assert flatpak._classify("world.example.Test.flatpakref") == ("entry", True, 9)
-    for key in ("unapproved-secret", "Test.flatpakref", "keys/world.example.Test.flatpakref"):
+    for key in ("unexpected-secret", "Test.flatpakref", "keys/world.example.Test.flatpakref"):
         with pytest.raises(flatpak.FlatpakFailure):
             flatpak._classify(key)
 
 
 def test_empty_state_is_not_missing_state(runtime: Runtime) -> None:
-    empty = RetainedFormat("flatpak", None, (), (), {}, ())
+    empty = RetainedFormat("flatpak", (), (), {}, ())
     flatpak.validate_retained(empty, policy=POLICY, runtime=runtime)
-    with pytest.raises(flatpak.FlatpakFailure, match="Missing retained"):
-        flatpak.validate_retained(
-            replace(empty, prior_generation="old"), policy=POLICY, runtime=runtime
-        )
     with pytest.raises(flatpak.FlatpakFailure, match="Incomplete"):
         flatpak.validate_retained(
             replace(empty, metadata={"heads": {}}), policy=POLICY, runtime=runtime
@@ -264,10 +260,9 @@ def relocated(runtime: Runtime, monkeypatch: pytest.MonkeyPatch) -> PreparedForm
     objects = tuple(output.ref for output in outputs)
     retained = RetainedFormat(
         "flatpak",
-        None,
         (admitted,),
         (identity,),
-        {"files": files, "policy": json_value(POLICY)},
+        {"files": files},
         objects,
     )
 
@@ -292,7 +287,7 @@ def test_prepared_accepts_verified_relocated_copies(
 ) -> None:
     files = flatpak._mapping(relocated.retained.metadata["files"])
     assert all(files[output.ref.key] != str(output.local_path) for output in relocated.outputs)
-    flatpak.validate_prepared(relocated, policy=POLICY, runtime=runtime, now=datetime.now(UTC))
+    flatpak.validate_prepared(relocated, policy=POLICY, runtime=runtime)
 
 
 @pytest.mark.parametrize(
@@ -375,7 +370,7 @@ def test_prepared_relocated_copies_fail_closed(
 
         monkeypatch.setattr(flatpak, "_validate_repo", reject_native)
     with pytest.raises(ValueError):
-        flatpak.validate_prepared(prepared, policy=POLICY, runtime=runtime, now=datetime.now(UTC))
+        flatpak.validate_prepared(prepared, policy=POLICY, runtime=runtime)
 
 
 @pytest.mark.parametrize(
@@ -577,17 +572,3 @@ def test_flatpakref_installs_one_application_with_its_runtime_source(
     assert flatpak._title(path, REF) == "Test App"
     path.write_text("<component><id>world.example.Test</id></component>")
     assert flatpak._title(path, REF) == "world.example.Test"
-
-
-def test_missing_flatpakref_renews_published_state() -> None:
-    identity = NativeIdentity("flatpak", REF, "x86_64", "1", source_commit="c" * 64)
-
-    def ref(key: str) -> ObjectRef:
-        return ObjectRef(
-            "flatpak", key, "entry", 1, "a" * 64, "application/octet-stream", "no-cache"
-        )
-
-    retained = RetainedFormat("flatpak", None, (), (identity,), {}, (ref("summary"),))
-    assert flatpak.missing_entries(retained)
-    retained = replace(retained, objects=(*retained.objects, ref("world.example.Test.flatpakref")))
-    assert not flatpak.missing_entries(retained)

@@ -181,7 +181,6 @@ def publish(prepared: PreparedFormat, root: Path) -> RetainedFormat:
         shutil.copyfile(output.local_path, destination)
     return replace(
         prepared.retained,
-        prior_generation="synthetic",
         metadata={
             **prepared.retained.metadata,
             "etags": {ref.key: f"etag-{ref.sha256}" for ref in prepared.referenced_objects},
@@ -229,7 +228,7 @@ def test_native_publication_cold_restore_and_clients() -> None:
                 admitted = admit(
                     inspected, (), compare=flatpak.compare, policy=policy, runtime=runtime
                 )
-                empty = RetainedFormat("flatpak", None, (), (), {}, ())
+                empty = RetainedFormat("flatpak", (), (), {}, ())
                 prepared1 = flatpak.prepare(
                     (admitted,),
                     empty,
@@ -241,12 +240,12 @@ def test_native_publication_cold_restore_and_clients() -> None:
                 )
                 relocated_outputs: list[OutputObject] = []
                 for output in prepared1.outputs:
-                    destination = root / "frozen-outputs" / str(output.ordinal)
+                    destination = root / "prepared-outputs" / str(output.ordinal)
                     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                     shutil.copyfile(output.local_path, destination)
                     relocated_outputs.append(replace(output, local_path=destination))
                 prepared1 = replace(prepared1, outputs=tuple(relocated_outputs))
-                flatpak.validate_prepared(prepared1, policy=policy, runtime=runtime, now=NOW)
+                flatpak.validate_prepared(prepared1, policy=policy, runtime=runtime)
                 catalogue(runtime, prepared1, "1", root / "catalogue-1")
                 retained1 = publish(prepared1, public_tree / "publisher")
                 delayed_tree = public_tree / "delayed"
@@ -395,7 +394,7 @@ def test_native_publication_cold_restore_and_clients() -> None:
                 assert old_signature in prepared2.referenced_objects
                 assert all(output.ref.key != old_signature.key for output in prepared2.outputs)
                 catalogue(runtime, prepared2, "2", root / "catalogue-2")
-                frozen = canonical_json(prepared2)
+                before = canonical_json(prepared2)
                 retained2 = publish(prepared2, public_tree / "publisher")
                 http.set_generation_mtime(
                     [path for path in (public_tree / "publisher").rglob("*") if path.is_file()], 2
@@ -412,13 +411,13 @@ def test_native_publication_cold_restore_and_clients() -> None:
                 add_remotes(fresh, http.url("publisher"), http.url("runtime-repo"), key.public_file)
                 client_run(fresh, "install", "--noninteractive", "publisher", REF)
                 installed(fresh, inspected2.identity.source_commit, "2", runtime_commit)
-                flatpak.validate_prepared(prepared2, policy=policy, runtime=runtime, now=NOW)
-                assert canonical_json(prepared2) == frozen
-                replay = root / "replay"
-                publish(prepared2, replay)
-                publish(prepared2, replay)
+                flatpak.validate_prepared(prepared2, policy=policy, runtime=runtime)
+                assert canonical_json(prepared2) == before
+                repeat = root / "repeat"
+                publish(prepared2, repeat)
+                publish(prepared2, repeat)
                 for output in prepared2.outputs:
-                    assert sha256_file(replay / output.ref.key) == (
+                    assert sha256_file(repeat / output.ref.key) == (
                         output.ref.sha256,
                         output.ref.size,
                     )
@@ -552,8 +551,8 @@ def test_native_publication_cold_restore_and_clients() -> None:
                 for index, extra in enumerate(
                     (
                         "[core]\nrepo_version=1\nmode=bare-user\n",
-                        original_config + "collection-id=world.example.Unapproved\n",
-                        original_config + '[remote "unapproved"]\nurl=https://unknown.invalid\n',
+                        original_config + "collection-id=world.example.Unexpected\n",
+                        original_config + '[remote "unexpected"]\nurl=https://unknown.invalid\n',
                     )
                 ):
                     config_path = root / f"invalid-config-{index}"
@@ -673,7 +672,7 @@ def test_signed_upstream_apps_and_architectures_share_one_repository() -> None:
                 ) as signer:
                     prepared = flatpak.prepare(
                         tuple(admitted),
-                        RetainedFormat("flatpak", None, (), (), {}, ()),
+                        RetainedFormat("flatpak", (), (), {}, ()),
                         policy=POLICY,
                         runtime=runtime,
                         signer=signer,

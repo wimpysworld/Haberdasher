@@ -30,6 +30,7 @@ from haberdasher.core import (
     PreparedFormat,
     RetainedFormat,
     SourceAsset,
+    UnsupportedAsset,
     VerifiedAsset,
     WriteReceipt,
 )
@@ -58,6 +59,10 @@ class AdapterDouble:
     ) -> InspectedAsset:
         self.inspections += 1
         name, version = asset.source.filename.removesuffix(".pkg.tar.zst").rsplit("-", 1)
+        if version == "armhf":
+            raise UnsupportedAsset(
+                f"{asset.source.filename}: unsupported Arch architecture {version!r}"
+            )
         return InspectedAsset(
             asset, NativeIdentity("arch", name, "x86_64", version), {}, {}, "unsigned"
         )
@@ -76,8 +81,10 @@ class AdapterDouble:
         if not retained.metadata:
             return
         refs = {ref.key: ref for ref in retained.objects}
+        stale = core.stale_entries(retained)
         for key, value in state.mapping(retained.metadata["paths"]).items():
-            assert core.sha256_file(Path(str(value))) == (refs[key].sha256, refs[key].size)
+            if key not in stale:
+                assert core.sha256_file(Path(str(value))) == (refs[key].sha256, refs[key].size)
         assert Path(str(retained.metadata["public_key"])).read_bytes() == EXPORT
 
     def prepare(
@@ -126,7 +133,6 @@ class AdapterDouble:
         public.write_bytes(EXPORT)
         result = RetainedFormat(
             "arch",
-            None,
             history,
             tuple(item.inspected.identity for item in history),
             {
@@ -139,7 +145,7 @@ class AdapterDouble:
         return PreparedFormat("arch", result, tuple(outputs), result.objects)
 
     def validate_prepared(
-        self, prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
+        self, prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime
     ) -> None:
         self.validate_retained(prepared.retained, policy=policy, runtime=runtime)
         for output in prepared.outputs:
@@ -148,6 +154,7 @@ class AdapterDouble:
 
 class CountingStore(LocalStore):
     interrupt = False
+    interrupt_after_entry = False
 
     def __init__(self, storage: StoragePolicy) -> None:
         super().__init__(storage)
@@ -158,12 +165,12 @@ class CountingStore(LocalStore):
     def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
         self._check(ref)
         self.writes.append(f"{ref.bucket_role}/{ref.key}")
-        return super().create(ref, source)
+        return self._after(ref, super().create(ref, source))
 
     def replace(self, ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
         self._check(ref)
         self.writes.append(f"{ref.bucket_role}/{ref.key}")
-        return super().replace(ref, source, expected_etag=expected_etag)
+        return self._after(ref, super().replace(ref, source, expected_etag=expected_etag))
 
     def delete(self, role: str, key: str, *, expected_etag: str) -> None:
         self.deletes.append(f"{role}/{key}")
@@ -177,6 +184,12 @@ class CountingStore(LocalStore):
         if self.interrupt and ref.object_class == "entry":
             self.interrupt = False
             raise RuntimeError("synthetic interruption after package upload")
+
+    def _after(self, ref: ObjectRef, receipt: WriteReceipt) -> WriteReceipt:
+        if self.interrupt_after_entry and ref.object_class == "entry":
+            self.interrupt_after_entry = False
+            raise RuntimeError("synthetic interruption after an entry write")
+        return receipt
 
 
 class Releases:
@@ -413,6 +426,33 @@ def test_interrupted_run_converges_with_a_full_rerun(
     assert fixture.run() == publish.RunResult(False, 0, 0)
 
 
+def test_entry_interruption_converges_with_a_full_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    before = fixture.path("arch", state.INVENTORY_KEY).read_bytes()
+    fixture.releases.add("tool", "2")
+    fixture.store.interrupt_after_entry = True
+    with pytest.raises(RuntimeError, match="after an entry write"):
+        fixture.run()
+    assert fixture.path("arch", state.INVENTORY_KEY).read_bytes() == before
+    assert fixture.path("arch", "x86_64/db").read_text() == "tool-1\ntool-2\n"
+    assert not fixture.locks()
+    result = fixture.run()
+    assert (result.changed, result.packages) == (True, 1)
+    assert fixture.store.writes[-2:] == ["arch/x86_64/db", "arch/haberdasher.json"]
+    assert "arch/x86_64/tool-1.pkg" not in fixture.store.downloads
+    assert fixture.path("arch", "x86_64/db").read_text() == "tool-1\ntool-2\n"
+    assert_published(fixture)
+    assert fixture.run() == publish.RunResult(False, 0, 0)
+    assert fixture.store.writes == ["arch/haberdasher.lock"]
+    fixture.releases.add("tool", "2", b"different bytes")
+    with pytest.raises(AdmissionFailure, match="Changed bytes"):
+        fixture.run()
+
+
 def test_changed_bytes_for_a_published_identity_are_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -531,17 +571,30 @@ def test_signing_fingerprint_change_fails_before_discovery(
     assert not fixture.locks()
 
 
-def test_changed_published_entry_stops_preparation(
+@pytest.mark.parametrize("content", ["tampered\n", "tool-9\n"], ids=["size", "bytes"])
+def test_changed_published_entry_is_rebuilt_from_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    fixture.path("arch", "x86_64/db").write_text(content)
+    fixture.releases.add("tool", "2")
+    assert fixture.run().changed
+    assert fixture.path("arch", "x86_64/db").read_text() == "tool-1\ntool-2\n"
+    assert_published(fixture)
+
+
+def test_missing_published_entry_stops_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = Fixture(tmp_path, monkeypatch, ("arch",))
     fixture.releases.add("tool", "1")
     fixture.run()
-    fixture.path("arch", "x86_64/db").write_text("tampered\n")
+    fixture.path("arch", "x86_64/db").unlink()
     fixture.releases.add("tool", "2")
-    with pytest.raises(RuntimeError, match="differ|changed"):
+    with pytest.raises(state.StateError, match="x86_64/db is missing"):
         fixture.run()
-    assert fixture.path("arch", "x86_64/db").read_text() == "tampered\n"
     assert not fixture.path("arch", "x86_64/tool-2.pkg").exists()
 
 
@@ -554,7 +607,7 @@ def test_publish_reports_each_step_and_an_unchanged_rerun(
     monkeypatch.setattr(publish.time, "monotonic", lambda: next(clock))
     lines: list[str] = []
     result = fixture.run(lines.append)
-    assert (result.packages, result.repositories) == (1, 1)
+    assert (result.packages, result.repositories) == (1, ("arch",))
     assert result.published_objects == 5
     assert lines == [
         "arch  locked",
@@ -634,7 +687,7 @@ def test_plan_counts_published_and_new_packages_from_the_public_inventory(
 
     scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
     with patch.object(urllib.request, "urlopen", side_effect=answer):
-        cli.show_plan(scan, urls)
+        cli.show_plan(scan, fixture.config, fixture.runtime, urls)
     assert requested == [
         "https://pkg.example.invalid/haberdasher.json",
         "https://apt.example.invalid/haberdasher.json",
@@ -646,4 +699,36 @@ def test_plan_counts_published_and_new_packages_from_the_public_inventory(
         "arch    pkg.example.invalid          1    1",
         "",
         "1 new package. Nothing written. Run `just publish` to publish them.",
+    ]
+
+
+def test_unsupported_asset_is_skipped_with_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("other", "armhf")
+    fixture.releases.add("tool", "1")
+    skipped = "arch  skipped other-armhf.pkg.tar.zst: unsupported Arch architecture 'armhf'"
+    lines: list[str] = []
+    result = fixture.run(lines.append)
+    assert (result.changed, result.packages) == (True, 1)
+    assert lines.count(skipped) == 1
+    assert lines.index(skipped) < lines.index("arch  preparing 1 new package")
+    assert fixture.path("arch", "x86_64/db").read_text() == "tool-1\n"
+    lines.clear()
+    assert not fixture.run(lines.append).changed
+    assert lines == ["arch  locked", skipped, "arch  unchanged", "arch  unlocked"]
+    assert fixture.store.writes == ["arch/haberdasher.lock"]
+    inventory = fixture.path("arch", state.INVENTORY_KEY).read_bytes()
+    scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
+    with patch.object(urllib.request, "urlopen", return_value=io.BytesIO(inventory)):
+        cli.show_plan(scan, fixture.config, fixture.runtime, {"arch": "https://pkg.example"})
+    output = capsys.readouterr().out.splitlines()
+    assert output[1:] == [
+        skipped,
+        "",
+        "Format  Repository   Published  New",
+        "arch    pkg.example          1    0",
+        "",
+        "No new packages. Nothing written.",
     ]

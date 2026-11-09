@@ -207,7 +207,6 @@ def retained_rpm(root: Path, architectures: tuple[str, ...]) -> RetainedFormat:
     )
     return RetainedFormat(
         "rpm",
-        None,
         tuple(history),
         tuple(asset.inspected.identity for asset in history),
         {
@@ -251,7 +250,7 @@ def test_retained_architecture_policy_change_fails_closed(
     mock_rpm_commands(monkeypatch)
     runtime = Runtime(tmp_path / "runtime", environ={})
     rpm.validate_retained(retained, policy=FormatPolicy("rpm"), runtime=runtime)
-    with pytest.raises(rpm.RpmFailure, match="architecture is not approved"):
+    with pytest.raises(rpm.RpmFailure, match="Unsupported retained RPM architecture"):
         rpm.validate_retained(
             retained, policy=FormatPolicy("rpm", architectures=("aarch64",)), runtime=runtime
         )
@@ -272,12 +271,10 @@ def test_retained_compatible_architectures(
 
 def test_bootstrap_is_not_missing_state() -> None:
     policy = FormatPolicy("rpm")
-    empty = RetainedFormat("rpm", None, (), (), {}, ())
+    empty = RetainedFormat("rpm", (), (), {}, ())
     with private_workspace() as runtime:
         rpm.validate_retained(empty, policy=policy, runtime=runtime)
-        for state in (
-            replace(empty, prior_generation="one"),
-            replace(empty, metadata={"root": "/"}),
-        ):
-            with pytest.raises(rpm.RpmFailure, match="Incomplete"):
-                rpm.validate_retained(state, policy=policy, runtime=runtime)
+        with pytest.raises(rpm.RpmFailure, match="Incomplete"):
+            rpm.validate_retained(
+                replace(empty, metadata={"root": "/"}), policy=policy, runtime=runtime
+            )

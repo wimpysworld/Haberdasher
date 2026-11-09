@@ -32,8 +32,6 @@ def admit(
     identity = inspected.identity
     if identity.format != policy.format:
         raise AdmissionFailure("Inspection and policy formats differ")
-    if inspected.upstream_signature in {"unknown", "invalid"}:
-        raise AdmissionFailure("Upstream signature is not trusted")
     if identity.format == "flatpak" and identity.source_commit is None:
         raise AdmissionFailure("Flatpak admission requires an exact source commit")
     equivalent: AdmittedAsset | None = None

@@ -21,11 +21,13 @@ from haberdasher.core import (
     OutputObject,
     PreparedFormat,
     RetainedFormat,
+    UnsupportedAsset,
     VerifiedAsset,
     atomic_write,
     digest,
     safe_path,
     sha256_file,
+    stale_entries,
 )
 from haberdasher.runtime import Runtime
 from haberdasher.signing import ALPINE_SIGNATURE_MEMBER, SigningSession
@@ -203,6 +205,9 @@ def inspect(
 ) -> InspectedAsset:
     _policy(policy)
     _check(asset.local_path, asset.sha256, asset.size)
+    with asset.local_path.open("rb") as stream:
+        if stream.read(4) == b"PK\x03\x04":
+            raise UnsupportedAsset(f"{asset.source.filename}: an Android package, not Alpine")
     safe_path(out, "validation")
     out.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out, prefix="inspect-") as temporary:
@@ -231,7 +236,9 @@ def inspect(
             raise ApkFailure("Native APK inspection omitted the input")
         (name, version, arch), stanza = next(iter(records.items()))
         if arch not in (*policy.architectures, "noarch"):
-            raise ApkFailure(f"{asset.source.filename}: unsupported APK architecture {arch!r}")
+            raise UnsupportedAsset(
+                f"{asset.source.filename}: unsupported APK architecture {arch!r}"
+            )
         identity = NativeIdentity("apk", name, arch, version)
         _filename(identity)
         _control(info, identity)
@@ -416,12 +423,7 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
     if retained.format != "apk":
         raise ApkFailure("Expected APK retained state")
     if not retained.accepted_history:
-        if (
-            retained.prior_generation is not None
-            or retained.metadata
-            or retained.objects
-            or retained.active_identities
-        ):
+        if retained.metadata or retained.objects or retained.active_identities:
             raise ApkFailure("Incomplete APK retained state")
         return
     expected = _expected(retained.accepted_history, policy)
@@ -441,14 +443,19 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
     required = {"keys/" + PUBLIC_KEY}
     if refs.get("keys/" + PUBLIC_KEY) != _ref(key, "keys/" + PUBLIC_KEY, "dependency"):
         raise ApkFailure("Missing retained APK public key reference")
+    stale = stale_entries(retained)
     for arch, record in indexes.items():
+        index_key = f"{arch}/APKINDEX.tar.gz"
+        required.add(index_key)
+        if index_key in stale:
+            if index_key not in refs or refs[index_key].object_class != "entry":
+                raise ApkFailure("Missing retained APK index reference")
+            continue
         path = _file(record)
         if _verify_index(path, key, runtime) != {
             k: v for k, v in expected.items() if k[2] in (arch, "noarch")
         }:
             raise ApkFailure("Retained APK index does not contain the complete accepted records")
-        index_key = f"{arch}/APKINDEX.tar.gz"
-        required.add(index_key)
         if refs.get(index_key) != _ref(path, index_key, "entry"):
             raise ApkFailure("Missing retained APK index reference")
     for item in retained.accepted_history:
@@ -507,7 +514,8 @@ def prepare(
         item = replace(candidate, published_sha256=_published(inspected)[0])
         additions.append(item)
         history.append(item)
-    if not additions:
+    stale = stale_entries(retained)
+    if not additions and not stale:
         return PreparedFormat("apk", retained, (), retained.objects)
     out.mkdir(mode=0o700, parents=True, exist_ok=True)
     expected = _expected(history, policy)
@@ -556,7 +564,7 @@ def prepare(
             slot
             for item in additions
             for slot in _slots(item.inspected.identity.architecture, policy)
-        }
+        } | {key.split("/", 1)[0] for key in stale}
         for arch in sorted(changed):
             etag = _string(_mapping(indexes[arch]).get("etag")) if arch in indexes else None
             records = {k: v for k, v in expected.items() if k[2] in (arch, "noarch")}
@@ -605,20 +613,17 @@ def prepare(
     objects = tuple(refs.values())
     result = RetainedFormat(
         "apk",
-        retained.prior_generation,
         tuple(history),
         tuple(item.inspected.identity for item in history),
         {"indexes": indexes, "public_key": _file_record(key)},
         objects,
     )
     prepared = PreparedFormat("apk", result, tuple(outputs), objects)
-    validate_prepared(prepared, policy=policy, runtime=runtime, now=now)
+    validate_prepared(prepared, policy=policy, runtime=runtime)
     return prepared
 
 
-def validate_prepared(
-    prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
-) -> None:
+def validate_prepared(prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
     if prepared.format != "apk":
         raise ApkFailure("Invalid prepared APK format")
     validate_retained(prepared.retained, policy=policy, runtime=runtime)

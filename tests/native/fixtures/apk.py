@@ -150,7 +150,6 @@ def committed(prepared: PreparedFormat, etag: str = '"synthetic-etag"') -> Retai
     }
     return replace(
         prepared.retained,
-        prior_generation="synthetic-generation",
         metadata={
             **prepared.retained.metadata,
             "indexes": indexes,
