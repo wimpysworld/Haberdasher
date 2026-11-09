@@ -1,90 +1,122 @@
 from __future__ import annotations
 
+import os
 import sys
-from dataclasses import replace
+import urllib.error
+import urllib.request
+from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import yaml
 
-from haberdasher import cli, discovery, publish, state
+from haberdasher import cli, discovery, publish, signing, state
 from haberdasher.config import (
-    APPROVAL_GATES,
     PRODUCTION_FINGERPRINT,
+    PUBLIC,
     Config,
     Policy,
-    RuntimePolicy,
     StoragePolicy,
-    TrustPolicy,
 )
-from haberdasher.core import canonical_json
+from haberdasher.core import SourceAsset
 from haberdasher.runtime import Runtime
-from haberdasher.storage import LocalStore
 
 
 def empty_scan(*args: object, **kwargs: object) -> discovery.CompleteScan:
-    return discovery.CompleteScan(discovery.DiscoveryState(), (), (), (), ())
+    return discovery.CompleteScan(discovery.DiscoveryState(), (), ())
 
 
-def test_default_plan_never_opens_store_or_signer(
+def scan_with(*filenames: str) -> discovery.CompleteScan:
+    """A scan with one checksummed asset for each file name."""
+    records: list[discovery.DiscoveredAsset] = []
+    for index, filename in enumerate(filenames, 1):
+        source = SourceAsset(
+            "synthetic/test",
+            1,
+            index,
+            filename,
+            1,
+            "2026-01-01T00:00:00Z",
+            f"https://github.com/synthetic/test/{filename}",
+            "a" * 64,
+        )
+        checksum = discovery.ChecksumEntry(source, filename, "a" * 64, "a" * 64)
+        records.append(discovery.DiscoveredAsset(source, checksum))
+    state_ = discovery.DiscoveryState(
+        tuple(records), tuple(record.source for record in records), ("synthetic/test",)
+    )
+    return discovery.CompleteScan(state_, tuple(records), ())
+
+
+def unpublished(name: str, url: str) -> state.Published:
+    return state.unpublished(name)
+
+
+def work_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> Path:
+    work = tmp_path / "work"
+    work.mkdir()
+    config = work / "haberdasher.yaml"
+    config.write_text(text)
+    monkeypatch.chdir(work)
+    return config
+
+
+def test_plan_never_opens_store_or_signer(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text("sources: [synthetic/test]\n")
+    work_config(tmp_path, monkeypatch, "sources: [synthetic/test]\n")
     monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(tmp_path / "must-not-open"))
     with (
         patch.object(discovery, "scan_releases", side_effect=empty_scan) as scan,
         patch.object(cli, "LocalStore", side_effect=AssertionError("storage opened")),
         patch.object(cli, "R2Store", side_effect=AssertionError("storage opened")),
-        patch.object(state, "acquire", side_effect=AssertionError("ownership acquired")),
+        patch.object(cli, "read_published", side_effect=unpublished),
+        patch.object(state, "acquire", side_effect=AssertionError("lock acquired")),
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
         patch("haberdasher.signing.SigningSession", side_effect=AssertionError("key imported")),
     ):
-        assert cli.main(["--config", str(config)]) == 0
+        assert cli.main(["plan"]) == 0
         scan.assert_called_once()
-    assert '"mode":"plan"' in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert output.startswith("Reading haberdasher.yaml: 1 source\n")
+    assert output.endswith("Nothing written.\n") and "{" not in output
 
 
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["--apply"],
-        ["--remote"],
-        ["--local-root", "/tmp/unused"],
-        ["--plan", "--recover-owner", "nonce", "--recovery-evidence", "unused"],
-        ["--apply", "--recover-owner", "nonce", "--recovery-evidence", "unused"],
-        ["--recover-owner", "nonce", "--local-root", "/tmp/unused"],
-        ["--replay", "../bad", "--local-root", "/tmp/unused"],
+        [],
+        ["--plan"],
+        ["plan", "--local-root", "/tmp/unused"],
+        ["publish", "--apply"],
+        ["publish", "--remote"],
+        ["publish", "--format", "all"],
+        ["publish", "--config", "haberdasher.yaml"],
+        ["publish", "--signing-fingerprint", "A" * 40],
+        ["unlock", "--break-lock"],
     ],
 )
-def test_invalid_modes_fail_before_runtime(arguments: list[str]) -> None:
-    with patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")):
-        assert cli.main(arguments) == 1
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ["--plan", "--apply"],
-        ["--apply", "--replay", "generation"],
-        ["--apply", "--remote", "--local-root", "/tmp/unused"],
-    ],
-)
-def test_argparse_rejects_incompatible_modes(arguments: list[str]) -> None:
-    with pytest.raises(SystemExit) as error:
+def test_argparse_rejects_removed_options(arguments: list[str]) -> None:
+    with (
+        patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
+        pytest.raises(SystemExit) as error,
+    ):
         cli.main(arguments)
     assert error.value.code == 2
 
 
-@pytest.mark.parametrize("policy", [[], ["--policy-file", "tests/fixtures/policy/denied.yaml"]])
-def test_remote_denied_before_credentials_or_workspace(policy: list[str]) -> None:
+def test_remote_publish_needs_credentials_before_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    work_config(tmp_path, monkeypatch, "sources: [synthetic/test]\n")
     with (
-        patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
-        patch.object(cli.os, "environ", dict[str, str]()),
+        patch.dict(os.environ, {"PATH": os.environ["PATH"]}, clear=True),
+        patch.object(discovery, "scan_releases", side_effect=AssertionError("scanned")),
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
     ):
-        assert cli.main(["--apply", "--remote", *policy]) == 1
+        assert cli.main(["publish"]) == 1
+    assert "storage environment variables are required" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -104,14 +136,7 @@ def test_remote_denied_before_credentials_or_workspace(policy: list[str]) -> Non
     ],
 )
 @pytest.mark.parametrize("marker_kind", ["file", "directory", "symlink"])
-@pytest.mark.parametrize(
-    "mode",
-    [
-        ["--apply"],
-        ["--replay", "generation"],
-        ["--recover-owner", "nonce", "--recovery-evidence", "unopened.json"],
-    ],
-)
+@pytest.mark.parametrize("mode", [["publish"], ["unlock"]])
 def test_local_root_denied_before_workspace_store_or_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -160,9 +185,8 @@ def test_local_root_denied_before_workspace_store_or_key(
     before = set(tmp_path.rglob("*"))
     with (
         patch.object(Path, "open", side_effect=AssertionError("file opened")),
-        patch.object(cli, "_evidence", side_effect=AssertionError("evidence opened")),
-        patch.object(state, "acquire", side_effect=AssertionError("ownership acquired")),
-        patch.object(state, "recover_owner", side_effect=AssertionError("ownership recovered")),
+        patch.object(state, "acquire", side_effect=AssertionError("lock acquired")),
+        patch.object(state, "break_locks", side_effect=AssertionError("locks broken")),
         patch.object(cli, "load_config", side_effect=AssertionError("config opened")),
         patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
         patch.object(cli, "LocalStore", side_effect=AssertionError("storage opened")),
@@ -206,9 +230,10 @@ def test_local_root_uses_nearest_markers_or_packaged_cwd_fallback(
         patch.object(cli, "load_config", return_value=Config(("synthetic/test",))) as config,
         patch.object(cli, "private_workspace") as workspace,
         patch.object(cli, "LocalStore") as store,
-        patch.object(publish, "reconcile", return_value=publish.RunResult(None, False, 0)) as run,
+        patch.object(discovery, "scan_releases", return_value=scan_with("app.deb")),
+        patch.object(publish, "reconcile", return_value=publish.RunResult(False, 0)) as run,
     ):
-        result = cli.main(["--apply", "--local-root", str(root)])
+        result = cli.main(["publish", "--local-root", str(root)])
     if destination in ("cwd", "child"):
         assert result == 1
         config.assert_not_called()
@@ -218,288 +243,94 @@ def test_local_root_uses_nearest_markers_or_packaged_cwd_fallback(
     else:
         assert result == 0
         run.assert_called_once()
-        assert run.call_args.args[1].storage.private == str(root / "private")
+        assert run.call_args.args[1].storage.public == {"apt": str(root / "public" / "apt")}
     assert set(tmp_path.rglob("*")) == before
 
 
 @pytest.mark.parametrize("backend", ["local", "r2"])
 @pytest.mark.parametrize(
-    "names, selected, message",
+    "filenames,published,names",
     [
-        [("apt", "rpm"), "apt", "one publication"],
-        [("apt", "rpm"), "arch", "not a configured public format"],
-        [("apt",), "rpm", "not a configured public format"],
+        (("a.deb",), (), ("apt",)),
+        (("a.rpm", "b.deb", "c.pkg.tar.xz", "d.tar.gz"), (), ("apt", "rpm", "arch")),
+        (("a.apk",), ("rpm",), ("rpm", "apk")),
     ],
 )
-@pytest.mark.parametrize(
-    "mode",
-    [
-        ["--apply"],
-        ["--replay", "generation"],
-        ["--recover-owner", "nonce", "--recovery-evidence", "unopened.json"],
-    ],
-)
-def test_format_selection_denied_before_workspace_store_or_key(
+def test_publication_covers_found_and_published_formats(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
     backend: str,
+    filenames: tuple[str, ...],
+    published: tuple[str, ...],
     names: tuple[str, ...],
-    selected: str,
-    message: str,
-    mode: list[str],
 ) -> None:
     root = tmp_path / "store"
-    policy = Policy(
-        storage=StoragePolicy(
-            backend,
-            str(root / "private") if backend == "local" else "test-private",
-            {
-                name: str(root / "public" / name) if backend == "local" else f"test-{name}"
-                for name in names
-            },
-        )
-    )
-    destination = ["--local-root", str(root)] if backend == "local" else ["--remote"]
-    with (
-        patch.object(cli, "load_policy", return_value=policy),
-        patch.object(cli, "load_config", side_effect=AssertionError("config opened")),
-        patch.object(cli, "_evidence", side_effect=AssertionError("evidence opened")),
-        patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
-        patch.object(cli, "LocalStore", side_effect=AssertionError("storage opened")),
-        patch.object(cli, "R2Store", side_effect=AssertionError("storage opened")),
-        patch.object(state, "acquire", side_effect=AssertionError("ownership acquired")),
-        patch.object(state, "recover_owner", side_effect=AssertionError("ownership recovered")),
-        patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
-    ):
-        assert cli.main([*mode, *destination, "--format", selected]) == 1
-    error = capsys.readouterr().err
-    assert message in error
-    assert "Use --format all" in error
-    assert not root.exists()
+    for name in published if backend == "local" else ():
+        inventory = root / "public" / name / state.INVENTORY_KEY
+        inventory.parent.mkdir(parents=True)
+        inventory.write_bytes(b"previously published inventory")
 
+    def read(name: str, url: str) -> state.Published:
+        assert url == PUBLIC[name][1]
+        if name in published:
+            return state.Published(name, None, "c" * 64, (), state.unpublished(name).retained)
+        return state.unpublished(name)
 
-@pytest.mark.parametrize("backend", ["local", "r2"])
-@pytest.mark.parametrize(
-    "names, selected",
-    [(("apt",), "apt"), (("apt",), "all"), (("rpm", "apt"), "all")],
-)
-def test_policy_preserves_all_configured_roles(
-    tmp_path: Path, backend: str, names: tuple[str, ...], selected: str
-) -> None:
-    root = tmp_path / "store"
-    policy = Policy(
-        storage=StoragePolicy(
+    expected = Policy(
+        StoragePolicy(
             backend,
-            str(root / "private") if backend == "local" else "test-private",
             {
-                name: str(root / "public" / name) if backend == "local" else f"test-{name}"
+                name: str(root / "public" / name) if backend == "local" else PUBLIC[name][0]
                 for name in names
             },
         ),
-        approved_formats=names,
-        approval_references={gate: "synthetic approval" for gate in APPROVAL_GATES},
-        expected_signing_fingerprint=PRODUCTION_FINGERPRINT,
-        clients={name: TrustPolicy(True, "synthetic approval") for name in names},
+        PRODUCTION_FINGERPRINT if backend == "r2" else "A" * 40,
     )
-    destination = ["--local-root", str(root)] if backend == "local" else ["--remote"]
+    destination = ["--local-root", str(root)] if backend == "local" else []
     with (
-        patch.object(cli, "load_policy", return_value=policy),
         patch.object(cli, "load_config", return_value=Config(("synthetic/test",))),
-        patch.object(cli, "LocalStore"),
-        patch.object(cli, "R2Store"),
-        patch.object(publish, "reconcile", return_value=publish.RunResult(None, False, 0)) as run,
+        patch.object(discovery, "scan_releases", return_value=scan_with(*filenames)),
+        patch.object(cli, "read_published", side_effect=read),
+        patch.object(cli, "LocalStore") as local,
+        patch.object(cli, "R2Store") as remote,
+        patch.object(signing, "key_fingerprint", return_value="A" * 40),
+        patch.object(publish, "reconcile", return_value=publish.RunResult(False, 0)) as run,
+    ):
+        assert cli.main(["publish", *destination]) == 0
+    run.assert_called_once()
+    assert run.call_args.args == (Config(("synthetic/test",)), expected)
+    if backend == "r2":
+        remote.assert_called_once_with(
+            StoragePolicy("r2", {name: bucket for name, (bucket, _) in PUBLIC.items()}),
+            runtime=remote.call_args.kwargs["runtime"],
+        )
+        assert run.call_args.kwargs["store"] is remote.return_value
+        local.assert_not_called()
+    else:
+        local.assert_called_once_with(expected.storage)
+        remote.assert_not_called()
+
+
+def test_local_publish_without_packages_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    work_config(tmp_path, monkeypatch, "sources: [synthetic/test]\n")
+    root = tmp_path / "store"
+    with (
+        patch.object(discovery, "scan_releases", return_value=scan_with("tool.tar.gz")),
+        patch.object(publish, "reconcile", side_effect=AssertionError("reconciled")),
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
     ):
-        assert cli.main(["--apply", *destination, "--format", selected]) == 0
-    run.assert_called_once()
-    result = run.call_args.args[1]
-    assert result == policy
-    if backend == "r2":
-        assert result is policy
+        assert cli.main(["publish", "--local-root", str(root)]) == 0
+    assert capsys.readouterr().out.endswith("No packages found. Nothing written.\n")
     assert not root.exists()
 
 
-def test_remote_approval_checks_full_configured_set(capsys: pytest.CaptureFixture[str]) -> None:
-    policy = Policy(
-        storage=StoragePolicy("r2", "test-private", {"apt": "test-apt", "rpm": "test-rpm"}),
-        approved_formats=("apt",),
-        approval_references={gate: "synthetic approval" for gate in APPROVAL_GATES},
-        expected_signing_fingerprint=PRODUCTION_FINGERPRINT,
-        clients={"apt": TrustPolicy(True, "synthetic approval")},
-    )
-    with (
-        patch.object(cli, "load_policy", return_value=policy),
-        patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
-        patch.object(cli, "R2Store", side_effect=AssertionError("storage opened")),
-        patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
-    ):
-        assert cli.main(["--apply", "--remote"]) == 1
-    assert "Format publication is not approved" in capsys.readouterr().err
-
-
-def approved_remote_policy(name: str) -> Policy:
-    trust = TrustPolicy(approved=True, approval_reference="synthetic-client-approval")
-    if name == "flatpak":
-        trust = replace(
-            trust,
-            source_owner="synthetic",
-            refs=("app/org.example.App/x86_64/stable",),
-            runtime=RuntimePolicy(
-                url="http://127.0.0.1:12345/runtime",
-                fingerprint="A" * 40,
-                collection="",
-                branch="stable",
-                architecture="x86_64",
-                remote="synthetic-runtime",
-                refs=("runtime/org.example.Platform/x86_64/stable",),
-            ),
-        )
-    return Policy(
-        storage=StoragePolicy("r2", "synthetic-private", {name: f"synthetic-{name}"}),
-        approved_formats=(name,),
-        approval_references={gate: "synthetic-approval" for gate in APPROVAL_GATES},
-        expected_signing_fingerprint=PRODUCTION_FINGERPRINT,
-        clients={name: trust},
-    )
-
-
-@pytest.mark.parametrize("name", ["apk", "flatpak"])
-def test_remote_accepts_approved_format(name: str, capsys: pytest.CaptureFixture[str]) -> None:
-    policy = approved_remote_policy(name)
-    with (
-        patch.object(cli, "load_policy", return_value=policy),
-        patch.object(cli, "load_config", return_value=Config(("synthetic/test",))),
-        patch.object(cli, "private_workspace") as workspace,
-        patch.object(cli, "R2Store") as store,
-        patch.object(publish, "reconcile", return_value=publish.RunResult(None, False, 0)) as run,
-        patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
-    ):
-        assert cli.main(["--apply", "--remote", "--format", name]) == 0
-    workspace.assert_called_once()
-    store.assert_called_once_with(
-        policy.storage, runtime=workspace.return_value.__enter__.return_value
-    )
-    run.assert_called_once()
-    assert run.call_args.args[1] is policy
-    assert run.call_args.kwargs["store"] is store.return_value
-    assert not capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    "name, field, value, message",
-    [
-        ("apk", "apk_v2", None, "Remote publication is not approved"),
-        ("apk", "approved", False, "Format publication is not approved"),
-        ("apk", "approval_reference", None, "Format publication is not approved"),
-        ("flatpak", "flatpak_runtime", None, "Remote publication is not approved"),
-        ("flatpak", "approved", False, "Format publication is not approved"),
-        ("flatpak", "approval_reference", None, "Format publication is not approved"),
-        ("flatpak", "source_owner", None, "Flatpak source and runtime approval is incomplete"),
-        ("flatpak", "refs", (), "Flatpak source and runtime approval is incomplete"),
-        ("flatpak", "runtime", None, "Flatpak source and runtime approval is incomplete"),
-    ],
-    ids=[
-        "apk-v2-approval",
-        "apk-client-approved",
-        "apk-client-reference",
-        "flatpak-runtime-approval",
-        "flatpak-client-approved",
-        "flatpak-client-reference",
-        "flatpak-source-owner",
-        "flatpak-refs",
-        "flatpak-runtime",
-    ],
-)
-def test_remote_rejects_individual_format_approval_omissions_before_runtime(
-    name: str, field: str, value: object, message: str, capsys: pytest.CaptureFixture[str]
-) -> None:
-    policy = approved_remote_policy(name)
-    if field in APPROVAL_GATES:
-        policy = replace(
-            policy,
-            approval_references={
-                gate: reference
-                for gate, reference in policy.approval_references.items()
-                if gate != field
-            },
-        )
-    else:
-        policy = replace(policy, clients={name: replace(policy.clients[name], **{field: value})})
-    with (
-        patch.object(cli, "load_policy", return_value=policy),
-        patch.object(cli, "load_config", side_effect=AssertionError("config opened")),
-        patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
-        patch.object(cli, "LocalStore", side_effect=AssertionError("storage opened")),
-        patch.object(cli, "R2Store", side_effect=AssertionError("storage opened")),
-        patch.object(state, "acquire", side_effect=AssertionError("ownership acquired")),
-        patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
-    ):
-        assert cli.main(["--apply", "--remote", "--format", name]) == 1
-    captured = capsys.readouterr()
-    assert captured.err == f"Error: {message}\n"
-    assert not captured.out
-
-
-@pytest.mark.parametrize("omit_from_policy", [False, True])
-def test_previous_role_omission_fails_closed(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], omit_from_policy: bool
-) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text("sources: [synthetic/test]\n")
-    policy = tmp_path / "policy.yaml"
-    root = tmp_path / "store"
-    destinations = {name: str(root / "public" / name) for name in ("apt", "rpm")}
-    policy.write_text(yaml.safe_dump({"storage": {"public": destinations}}))
-    args = [
-        "--apply",
-        "--local-root",
-        str(root),
-        "--config",
-        str(config),
-        "--policy-file",
-        str(policy),
-    ]
-    with patch.object(discovery, "scan_releases", side_effect=empty_scan):
-        assert cli.main(args) == 0
-    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
-    assert (root / "public/rpm/haberdasher.json") in before
-    if omit_from_policy:
-        policy.write_text(yaml.safe_dump({"storage": {"public": {"apt": destinations["apt"]}}}))
-    with (
-        patch.object(discovery, "scan_releases", side_effect=empty_scan),
-        patch.object(state, "freeze", side_effect=AssertionError("generation frozen")),
-        patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
-    ):
-        assert cli.main([*args, "--format", "all" if omit_from_policy else "apt"]) == 1
-    error = capsys.readouterr().err
-    assert (
-        "No destination for this bucket role" if omit_from_policy else "Use --format all"
-    ) in error
-    after = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
-    if omit_from_policy:
-        ownership = root / "private/ownership.json"
-        previous_owner = state.parse(before[ownership])
-        failed_owner = state.parse(after[ownership])
-        assert previous_owner["status"] == "idle"
-        assert failed_owner["status"] == "active"
-        nonce = failed_owner["nonce"]
-        assert isinstance(nonce, str) and nonce
-        assert nonce != previous_owner["nonce"]
-        assert failed_owner["completion"] == previous_owner["completion"]
-        store = LocalStore(StoragePolicy("local", str(root / "private"), destinations))
-        with pytest.raises(state.StateError, match="An owner already holds publication rights"):
-            state.acquire(store, owner="competing-test")
-        assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == after
-        before.pop(ownership)
-        after.pop(ownership)
-    assert after == before
-
-
-def test_format_help_explains_single_publication_constraint() -> None:
-    help_text = " ".join(cli.parser().format_help().split())
-    assert "all configured public formats form one publication" in help_text
-    assert "only configured public format" in help_text
-    assert "local bootstrap with no configured public destinations" in help_text
+def test_help_lists_commands_and_hides_local_root(capsys: pytest.CaptureFixture[str]) -> None:
+    assert "{plan,publish,unlock}" in cli.parser().format_help()
+    for command in ("plan", "publish", "unlock"):
+        with pytest.raises(SystemExit):
+            cli.main([command, "--help"])
+        assert "--local-root" not in capsys.readouterr().out
 
 
 def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -> None:
@@ -525,18 +356,15 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
     steps = [state.mapping(step) for step in raw_steps]
     assert state.mapping(steps[0]["with"])["persist-credentials"] == "false"
     publishing = steps[-1]
-    assert publishing["name"] == "Publish with explicit policy approval"
+    assert publishing["name"] == "Publish"
     assert str(publishing["run"]).endswith(
-        "nix develop --no-write-lock-file --command \\\n"
-        '  just publish --apply --remote --policy-file "$policy_file"\n'
+        "nix develop --no-write-lock-file --command just publish\n"
     )
     assert all("env" not in step for step in steps[:-1])
     env = state.mapping(publishing["env"])
     assert env["GH_TOKEN"] == "${{ github.token }}"
-    assert env["HD_PUBLISH_POLICY"] == "${{ secrets.HD_PUBLISH_POLICY }}"
     assert "GITHUB_TOKEN" not in env
     assert {name for name in env if name.startswith("HD_")} == {
-        "HD_PUBLISH_POLICY",
         "HD_SIGNING_KEY",
         "HD_CLOUDFLARE_S3_API_ENDPOINT",
         "HD_CLOUDFLARE_ACCESS_KEY_ID",
@@ -550,12 +378,14 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
         "import os, sys\n"
         "assert sys.argv[1:] == ['api', '--hostname', 'github.com', '--method', 'GET', "
         "'--header', 'Accept: application/vnd.github+json', '--header', "
-        "'X-GitHub-Api-Version: 2022-11-28', 'repos/synthetic/test/releases?per_page=100&page=1']\n"
+        "'X-GitHub-Api-Version: 2022-11-28', 'repos/synthetic/test/releases/latest']\n"
         "assert os.environ['GH_TOKEN'] == 'synthetic-workflow-token'\n"
         "assert os.environ['GH_CONFIG_DIR'] == os.environ['HOME'] + '/.config/gh'\n"
         "assert os.environ['GH_PROMPT_DISABLED'] == '1'\n"
         "assert not any(key.startswith(('HD_', 'AWS_')) for key in os.environ)\n"
-        "print('[]')\n"
+        'print(\'{"message":"Not Found","status":"404"}\')\n'
+        "print('gh: Not Found (HTTP 404)', file=sys.stderr)\n"
+        "sys.exit(1)\n"
     )
     gh.chmod(0o700)
     runtime = Runtime(
@@ -563,96 +393,88 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
         environ={"PATH": str(binary), "GH_TOKEN": "synthetic-workflow-token"},
     )
     try:
+        lines: list[str] = []
         scan = discovery.scan_releases(
-            Config(("synthetic/test",)), runtime=runtime, previous=discovery.DiscoveryState()
+            Config(("synthetic/test",)), runtime=runtime, report=lines.append
         )
         assert not scan.state.assets
+        assert lines == ["synthetic/test: no latest release"]
         assert "GH_TOKEN" not in runtime.environment_for("native")
         assert "GH_TOKEN" not in runtime.environment_for("storage")
     finally:
         runtime.close()
 
 
-def test_local_apply_uses_real_publication_and_noop(tmp_path: Path) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text("sources: [synthetic/test]\n")
-    root = tmp_path / "store"
-    args = ["--apply", "--local-root", str(root), "--config", str(config), "--format", "apt"]
-    with patch.object(discovery, "scan_releases", side_effect=empty_scan):
-        assert cli.main(args) == 0
-        assert cli.main(args) == 0
-    store = LocalStore(
-        StoragePolicy("local", str(root / "private"), {"apt": str(root / "public/apt")})
-    )
-    assert state.read_control(store, "completed.json") is not None
-    assert (root / "public/apt/haberdasher.json").is_file()
-    assert not (root / "public/apt/ownership.json").exists()
+def test_plan_treats_404_as_unpublished_and_continues_past_an_unreachable_domain(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    urls = {"apt": "https://apt.example.invalid", "rpm": "https://127.0.0.1:1"}
+    real = urllib.request.urlopen
 
+    def answer(request: urllib.request.Request, timeout: float) -> object:
+        if request.full_url.startswith("https://apt."):
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
+        return real(request, timeout=timeout)
 
-def test_recovery_checks_evidence_and_releases_stopped_owner(tmp_path: Path) -> None:
-    root = tmp_path / "store"
-    store = LocalStore(
-        StoragePolicy("local", str(root / "private"), {"apt": str(root / "public/apt")})
-    )
-    owner = state.acquire(store, owner="stopped-test")
-    evidence = tmp_path / "evidence.json"
-    evidence.write_bytes(
-        canonical_json(
-            {
-                "schema_version": 1,
-                "stopped_owner": True,
-                "requests_resolved": True,
-                "reference": "synthetic stopped process",
-                "runner_identity": "test",
-                "writes": [],
-            }
-        )
-    )
-    args = [
-        "--local-root",
-        str(root),
-        "--format",
-        "apt",
-        "--recover-owner",
-        owner.owner_nonce,
-        "--recovery-evidence",
-        str(evidence),
+    def inspect(name: str, items: list[object], **_: object) -> list[object]:
+        return items
+
+    with (
+        patch.object(urllib.request, "urlopen", side_effect=answer),
+        patch.object(publish, "inspect_new", side_effect=inspect),
+    ):
+        cli.show_plan(scan_with("app.deb"), Config(("synthetic/test",)), Runtime(tmp_path), urls)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "Reading published state from apt.example.invalid, 127.0.0.1"
+    assert lines[1].startswith("rpm   cannot reach 127.0.0.1: ")
+    assert lines[2:] == [
+        "",
+        "Format  Repository           Published  New",
+        "apt     apt.example.invalid          0    1",
+        "rpm     127.0.0.1                    ?    ?",
+        "",
+        "1 new package. Nothing written. Could not read rpm, so the plan is incomplete.",
     ]
-    assert cli.main(args) == 0
-    assert cli.main(args) == 1
-    current = state.read_control(store, "ownership.json")
-    assert current is not None and current[0]["status"] == "idle"
+
+
+def test_errors_print_one_line_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    work_config(tmp_path, monkeypatch, "sources: [synthetic/test]\n")
+    failure = discovery.DiscoveryFailure("synthetic/test v1, checksums.txt: Cosign failed")
+    with patch.object(discovery, "scan_releases", side_effect=failure):
+        assert cli.main(["plan"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == "Error: synthetic/test v1, checksums.txt: Cosign failed\n"
 
 
 @pytest.mark.parametrize(
-    "change", [{"stopped_owner": False}, {"requests_resolved": False}, {"force": True}]
+    "result,summary",
+    [
+        (
+            publish.RunResult(True, 5, 0, 2, ("apt", "rpm")),
+            "Published 2 packages to 2 repositories.",
+        ),
+        (publish.RunResult(True, 4, 0, 0, ("apt",)), "Refreshed apt metadata."),
+        (
+            publish.RunResult(True, 9, 0, 0, ("apk", "apt", "rpm")),
+            "Refreshed apk, apt and rpm metadata.",
+        ),
+        (publish.RunResult(False, 0), "Nothing changed in 1 repository."),
+    ],
 )
-def test_recovery_rejects_unsafe_evidence(tmp_path: Path, change: dict[str, bool]) -> None:
-    evidence = tmp_path / "evidence.json"
-    evidence.write_bytes(
-        canonical_json(
-            {
-                "schema_version": 1,
-                "stopped_owner": True,
-                "requests_resolved": True,
-                "reference": "synthetic",
-                "runner_identity": "test",
-                "writes": [],
-                **change,
-            }
-        )
-    )
-    with patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")):
-        assert (
-            cli.main(
-                [
-                    "--recover-owner",
-                    "nonce",
-                    "--recovery-evidence",
-                    str(evidence),
-                    "--local-root",
-                    str(tmp_path / "store"),
-                ]
-            )
-            == 1
-        )
+def test_publish_summary_names_refreshed_metadata(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    result: publish.RunResult,
+    summary: str,
+) -> None:
+    with (
+        patch.object(cli, "load_config", return_value=Config(("synthetic/test",))),
+        patch.object(discovery, "scan_releases", return_value=scan_with("app.deb")),
+        patch.object(cli, "LocalStore"),
+        patch.object(signing, "key_fingerprint", return_value="A" * 40),
+        patch.object(publish, "reconcile", return_value=result),
+    ):
+        assert cli.main(["publish", "--local-root", str(tmp_path / "store")]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == summary

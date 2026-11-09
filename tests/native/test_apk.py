@@ -14,12 +14,13 @@ from unittest.mock import patch
 import pytest
 
 from haberdasher.admission import AdmissionFailure, admit
-from haberdasher.config import FormatPolicy, TrustPolicy
+from haberdasher.config import FormatPolicy
 from haberdasher.core import (
     AdmittedAsset,
     JSONValue,
     PreparedFormat,
     RetainedFormat,
+    UnsupportedAsset,
     VerifiedAsset,
     atomic_write,
     canonical_json,
@@ -41,10 +42,8 @@ from tests.support.http import serve
 from tests.support.keys import disposable_key, run
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
-POLICY = FormatPolicy(
-    "apk", trust=TrustPolicy(approved=True, approval_reference="synthetic-only-apk-v2")
-)
-EMPTY = RetainedFormat("apk", None, (), (), {}, ())
+POLICY = FormatPolicy("apk")
+EMPTY = RetainedFormat("apk", (), (), {}, ())
 
 
 def publish(prepared: PreparedFormat, root: Path) -> list[Path]:
@@ -173,17 +172,17 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
                 for identity, text in records.items()
                 if identity[0] == "hd-main"
             )
-            frozen = canonical_json(generation2)
+            before = canonical_json(generation2)
             with (
                 patch.object(apk, "prepare", side_effect=AssertionError("No retry preparation")),
                 patch.object(
                     type(signer), "alpine_key", side_effect=AssertionError("No retry signing")
                 ),
             ):
-                apk.validate_prepared(generation2, policy=POLICY, runtime=runtime, now=NOW)
+                apk.validate_prepared(generation2, policy=POLICY, runtime=runtime)
                 http.set_generation_mtime(publish(generation2, public), 2)
-                apk.validate_prepared(generation2, policy=POLICY, runtime=runtime, now=NOW)
-            assert canonical_json(generation2) == frozen
+                apk.validate_prepared(generation2, policy=POLICY, runtime=runtime)
+            assert canonical_json(generation2) == before
             client.run("update")
             client.add("hd-main=2.0-r0")
             client.installed("hd-main", "2.0-r0", "version-two")
@@ -388,7 +387,6 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
                 replace(generation2, outputs=reversed_outputs),
                 policy=POLICY,
                 runtime=runtime,
-                now=NOW,
             )
         incomplete = replace(
             state.accepted_history[0],
@@ -422,12 +420,12 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
             )
         assert unchanged.outputs == () and unchanged.retained == state
         print(
-            "Observed: two unsigned HTTP generations, dependency payloads, exact fetched SHA256, complete records, frozen validation, and trust/corruption rejection."
+            "Observed: two unsigned HTTP generations, dependency payloads, exact fetched SHA256, complete records, prepared validation, and trust/corruption rejection."
         )
 
 
 @pytest.mark.parametrize("mixed_order", [None, "signed-first", "unsigned-first"])
-def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | None) -> None:
+def test_signed_upstream_loses_its_signature(mixed_order: str | None) -> None:
     with (
         private_workspace() as runtime,
         disposable_key() as key,
@@ -465,24 +463,37 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
             dependency=dependency,
             signer=upstream_signer,
         )
-        with pytest.raises(apk.ApkFailure, match="approved upstream"):
-            accept(signed, runtime)
-        run(runtime, "gpg", "--batch", "--import", str(upstream_key.public_file))
-        run(runtime, "gpg", "--batch", "--import", str(key.public_file))
-        policy = replace(
-            POLICY,
-            trust=TrustPolicy(
-                approved=True,
-                approval_reference="synthetic-upstream",
-                allow_signed_upstream=True,
-                upstream_fingerprints=(upstream_key.fingerprint,),
-            ),
+        policy = POLICY
+        # The same package without the upstream signature stream, as abuild builds it unsigned.
+        plain = fixture(
+            runtime,
+            "hd-signed",
+            "1.0-r0",
+            payload="signed-payload",
+            dependency=dependency,
+            suffix="-unsigned",
         )
-        accepted = accept(signed, runtime, policy=policy)
-        assert accepted.inspected.upstream_signature == "verified"
-        assert accepted.inspected.evidence["upstream_fingerprint"] == upstream_key.fingerprint
+        plain_second = fixture(
+            runtime,
+            "hd-signed",
+            "2.0-r0",
+            payload="signed-update",
+            dependency=dependency,
+            suffix="-unsigned",
+        )
+        accepted = accept(signed, runtime)
+        assert accepted.inspected.upstream_signature == "signed"
+        assert accepted.transformation_policy == "apk-unsign"
+        unsigned_view = accept(plain, runtime)
+        assert accepted.inspected.identity == unsigned_view.inspected.identity
+        assert (
+            accepted.inspected.evidence["control_identity"]
+            == unsigned_view.inspected.evidence["control_identity"]
+        )
+        assert accepted.inspected.metadata["stanza"] == unsigned_view.inspected.metadata["stanza"]
+        assert accepted.inspected.metadata["published_sha256"] == plain.sha256
         inputs = [accepted]
-        assets = {"hd-signed-1.0-r0.apk": signed}
+        assets = {"hd-signed-1.0-r0.apk": plain}
         if mixed_order:
             dep = fixture(runtime, "hd-mixed-dependency", "1.0-r0", payload="mixed-dependency")
             unsigned_dep = accept(dep, runtime, policy=policy)
@@ -506,6 +517,9 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
             upstream_client = Client(runtime, "upstream-only", http.url(), upstream_public)
             upstream_client.run("verify", str(signed.local_path))
             assert client.run("verify", str(signed.local_path), check=False).returncode != 0
+            published = root / "x86_64/hd-signed-1.0-r0.apk"
+            assert sha256_file(published) == (plain.sha256, plain.size)
+            assert ".SIGN.RSA256.haberdasher.rsa.pub" not in apk._members(published, runtime)
             client.run("verify", str(root / "x86_64/APKINDEX.tar.gz"))
             assert (
                 upstream_client.run(
@@ -521,23 +535,31 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
             for filename, asset in assets.items():
                 assert sha256_file(fetched / filename) == (asset.sha256, asset.size)
                 assert sha256_file(root / "x86_64" / filename) == (asset.sha256, asset.size)
-                asset.local_path.rename(asset.local_path.with_suffix(".unavailable"))
             state = committed(generation)
+            rerun = accept(signed, runtime, state.accepted_history)
+            assert rerun in state.accepted_history
+            unchanged = apk.prepare(
+                [rerun],
+                state,
+                policy=policy,
+                runtime=runtime,
+                signer=signer,
+                now=NOW,
+                out=runtime.root / "signed-rerun",
+            )
+            assert unchanged.outputs == () and unchanged.retained == state
+            signed.local_path.rename(signed.local_path.with_suffix(".unavailable"))
             prior_hash = sha256_file(generation.outputs[-1].local_path)
             addition = accept(second, runtime, state.accepted_history, policy)
-            with patch.object(runtime, "run", wraps=runtime.run) as commands:
-                generation2 = apk.prepare(
-                    [addition],
-                    state,
-                    policy=policy,
-                    runtime=runtime,
-                    signer=signer,
-                    now=NOW,
-                    out=runtime.root / "signed-generation2",
-                )
-                assert not any(
-                    "--allow-untrusted" in call.args[0] for call in commands.call_args_list
-                )
+            generation2 = apk.prepare(
+                [addition],
+                state,
+                policy=policy,
+                runtime=runtime,
+                signer=signer,
+                now=NOW,
+                out=runtime.root / "signed-generation2",
+            )
             assert sha256_file(generation.outputs[-1].local_path) == prior_hash
             assert generation2.outputs[-1].expected_etag == '"synthetic-etag"'
             assert generation2.outputs[-1].mode == "replace"
@@ -546,7 +568,7 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
                 "x86_64/APKINDEX.tar.gz",
             ]
             apk.validate_retained(generation2.retained, policy=policy, runtime=runtime)
-            apk.validate_prepared(generation2, policy=policy, runtime=runtime, now=NOW)
+            apk.validate_prepared(generation2, policy=policy, runtime=runtime)
             assert len(generation2.retained.accepted_history) == len(inputs) + 1
             http.set_generation_mtime(publish(generation2, root), 2)
             client.run("update")
@@ -556,7 +578,7 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
                 client.installed("hd-mixed-dependency", "1.0-r0", "mixed-dependency")
             fetched = client.fetch("downloads-two", "hd-signed=2.0-r0")
             assets.pop("hd-signed-1.0-r0.apk")
-            assets["hd-signed-2.0-r0.apk"] = second
+            assets["hd-signed-2.0-r0.apk"] = plain_second
             assert {path.name for path in fetched.iterdir()} == assets.keys()
             for filename, asset in assets.items():
                 assert sha256_file(fetched / filename) == (asset.sha256, asset.size)
@@ -590,20 +612,14 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
             + parts[1].read_bytes()
             + parts[2].read_bytes(),
         )
-        with patch.object(runtime, "run", wraps=runtime.run) as commands:
-            with pytest.raises(apk.ApkFailure, match="invalid or unknown"):
-                accept(verified(invalid), runtime, policy=policy)
-            assert not any("--allow-untrusted" in call.args[0] for call in commands.call_args_list)
-        for fingerprint in (key.fingerprint, "F" * 40):
-            unknown = replace(
-                policy, trust=replace(policy.trust, upstream_fingerprints=(fingerprint,))
-            )
-            with patch.object(runtime, "run", wraps=runtime.run) as commands:
-                with pytest.raises(apk.ApkFailure):
-                    accept(signed, runtime, policy=unknown)
-                assert not any(
-                    "--allow-untrusted" in call.args[0] for call in commands.call_args_list
-                )
+        # A corrupt upstream signature is removed like a valid one. Only the package remains.
+        corrupt = accept(verified(invalid), runtime)
+        assert corrupt.inspected.metadata["published_sha256"] == plain.sha256
+        assert corrupt.inspected.identity == accepted.inspected.identity
+        twice = work / "twice.apk"
+        atomic_write(twice, parts[0].read_bytes() + signed.local_path.read_bytes())
+        with pytest.raises(apk.ApkFailure, match="gzip member"):
+            accept(verified(twice), runtime)
         unsigned = fixture(runtime, "hd-unsigned", "1.0-r0", payload="unsigned")
         with pytest.raises(apk.ApkFailure):
             apk.inspect(
@@ -614,9 +630,9 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
                 runtime=runtime,
                 out=runtime.root / "bad-sha",
             )
-        noarch = fixture(runtime, "hd-noarch", "1.0-r0", payload="unqualified", arch="noarch")
-        with pytest.raises(apk.ApkFailure, match="architecture"):
-            accept(noarch, runtime)
+        armv7 = fixture(runtime, "hd-armv7", "1.0-r0", payload="unqualified", arch="armv7")
+        with pytest.raises(UnsupportedAsset, match="unsupported APK architecture 'armv7'"):
+            accept(armv7, runtime)
         v3 = runtime.root / "v3.apk"
         empty = runtime.root / "empty-v3"
         empty.mkdir()
@@ -642,6 +658,152 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
             accept(verified(v3), runtime)
         print(
             f"Observed: distinct upstream/publisher keys, mixed order {mixed_order}, "
-            "two HTTP generations, unchanged fetched bytes and strict upstream rejection. "
+            "two HTTP generations, fetched bytes equal to unsigned builds, and no-op reruns. "
             "APK v2 C:Q1 remains a SHA1 boundary."
         )
+
+
+def test_unsigned_multiarch_without_release_suffix() -> None:
+    policy = replace(POLICY, architectures=("x86_64", "aarch64"))
+    with (
+        private_workspace() as runtime,
+        disposable_key() as key,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+    ):
+        assets = {
+            arch: fixture(
+                runtime, "hd-multi", "1.0", payload=f"multi-{arch}", arch=arch, suffix=f"-{arch}"
+            )
+            for arch in ("x86_64", "aarch64")
+        }
+        accepted: list[AdmittedAsset] = []
+        for arch, asset in assets.items():
+            item = accept(asset, runtime, accepted, policy)
+            assert item.inspected.identity.architecture == arch
+            assert item.inspected.identity.version == "1.0"
+            accepted.append(item)
+        with pytest.raises(UnsupportedAsset, match="unsupported APK architecture 'aarch64'"):
+            accept(assets["aarch64"], runtime)
+        generation1 = apk.prepare(
+            accepted,
+            EMPTY,
+            policy=policy,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "multi-generation1",
+        )
+        assert [output.ref.key for output in generation1.outputs] == [
+            "keys/haberdasher.rsa.pub",
+            "x86_64/hd-multi-1.0.apk",
+            "aarch64/hd-multi-1.0.apk",
+            "aarch64/APKINDEX.tar.gz",
+            "x86_64/APKINDEX.tar.gz",
+        ]
+        state = committed(generation1)
+        update = fixture(runtime, "hd-multi", "1.1", payload="multi-aarch64-update", arch="aarch64")
+        generation2 = apk.prepare(
+            [accept(update, runtime, state.accepted_history, policy)],
+            state,
+            policy=policy,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "multi-generation2",
+        )
+        assert [output.ref.key for output in generation2.outputs] == [
+            "aarch64/hd-multi-1.1.apk",
+            "aarch64/APKINDEX.tar.gz",
+        ]
+        public = runtime.root / "multi-public"
+        public.mkdir()
+        publish(generation1, public)
+        publish(generation2, public)
+        with serve(public) as http:
+            http.set_generation_mtime([public / arch / "APKINDEX.tar.gz" for arch in assets], 1)
+            for arch, version, source in (
+                ("x86_64", "1.0", assets["x86_64"]),
+                ("aarch64", "1.1", update),
+            ):
+                index = public / arch / "APKINDEX.tar.gz"
+                client = Client(
+                    runtime,
+                    f"multi-{arch.replace('_', '-')}",
+                    http.url(),
+                    public / "keys/haberdasher.rsa.pub",
+                    arch,
+                )
+                client.run("verify", str(index))
+                client.run("update")
+                listing = client.run("search", "--exact", "hd-multi").stdout.decode()
+                assert listing.split() == [f"hd-multi-{version}"]
+                client.add(f"hd-multi={version}")
+                payload = "multi-x86_64" if arch == "x86_64" else "multi-aarch64-update"
+                client.installed("hd-multi", version, payload)
+                fetched = client.fetch("downloads", f"hd-multi={version}")
+                assert {path.name for path in fetched.iterdir()} == {f"hd-multi-{version}.apk"}
+                assert sha256_file(fetched / f"hd-multi-{version}.apk") == (
+                    source.sha256,
+                    source.size,
+                )
+            assert sha256_file(public / "aarch64/hd-multi-1.0.apk") == (
+                assets["aarch64"].sha256,
+                assets["aarch64"].size,
+            )
+            requests = http.requests()
+            for path in ("/x86_64/hd-multi-1.0.apk", "/aarch64/hd-multi-1.1.apk"):
+                assert any(
+                    record.path == path and record.status == 200 and record.bytes_sent > 0
+                    for record in requests
+                )
+
+
+def test_noarch_package_in_every_architecture_index() -> None:
+    policy = replace(POLICY, architectures=("x86_64", "aarch64"))
+    with (
+        private_workspace() as runtime,
+        disposable_key() as key,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+    ):
+        noarch = fixture(runtime, "hd-noarch", "1.0-r0", payload="shared", arch="noarch")
+        item = accept(noarch, runtime, (), policy)
+        assert item.inspected.identity.architecture == "noarch"
+        prepared = apk.prepare(
+            [item],
+            EMPTY,
+            policy=policy,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "noarch-generation1",
+        )
+        assert [output.ref.key for output in prepared.outputs] == [
+            "keys/haberdasher.rsa.pub",
+            "noarch/hd-noarch-1.0-r0.apk",
+            "aarch64/APKINDEX.tar.gz",
+            "x86_64/APKINDEX.tar.gz",
+        ]
+        apk.validate_retained(committed(prepared), policy=policy, runtime=runtime)
+        public = runtime.root / "noarch-public"
+        public.mkdir()
+        publish(prepared, public)
+        with serve(public) as http:
+            for arch in ("x86_64", "aarch64"):
+                http.set_generation_mtime([public / arch / "APKINDEX.tar.gz"], 1)
+                client = Client(
+                    runtime,
+                    f"noarch-{arch.replace('_', '-')}",
+                    http.url(),
+                    public / "keys/haberdasher.rsa.pub",
+                    arch,
+                )
+                client.run("verify", str(public / arch / "APKINDEX.tar.gz"))
+                client.run("update")
+                client.add("hd-noarch=1.0-r0")
+                client.installed("hd-noarch", "1.0-r0", "shared")
+                fetched = client.fetch("downloads", "hd-noarch=1.0-r0")
+                assert sha256_file(fetched / "hd-noarch-1.0-r0.apk") == (noarch.sha256, noarch.size)

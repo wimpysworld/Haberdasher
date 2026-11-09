@@ -3,9 +3,9 @@ from __future__ import annotations
 import gzip
 import hashlib
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from email.utils import format_datetime
 from functools import partial
 from pathlib import Path
@@ -23,13 +23,16 @@ from haberdasher.core import (
     PreparedFormat,
     RetainedFormat,
     SourceAsset,
+    UnsupportedAsset,
     VerifiedAsset,
     sha256_file,
 )
 from haberdasher.formats import apt
 from haberdasher.formats.apt import (
+    _check_names,  # pyright: ignore[reportPrivateUsage]
     _indexes,  # pyright: ignore[reportPrivateUsage]
     _policy,  # pyright: ignore[reportPrivateUsage]
+    _pool_key,  # pyright: ignore[reportPrivateUsage]
     _verify_signatures,  # pyright: ignore[reportPrivateUsage]
 )
 from haberdasher.runtime import Runtime
@@ -50,6 +53,7 @@ class Commands(Runtime):
         input: bytes | None = None,
         timeout: float = 120,
         env_kind: str = "native",
+        progress: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         self.commands.append(tuple(argv))
         if not self.replies:
@@ -74,15 +78,29 @@ def asset(root: Path) -> VerifiedAsset:
     return VerifiedAsset(source, path, sha, size, 3, "0" * 64)
 
 
-def control(arch: str = "amd64") -> bytes:
-    return f"Package: hd-test\nVersion: 1.0\nArchitecture: {arch}\n".encode()
+def control(arch: str = "amd64", name: str = "hd-test", version: str = "1.0") -> bytes:
+    return f"Package: {name}\nVersion: {version}\nArchitecture: {arch}\n".encode()
 
 
-def record(verified: VerifiedAsset, arch: str = "amd64") -> bytes:
+def pool(
+    arch: str = "amd64", name: str = "hd-test", version: str = "1.0", source: str | None = None
+) -> str:
+    source = source or name
+    return f"pool/main/h/{source}/{name}_{version.partition(':')[2] or version}_{arch}.deb"
+
+
+def record(
+    verified: VerifiedAsset,
+    arch: str = "amd64",
+    name: str = "hd-test",
+    version: str = "1.0",
+    source: str | None = None,
+) -> bytes:
     return (
-        control(arch)
+        control(arch, name, version)
+        + (f"Source: {source}\n" if source else "").encode()
         + (
-            f"Filename: pool/{verified.sha256}.deb\nSize: {verified.size}\nSHA256: {verified.sha256}\n"
+            f"Filename: {pool(arch, name, version, source)}\nSize: {verified.size}\nSHA256: {verified.sha256}\n"
             "Depends: hd-one (>= 1),\n hd-two\nDescription: Test\n Full description.\n"
             "X-Custom: retained\n\n"
         ).encode()
@@ -138,18 +156,18 @@ def test_complete_record_and_multiline_dependencies_are_preserved(tmp_path: Path
     assert inspected.metadata == {"record": raw.decode()}
     assert inspected.evidence == {"dependencies": {"Depends": "hd-one (>= 1),\n hd-two"}}
     assert inspected.verified == verified
-    assert sha256_file(tmp_path / f"inspection/pool/{verified.sha256}.deb") == (
+    assert sha256_file(tmp_path / "inspection" / pool()) == (
         verified.sha256,
         verified.size,
     )
     assert runtime.commands == [
         ("dpkg-deb", "-f", str(verified.local_path)),
-        ("apt-ftparchive", "packages", f"pool/{verified.sha256}.deb"),
+        ("apt-ftparchive", "packages", pool()),
     ]
 
 
 @pytest.mark.parametrize("arch", ["amd64", "arm64", "all"])
-def test_approved_architectures_and_all(tmp_path: Path, arch: str) -> None:
+def test_configured_architectures_and_all(tmp_path: Path, arch: str) -> None:
     verified = asset(tmp_path)
     runtime = Commands(tmp_path, [(0, control(arch)), (0, record(verified, arch))])
     inspected = apt.inspect(
@@ -164,7 +182,6 @@ def test_approved_architectures_and_all(tmp_path: Path, arch: str) -> None:
 @pytest.mark.parametrize(
     "native_control",
     [
-        control("i386"),
         b"",
         control() + b"Package: duplicate\n",
         control() + b"\nPackage: extra\n",
@@ -180,6 +197,19 @@ def test_invalid_native_control_is_rejected(tmp_path: Path, native_control: byte
     with pytest.raises(apt.AptFailure):
         apt.inspect(
             verified,
+            policy=FormatPolicy("apt", ("amd64",)),
+            runtime=runtime,
+            out=tmp_path / "inspection",
+        )
+
+
+def test_unsupported_architecture_names_the_file(tmp_path: Path) -> None:
+    runtime = Commands(tmp_path, [(0, control("i386"))])
+    with pytest.raises(
+        UnsupportedAsset, match="^fixture.deb: unsupported APT architecture 'i386'$"
+    ):
+        apt.inspect(
+            asset(tmp_path),
             policy=FormatPolicy("apt", ("amd64",)),
             runtime=runtime,
             out=tmp_path / "inspection",
@@ -239,7 +269,7 @@ def test_verified_bytes_are_checked_before_any_native_call(tmp_path: Path) -> No
 def test_empty_bootstrap_needs_no_native_commands_or_signer(tmp_path: Path) -> None:
     runtime = Commands(tmp_path, [])
     config = FormatPolicy("apt", ("amd64",))
-    empty = RetainedFormat("apt", None, (), (), {}, ())
+    empty = RetainedFormat("apt", (), (), {}, ())
     signer = SigningSession(runtime, tmp_path / "gnupg", "A" * 40)
     prepared = apt.prepare(
         [],
@@ -251,18 +281,15 @@ def test_empty_bootstrap_needs_no_native_commands_or_signer(tmp_path: Path) -> N
         out=tmp_path / "output",
     )
     assert prepared == PreparedFormat("apt", empty, (), ())
-    apt.validate_prepared(prepared, policy=config, runtime=runtime, now=datetime.now(UTC))
+    apt.validate_prepared(prepared, policy=config, runtime=runtime)
     assert not runtime.commands
 
 
 @pytest.mark.parametrize(
     "broken",
     [
-        RetainedFormat("apt", "prior", (), (), {}, ()),
-        RetainedFormat("apt", None, (), (), {"files": {}}, ()),
-        RetainedFormat(
-            "apt", None, (), (NativeIdentity("apt", "hd-test", "amd64", "1.0"),), {}, ()
-        ),
+        RetainedFormat("apt", (), (), {"files": {}}, ()),
+        RetainedFormat("apt", (), (NativeIdentity("apt", "hd-test", "amd64", "1.0"),), {}, ()),
     ],
 )
 def test_incomplete_retained_state_cannot_bootstrap(tmp_path: Path, broken: RetainedFormat) -> None:
@@ -282,7 +309,7 @@ def test_changed_admitted_bytes_do_not_produce_outputs(tmp_path: Path) -> None:
         with pytest.raises(apt.AptFailure, match="bytes changed"):
             apt.prepare(
                 [AdmittedAsset(inspected, "preserve", "history")],
-                RetainedFormat("apt", None, (), (), {}, ()),
+                RetainedFormat("apt", (), (), {}, ()),
                 policy=config,
                 runtime=runtime,
                 signer=signer,
@@ -317,7 +344,6 @@ def test_release_verification_requires_one_scoped_sha256_primary(
     release.write_bytes(b"Suite: stable\n")
     retained = RetainedFormat(
         "apt",
-        None,
         (),
         (),
         {
@@ -343,12 +369,10 @@ def test_release_verification_requires_one_scoped_sha256_primary(
 
     with patch.object(runtime, "run", side_effect=verify):
         if fault is None:
-            _verify_signatures(retained, policy=FormatPolicy("apt", ("amd64",)), runtime=runtime)
+            _verify_signatures(retained, runtime=runtime)
         else:
             with pytest.raises(apt.AptFailure, match="scoped SHA256 primary"):
-                _verify_signatures(
-                    retained, policy=FormatPolicy("apt", ("amd64",)), runtime=runtime
-                )
+                _verify_signatures(retained, runtime=runtime)
     assert len(runtime.commands) == (1 if fault is not None and not inline else 2)
     assert all(command[0] == "gpgv" for command in runtime.commands)
     assert not list((runtime.root / "tmp").iterdir())
@@ -383,12 +407,10 @@ def retained_history(
             sha256=hashlib.sha256(data).hexdigest(),
             size=len(data),
         )
-        raw = (
-            record(current, identity.architecture)
-            .decode()
-            .replace("Package: hd-test", f"Package: {identity.name}")
-            .replace("Version: 1.0", f"Version: {identity.version}")
-        )
+        source = f"hd-source-{index}"
+        raw = record(
+            current, identity.architecture, identity.name, identity.version, source
+        ).decode()
         history.append(
             AdmittedAsset(
                 InspectedAsset(current, identity, {"record": raw}, {}, "unsigned"),
@@ -397,26 +419,26 @@ def retained_history(
                 current.sha256,
             )
         )
-        reference(f"pool/{current.sha256}.deb", data, "package")
+        reference(
+            pool(identity.architecture, identity.name, identity.version, source), data, "package"
+        )
     indexes = _indexes(history, config)
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    expiry = now + timedelta(seconds=config.validity_seconds)
     release = (
-        f"Suite: {config.suite}\nCodename: {config.suite}\nComponents: {config.component}\n"
+        f"Suite: {apt.SUITE}\nCodename: {apt.SUITE}\nComponents: {apt.COMPONENT}\n"
         f"Architectures: {' '.join(config.architectures)}\nAcquire-By-Hash: yes\n"
-        f"Date: {format_datetime(now, usegmt=True)}\n"
-        f"Valid-Until: {format_datetime(expiry, usegmt=True)}\nSHA256:\n"
+        f"Date: {format_datetime(now, usegmt=True)}\nSHA256:\n"
     )
     for key, data in indexes.items():
         sha = hashlib.sha256(data).hexdigest()
-        release += f" {sha} {len(data)} {key.removeprefix(f'dists/{config.suite}/')}\n"
+        release += f" {sha} {len(data)} {key.removeprefix(f'dists/{apt.SUITE}/')}\n"
         reference(key.rsplit("/", 1)[0] + "/by-hash/SHA256/" + sha, data, "dependency")
     files: dict[str, JSONValue] = {}
     for key, data in {
         **indexes,
-        f"dists/{config.suite}/Release": release.encode(),
-        f"dists/{config.suite}/Release.gpg": b"mock detached signature",
-        f"dists/{config.suite}/InRelease": b"mock inline signature",
+        f"dists/{apt.SUITE}/Release": release.encode(),
+        f"dists/{apt.SUITE}/Release.gpg": b"mock detached signature",
+        f"dists/{apt.SUITE}/InRelease": b"mock inline signature",
     }.items():
         path = root / key
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -427,7 +449,6 @@ def retained_history(
     keyring.write_bytes(b"mock public keyring")
     return RetainedFormat(
         "apt",
-        "prior",
         tuple(history),
         identities,
         {
@@ -437,7 +458,6 @@ def retained_history(
             "keyring": str(keyring),
             "keyring_sha256": sha256_file(keyring)[0],
             "fingerprint": "A" * 40,
-            "expires_at": expiry.isoformat(),
         },
         tuple(refs),
     )
@@ -462,7 +482,7 @@ def test_indexes_are_deterministic_across_roots_and_times(tmp_path: Path) -> Non
         for key, data in expected.items():
             assert (root / key).read_bytes() == data
     for arch in config.architectures:
-        key = f"dists/{config.suite}/{config.component}/binary-{arch}/Packages"
+        key = f"dists/{apt.SUITE}/{apt.COMPONENT}/binary-{arch}/Packages"
         plain = (roots[0] / key).read_bytes()
         left = (roots[0] / (key + ".gz")).read_bytes()
         right = (roots[1] / (key + ".gz")).read_bytes()
@@ -511,7 +531,7 @@ def test_retained_preserves_distinct_identities(tmp_path: Path, difference: str)
     )
     with patch.object(apt, "_verify_signatures") as signatures:
         apt.validate_retained(retained, policy=config, runtime=runtime)
-    signatures.assert_called_once_with(retained, policy=config, runtime=runtime)
+    signatures.assert_called_once_with(retained, runtime=runtime)
     assert not runtime.replies
     assert all(command[0] == "dpkg" for command in runtime.commands)
 
@@ -520,7 +540,69 @@ def test_all_is_not_a_concrete_index_architecture(tmp_path: Path) -> None:
     runtime = Commands(tmp_path, [])
     with pytest.raises(apt.AptFailure, match="concrete"):
         apt.validate_retained(
-            RetainedFormat("apt", None, (), (), {}, ()),
+            RetainedFormat("apt", (), (), {}, ()),
             policy=FormatPolicy("apt", ("all",)),
             runtime=runtime,
         )
+
+
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        (
+            {"Package": "sidra", "Version": "1.3.0", "Architecture": "amd64"},
+            "pool/main/s/sidra/sidra_1.3.0_amd64.deb",
+        ),
+        (
+            {"Package": "hd-tool", "Version": "1:2.0-1", "Architecture": "all"},
+            "pool/main/h/hd-tool/hd-tool_2.0-1_all.deb",
+        ),
+        (
+            {
+                "Package": "libhd-data",
+                "Source": "libhd (1.0)",
+                "Version": "1.0",
+                "Architecture": "arm64",
+            },
+            "pool/main/libh/libhd/libhd-data_1.0_arm64.deb",
+        ),
+        (
+            {"Package": "lib", "Version": "1.0", "Architecture": "amd64"},
+            "pool/main/lib/lib/lib_1.0_amd64.deb",
+        ),
+    ],
+)
+def test_pool_names_follow_debian_layout(fields: dict[str, str], expected: str) -> None:
+    assert _pool_key(fields) == expected
+
+
+def test_two_sources_with_one_pool_name_fail_with_one_line(tmp_path: Path) -> None:
+    config = FormatPolicy("apt", ("amd64",))
+    verified = asset(tmp_path)
+    history: list[AdmittedAsset] = []
+    for index, (repository, version) in enumerate((("one/tool", "1.0"), ("two/tool", "1:1.0"))):
+        data = f"different bytes {index}".encode()
+        current = replace(
+            verified,
+            source=replace(
+                verified.source, repository=repository, asset_id=index + 1, size=len(data)
+            ),
+            sha256=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+        )
+        identity = NativeIdentity("apt", "hd-test", "amd64", version)
+        raw = record(current, version=version).decode()
+        history.append(
+            AdmittedAsset(
+                InspectedAsset(current, identity, {"record": raw}, {}, "unsigned"),
+                "preserve",
+                f"history-{index}",
+            )
+        )
+    with pytest.raises(apt.AptFailure) as error:
+        _check_names(history, config)
+    assert str(error.value) == (
+        "pool/main/h/hd-test/hd-test_1.0_amd64.deb comes from both one/tool (fixture.deb)"
+        " and two/tool (fixture.deb); publish one of them"
+    )
+    _check_names(history[:1] * 2, config)

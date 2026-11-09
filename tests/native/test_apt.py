@@ -21,6 +21,9 @@ from tests.native.fixtures.apt import Client, build, policy, publish
 from tests.support.http import serve
 from tests.support.keys import disposable_key
 
+# The epoch stays out of the pool name, as in Debian.
+SECOND = "pool/main/h/hd-application/hd-application_2.0_amd64.deb"
+
 
 def test_client_configures_runtime_gpgv(monkeypatch: pytest.MonkeyPatch) -> None:
     with private_workspace() as runtime:
@@ -46,10 +49,12 @@ def test_production_apt_install_update_and_rejections() -> None:
     with private_workspace() as runtime, disposable_key() as key:
         config = policy()
         now = datetime.now(UTC).replace(microsecond=0)
-        empty = RetainedFormat("apt", None, (), (), {}, ())
+        empty = RetainedFormat("apt", (), (), {}, ())
         apt.validate_retained(empty, policy=config, runtime=runtime)
         dep = build(runtime, "hd-dependency", "1.0", "dependency", arch="all", asset_id=1)
-        second_dep = build(runtime, "hd-extra", "1.0", "extra", arch="all", asset_id=2)
+        second_dep = build(
+            runtime, "hd-extra", "1.0", "extra", arch="all", source="libhd-extra", asset_id=2
+        )
         first = build(
             runtime,
             "hd-application",
@@ -61,7 +66,7 @@ def test_production_apt_install_update_and_rejections() -> None:
         second = build(
             runtime,
             "hd-application",
-            "2.0",
+            "1:2.0",
             "second",
             depends="hd-dependency (>= 1.0), hd-extra",
             asset_id=4,
@@ -106,14 +111,14 @@ def test_production_apt_install_update_and_rejections() -> None:
                 out=runtime.root / "generation-one",
             )
             with patch.object(runtime, "run", wraps=runtime.run) as commands:
-                apt.validate_prepared(initial, policy=config, runtime=runtime, now=now)
+                apt.validate_prepared(initial, policy=config, runtime=runtime)
             assert [call.args[0][0] for call in commands.call_args_list] == ["gpgv", "gpgv"]
             assert all(
                 item.published_sha256 == item.inspected.verified.sha256
                 for item in initial.retained.accepted_history
             )
             arm = (
-                runtime.root / "generation-one/dists/proof/main/binary-arm64/Packages"
+                runtime.root / "generation-one/dists/stable/main/binary-arm64/Packages"
             ).read_text()
             assert "Package: hd-dependency" in arm and "Package: hd-extra" in arm
             assert "Package: hd-application" not in arm
@@ -139,33 +144,8 @@ def test_production_apt_install_update_and_rejections() -> None:
             assert [call.args[0][0] for call in commands.call_args_list] == ["gpgv", "gpgv"]
             assert not unchanged.outputs and unchanged.retained is retained
             assert not (runtime.root / "unused").exists()
-            renewal_time = now + timedelta(seconds=config.validity_seconds - config.renewal_seconds)
-            with patch.object(runtime, "run", wraps=runtime.run) as commands:
-                renewed = apt.prepare(
-                    [],
-                    retained,
-                    policy=config,
-                    runtime=runtime,
-                    signer=signer,
-                    now=renewal_time,
-                    out=runtime.root / "renewal",
-                )
-            assert [item.ref.key for item in renewed.outputs] == [
-                "dists/proof/Release",
-                "dists/proof/Release.gpg",
-                "dists/proof/InRelease",
-            ]
-            assert not any(
-                call.args[0][0] in {"dpkg", "dpkg-deb", "apt-ftparchive"}
-                for call in commands.call_args_list
-            )
-            with pytest.raises(apt.AptFailure, match="regeneration is required"):
-                apt.validate_prepared(
-                    initial,
-                    policy=config,
-                    runtime=runtime,
-                    now=now + timedelta(seconds=config.validity_seconds),
-                )
+            for name in ("Release", "InRelease"):
+                assert b"Valid-Until" not in (live / "dists/stable" / name).read_bytes()
             with serve(http_root) as server:
                 client = Client(runtime, "normal", server.url("live"), key.public_file)
                 client.apt("update")
@@ -210,31 +190,37 @@ def test_production_apt_install_update_and_rejections() -> None:
                 for item in initial.retained.objects:
                     if item.object_class in {"package", "dependency"}:
                         assert item in updated.referenced_objects
-                retained_two = publish(updated, live, 2)
+                publish(updated, live, 2)
                 client.apt("update")
                 client.apt("upgrade", "-y")
-                client.installed("hd-application", "2.0", "second")
+                client.installed("hd-application", "1:2.0", "second")
                 client.installed("hd-dependency", "1.0", "dependency")
-                assert sha256_file(live / f"pool/{first.sha256}.deb") == (first.sha256, first.size)
-                assert sha256_file(live / f"pool/{second.sha256}.deb") == (
-                    second.sha256,
-                    second.size,
+                assert sha256_file(
+                    live / "pool/main/h/hd-application/hd-application_1.0_amd64.deb"
+                ) == (
+                    first.sha256,
+                    first.size,
+                )
+                assert sha256_file(live / SECOND) == (second.sha256, second.size)
+                assert sha256_file(live / "pool/main/libh/libhd-extra/hd-extra_1.0_all.deb") == (
+                    second_dep.sha256,
+                    second_dep.size,
                 )
                 delayed = http_root / "delayed"
                 shutil.copytree(live, delayed)
                 shutil.copyfile(
-                    runtime.root / "generation-one/dists/proof/InRelease",
-                    delayed / "dists/proof/InRelease",
+                    runtime.root / "generation-one/dists/stable/InRelease",
+                    delayed / "dists/stable/InRelease",
                 )
-                server.set_generation_mtime([delayed / "dists/proof/InRelease"], 1)
+                server.set_generation_mtime([delayed / "dists/stable/InRelease"], 1)
                 old = Client(runtime, "delayed", server.url("delayed"), key.public_file)
                 old.apt("update")
                 old_hash = sha256_file(
-                    runtime.root / "generation-one/dists/proof/main/binary-amd64/Packages.gz"
+                    runtime.root / "generation-one/dists/stable/main/binary-amd64/Packages.gz"
                 )[0]
                 assert any(
                     record.path
-                    == f"/delayed/dists/proof/main/binary-amd64/by-hash/SHA256/{old_hash}"
+                    == f"/delayed/dists/stable/main/binary-amd64/by-hash/SHA256/{old_hash}"
                     and record.status == 200
                     for record in server.requests()
                 )
@@ -243,13 +229,13 @@ def test_production_apt_install_update_and_rejections() -> None:
                 old.installed("hd-extra", "1.0", "extra")
                 detached = http_root / "detached"
                 shutil.copytree(live, detached)
-                (detached / "dists/proof/InRelease").unlink()
+                (detached / "dists/stable/InRelease").unlink()
                 fallback = Client(runtime, "detached", server.url("detached"), key.public_file)
                 fallback.apt("update")
                 fallback.apt("install", "-y", "hd-application")
-                fallback.installed("hd-application", "2.0", "second")
+                fallback.installed("hd-application", "1:2.0", "second")
                 assert any(
-                    record.path == "/detached/dists/proof/Release.gpg" and record.status == 200
+                    record.path == "/detached/dists/stable/Release.gpg" and record.status == 200
                     for record in server.requests()
                 )
                 with disposable_key() as wrong:
@@ -264,19 +250,19 @@ def test_production_apt_install_update_and_rejections() -> None:
                 missing.apt("install", "-y", "hd-application", succeeds=False)
                 missing.not_installed("hd-application")
                 new_hash = sha256_file(
-                    runtime.root / "generation-two/dists/proof/main/binary-amd64/Packages.gz"
+                    runtime.root / "generation-two/dists/stable/main/binary-amd64/Packages.gz"
                 )[0]
                 for name, target in (
-                    ("signature", "dists/proof/InRelease"),
-                    ("index", f"dists/proof/main/binary-amd64/by-hash/SHA256/{new_hash}"),
-                    ("package", f"pool/{second.sha256}.deb"),
+                    ("signature", "dists/stable/InRelease"),
+                    ("index", f"dists/stable/main/binary-amd64/by-hash/SHA256/{new_hash}"),
+                    ("package", SECOND),
                 ):
                     damaged = http_root / name
                     shutil.copytree(live, damaged)
                     path = damaged / target
                     data = path.read_bytes()
                     path.write_bytes(
-                        data.replace(b"Suite: proof", b"Suite: wrong")
+                        data.replace(b"Suite: stable", b"Suite: wrong")
                         if name == "signature"
                         else b"X" + data[1:]
                     )
@@ -284,54 +270,51 @@ def test_production_apt_install_update_and_rejections() -> None:
                     bad.apt("update", succeeds=name == "package")
                     bad.apt("install", "-y", "hd-application", succeeds=False)
                     bad.not_installed("hd-application")
-                expired = apt.prepare(
+                old_date = apt.prepare(
                     [accepted],
                     empty,
                     policy=config,
                     runtime=runtime,
                     signer=signer,
-                    now=now - timedelta(days=8),
-                    out=runtime.root / "expired-generation",
+                    now=now - timedelta(days=400),
+                    out=runtime.root / "old-generation",
                 )
-                publish(expired, http_root / "expired", 3)
-                bad = Client(runtime, "expired", server.url("expired"), key.public_file)
-                assert b"expired" in bad.apt("update", succeeds=False)
-                bad.apt("install", "-y", "hd-application", succeeds=False)
-                bad.not_installed("hd-application")
+                publish(old_date, http_root / "old", 3)
+                aged = Client(runtime, "old", server.url("old"), key.public_file)
+                aged.apt("update")
                 with patch.object(
                     signer, "sign_file", side_effect=SigningFailure("injected failure")
                 ):
                     with pytest.raises(SigningFailure):
                         apt.prepare(
-                            [],
-                            retained_two,
+                            [accepted],
+                            retained,
                             policy=config,
                             runtime=runtime,
                             signer=signer,
-                            now=renewal_time,
+                            now=now,
                             out=runtime.root / "failed-signing",
                         )
                 with patch.object(signer, "sign_file", return_value=None):
                     with pytest.raises((ValueError, OSError)):
                         apt.prepare(
-                            [],
-                            retained_two,
+                            [accepted],
+                            retained,
                             policy=config,
                             runtime=runtime,
                             signer=signer,
-                            now=renewal_time,
+                            now=now,
                             out=runtime.root / "missing-signature",
                         )
                 fetched = server.requests()
                 assert any(
-                    record.path == f"/live/pool/{second.sha256}.deb"
-                    and record.bytes_sent == second.size
+                    record.path == f"/live/{SECOND}" and record.bytes_sent == second.size
                     for record in fetched
                 )
                 print(
                     f"Installed: 1.0 -> 2.0; delayed=1.0; dependencies=hd-dependency,hd-extra; HTTP requests={len(fetched)}"
                 )
-        apt.validate_prepared(updated, policy=config, runtime=runtime, now=now)
+        apt.validate_prepared(updated, policy=config, runtime=runtime)
         broken = replace(
             updated.retained,
             objects=tuple(
@@ -340,10 +323,10 @@ def test_production_apt_install_update_and_rejections() -> None:
         )
         with pytest.raises(apt.AptFailure, match="incomplete"):
             apt.validate_retained(broken, policy=config, runtime=runtime)
-        frozen = runtime.root / "generation-two/dists/proof/InRelease"
-        frozen.write_bytes(frozen.read_bytes() + b"corruption")
+        inrelease = runtime.root / "generation-two/dists/stable/InRelease"
+        inrelease.write_bytes(inrelease.read_bytes() + b"corruption")
         with pytest.raises(apt.AptFailure, match="changed"):
-            apt.validate_prepared(updated, policy=config, runtime=runtime, now=now)
+            apt.validate_prepared(updated, policy=config, runtime=runtime)
         print(client.apt("--version").decode().splitlines()[0])
         for command in (["dpkg-query", "--version"], ["gpg", "--version"]):
             result = runtime.run(command)
@@ -366,7 +349,7 @@ def test_retained_validation_checks_hash_consistent_signatures() -> None:
         ) as signer:
             prepared = apt.prepare(
                 [accepted],
-                RetainedFormat("apt", None, (), (), {}, ()),
+                RetainedFormat("apt", (), (), {}, ()),
                 policy=config,
                 runtime=runtime,
                 signer=signer,
@@ -387,13 +370,13 @@ def test_retained_validation_checks_hash_consistent_signatures() -> None:
             ):
                 root = runtime.root / fault
                 shutil.copytree(original, root)
-                release = root / "dists/proof/Release"
+                release = root / "dists/stable/Release"
                 if fault == "detached":
-                    (root / "dists/proof/Release.gpg").write_bytes(b"invalid detached signature")
+                    (root / "dists/stable/Release.gpg").write_bytes(b"invalid detached signature")
                 elif fault == "inline":
-                    inline = root / "dists/proof/InRelease"
+                    inline = root / "dists/stable/InRelease"
                     inline.write_bytes(
-                        inline.read_bytes().replace(b"Suite: proof", b"Suite: wrong")
+                        inline.read_bytes().replace(b"Suite: stable", b"Suite: wrong")
                     )
                 elif fault == "keyring":
                     (root / "trust.gpg").write_bytes(b"invalid public keyring")
@@ -402,7 +385,7 @@ def test_retained_validation_checks_hash_consistent_signatures() -> None:
                 elif fault == "cleartext":
                     alternate = runtime.root / "alternate-release"
                     alternate.write_bytes(release.read_bytes() + b"X-Different: signed\n")
-                    inline = root / "dists/proof/InRelease"
+                    inline = root / "dists/stable/InRelease"
                     inline.unlink()
                     signer.sign_file(alternate, inline, clear=True)
                 files: dict[str, JSONValue] = {name: str(root / name) for name in original_files}
@@ -480,7 +463,7 @@ def test_indexes_are_deterministic_across_roots_and_times() -> None:
                 ):
                     prepared = apt.prepare(
                         [accepted],
-                        RetainedFormat("apt", None, (), (), {}, ()),
+                        RetainedFormat("apt", (), (), {}, ()),
                         policy=config,
                         runtime=runtime,
                         signer=signer,
@@ -490,12 +473,12 @@ def test_indexes_are_deterministic_across_roots_and_times() -> None:
                 assert any(item.ref.key.endswith("/Packages.gz") for item in prepared.outputs)
         expected = str(inspected.metadata["record"]).rstrip("\n").encode() + b"\n\n"
         for arch in config.architectures:
-            relative = f"dists/{config.suite}/{config.component}/binary-{arch}/Packages"
+            relative = f"dists/{apt.SUITE}/{apt.COMPONENT}/binary-{arch}/Packages"
             left = (roots[0] / (relative + ".gz")).read_bytes()
             right = (roots[1] / (relative + ".gz")).read_bytes()
             assert left == right
             assert gzip.decompress(left) == gzip.decompress(right) == expected
             assert (roots[0] / relative).read_bytes() == expected
             assert (roots[1] / relative).read_bytes() == expected
-        release = f"dists/{config.suite}/Release"
+        release = f"dists/{apt.SUITE}/Release"
         assert (roots[0] / release).read_bytes() != (roots[1] / release).read_bytes()

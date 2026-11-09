@@ -9,18 +9,18 @@ from collections.abc import Generator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from haberdasher.config import StoragePolicy
 from haberdasher.core import ObjectRef
 
 
 def local_policy(root: Path) -> StoragePolicy:
-    return StoragePolicy(private=str(root / "private"), public={"apt": str(root / "public/apt")})
+    return StoragePolicy(public={"apt": str(root / "public/apt"), "rpm": str(root / "public/rpm")})
 
 
 def remote_policy() -> StoragePolicy:
-    return StoragePolicy("r2", "test-private", {"apt": "test-public"})
+    return StoragePolicy("r2", {"apt": "test-public", "rpm": "test-rpm"})
 
 
 def object_ref(
@@ -29,7 +29,7 @@ def object_ref(
     return ObjectRef(
         role,
         key,
-        "private" if role == "private" else "entry",
+        "entry",
         len(data),
         hashlib.sha256(data).hexdigest(),
         "application/octet-stream",
@@ -50,11 +50,13 @@ def synthetic_environment(endpoint: str, path: str) -> dict[str, str]:
 class StorageHTTP:
     endpoint: str = ""
     objects: dict[str, tuple[bytes, str]] = field(default_factory=dict)
+    headers: dict[str, dict[str, str]] = field(default_factory=dict)
+    uploads: dict[str, dict[int, bytes]] = field(default_factory=dict)
     requests: list[tuple[str, str, str | None, str | None]] = field(default_factory=list)
-    revision: int = 0
     put_error: int | None = None
     accept_then_error: bool = False
     truncate_get: bool = False
+    stale_delete: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -99,7 +101,9 @@ def storage_http() -> Generator[StorageHTTP]:
             self.send_header("Content-Length", str(len(data)))
             self.send_header("ETag", etag)
             self.send_header("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
-            self.send_header("Content-Type", "application/octet-stream")
+            headers = {"Content-Type": "application/octet-stream", **state.headers.get(key, {})}
+            for name, value in headers.items():
+                self.send_header(name, value)
             self.end_headers()
             if self.command == "GET":
                 self.wfile.write(data[:-1] if state.truncate_get else data)
@@ -110,10 +114,71 @@ def storage_http() -> Generator[StorageHTTP]:
         def do_GET(self) -> None:
             self._read()
 
-        def do_PUT(self) -> None:
-            data = self.rfile.read(int(self.headers["Content-Length"]))
+        def _query(self) -> dict[str, str]:
+            return {
+                name: values[0]
+                for name, values in parse_qs(
+                    urlsplit(self.path).query, keep_blank_values=True
+                ).items()
+            }
+
+        def _stored(self) -> dict[str, str]:
+            return {
+                name: value
+                for name, value in self.headers.items()
+                if name.lower() in {"content-type", "cache-control"}
+                or name.lower().startswith("x-amz-meta-")
+            }
+
+        def _xml(self, body: str) -> None:
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_POST(self) -> None:
+            """Create and complete the multipart uploads that `rclone` sends for large files."""
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            query = self._query()
             with state.lock:
                 key = self._record()
+                if "uploads" in query:
+                    upload = f"upload-{len(state.requests)}"
+                    state.uploads[upload] = {}
+                    state.headers[upload] = self._stored()
+                    self._xml(
+                        "<InitiateMultipartUploadResult><Bucket/><Key/>"
+                        f"<UploadId>{upload}</UploadId></InitiateMultipartUploadResult>"
+                    )
+                    return
+                parts = state.uploads.pop(query["uploadId"])
+                data = b"".join(parts[number] for number in sorted(parts))
+                digests = b"".join(
+                    hashlib.md5(parts[number], usedforsecurity=False).digest()
+                    for number in sorted(parts)
+                )
+                etag = f'"{hashlib.md5(digests, usedforsecurity=False).hexdigest()}-{len(parts)}"'
+                state.objects[key] = data, etag
+                state.headers[key] = state.headers.pop(query["uploadId"])
+            self._xml(
+                f"<CompleteMultipartUploadResult><ETag>{etag}</ETag></CompleteMultipartUploadResult>"
+            )
+
+        def do_PUT(self) -> None:
+            data = self.rfile.read(int(self.headers["Content-Length"]))
+            query = self._query()
+            with state.lock:
+                key = self._record()
+                if "uploadId" in query:
+                    state.uploads[query["uploadId"]][int(query["partNumber"])] = data
+                    etag = f'"{hashlib.md5(data, usedforsecurity=False).hexdigest()}"'
+                    self.send_response(200)
+                    self.send_header("ETag", etag)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 current = state.objects.get(key)
                 if state.put_error is not None and not state.accept_then_error:
                     self._error(state.put_error)
@@ -124,15 +189,29 @@ def storage_http() -> Generator[StorageHTTP]:
                 ):
                     self._error(412)
                     return
-                state.revision += 1
-                etag = f'"revision-{state.revision}"'
+                etag = f'"{hashlib.md5(data, usedforsecurity=False).hexdigest()}"'
                 state.objects[key] = data, etag
+                state.headers[key] = self._stored()
                 if state.put_error is not None:
                     self._error(state.put_error)
                     return
             self.send_response(200)
             self.send_header("ETag", etag)
             self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_DELETE(self) -> None:
+            with state.lock:
+                key = self._record()
+                current = state.objects.get(key)
+                if current is not None and state.stale_delete:
+                    current = current[0], current[1].removesuffix('"') + '-changed"'
+                    state.objects[key] = current
+                if current is None or self.headers.get("If-Match") != current[1]:
+                    self._error(412)
+                    return
+                del state.objects[key]
+            self.send_response(204)
             self.end_headers()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

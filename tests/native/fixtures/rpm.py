@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from haberdasher.core import PreparedFormat, SourceAsset, VerifiedAsset, sha256_file
 from haberdasher.runtime import Runtime
+from haberdasher.signing import SigningSession
 from tests.support.http import HttpFixture
 from tests.support.native import NativeClient
 
@@ -102,6 +104,30 @@ printf '%s\\n' '{payload}' > %{{buildroot}}/opt/hd-proof/{name}
         f"https://example.invalid/{path.name}",
     )
     return VerifiedAsset(source, path, digest, size, number + 100, "a" * 64)
+
+
+def upstream_sign(runtime: Runtime, asset: VerifiedAsset, signer: SigningSession) -> VerifiedAsset:
+    """Sign a fixture RPM with a separate upstream key, as a release asset can be."""
+    gpg = shutil.which("gpg", path=runtime.environment["PATH"])
+    assert gpg is not None
+    checked(
+        runtime,
+        "env",
+        f"GNUPGHOME={signer.gnupghome}",
+        "rpmsign",
+        "--define",
+        f"_gpg_name {signer.fingerprint}!",
+        "--define",
+        f"_gpg_path {signer.gnupghome}",
+        "--define",
+        f"__gpg {gpg}",
+        "--define",
+        "_gpg_digest_algo sha256",
+        "--addsign",
+        str(asset.local_path),
+    )
+    digest, size = sha256_file(asset.local_path)
+    return replace(asset, sha256=digest, size=size, source=replace(asset.source, size=size))
 
 
 def publish(prepared: PreparedFormat, root: Path, server: HttpFixture, generation: int) -> None:

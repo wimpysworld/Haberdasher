@@ -5,16 +5,23 @@ import hashlib
 import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from haberdasher import core
 from haberdasher.config import FormatPolicy
-from haberdasher.core import AdmittedAsset, NativeIdentity, RetainedFormat
+from haberdasher.core import AdmittedAsset, NativeIdentity, ObjectRef, RetainedFormat
 from haberdasher.formats import rpm
 from haberdasher.runtime import Runtime, private_workspace
-from tests.unit.test_state import NOW, object_ref
+
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def object_ref(path: Path, key: str, kind: str = "entry", name: str = "apt") -> ObjectRef:
+    sha, size = core.sha256_file(path)
+    return ObjectRef(name, key, kind, size, sha, "application/octet-stream", "no-cache")
 
 
 def test_compare_uses_native_evr(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,7 +207,6 @@ def retained_rpm(root: Path, architectures: tuple[str, ...]) -> RetainedFormat:
     )
     return RetainedFormat(
         "rpm",
-        None,
         tuple(history),
         tuple(asset.inspected.identity for asset in history),
         {
@@ -244,7 +250,7 @@ def test_retained_architecture_policy_change_fails_closed(
     mock_rpm_commands(monkeypatch)
     runtime = Runtime(tmp_path / "runtime", environ={})
     rpm.validate_retained(retained, policy=FormatPolicy("rpm"), runtime=runtime)
-    with pytest.raises(rpm.RpmFailure, match="architecture is not approved"):
+    with pytest.raises(rpm.RpmFailure, match="Unsupported retained RPM architecture"):
         rpm.validate_retained(
             retained, policy=FormatPolicy("rpm", architectures=("aarch64",)), runtime=runtime
         )
@@ -265,12 +271,10 @@ def test_retained_compatible_architectures(
 
 def test_bootstrap_is_not_missing_state() -> None:
     policy = FormatPolicy("rpm")
-    empty = RetainedFormat("rpm", None, (), (), {}, ())
+    empty = RetainedFormat("rpm", (), (), {}, ())
     with private_workspace() as runtime:
         rpm.validate_retained(empty, policy=policy, runtime=runtime)
-        for state in (
-            replace(empty, prior_generation="one"),
-            replace(empty, metadata={"root": "/"}),
-        ):
-            with pytest.raises(rpm.RpmFailure, match="Incomplete"):
-                rpm.validate_retained(state, policy=policy, runtime=runtime)
+        with pytest.raises(rpm.RpmFailure, match="Incomplete"):
+            rpm.validate_retained(
+                replace(empty, metadata={"root": "/"}), policy=policy, runtime=runtime
+            )

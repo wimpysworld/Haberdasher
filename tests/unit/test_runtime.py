@@ -1,6 +1,7 @@
 import json
 import os
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -9,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from haberdasher.runtime import Runtime, RuntimeFailure, private_workspace
+from haberdasher.runtime import (
+    STORAGE_VARIABLES,
+    Runtime,
+    RuntimeFailure,
+    _gh_login_token,  # pyright: ignore[reportPrivateUsage]
+    private_workspace,
+)
 
 
 @pytest.mark.parametrize("kind", ["native", "github", "storage"])
@@ -338,3 +345,82 @@ def test_help_and_collection_need_no_credentials() -> None:
     )
     assert result.returncode == 0
     assert b"--collect-only" in result.stdout
+
+
+def test_github_falls_back_to_stored_gh_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def login(path: str) -> str:
+        calls.append(path)
+        return "synthetic-login-token"
+
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr("haberdasher.runtime._gh_login_token", login)
+    runtime = Runtime(tmp_path / "workspace")
+    try:
+        assert "GH_TOKEN" not in runtime.environment_for("native")
+        assert runtime.environment_for("github")["GH_TOKEN"] == "synthetic-login-token"
+        assert runtime.environment_for("github")["GH_TOKEN"] == "synthetic-login-token"
+        assert len(calls) == 1
+    finally:
+        runtime.close()
+
+
+def test_gh_login_token_gets_only_login_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    gh = binary / "gh"
+    gh.write_text(
+        f"#!{shutil.which('sh')}\n"
+        f"{shutil.which('env')} -0 >'{tmp_path / 'env'}'\n"
+        "echo synthetic-login-token\n"
+    )
+    gh.chmod(0o700)
+    for key in (*STORAGE_VARIABLES, "HD_SIGNING_KEY", "HD_SIGNING_KEY_FILE", "UNRELATED"):
+        monkeypatch.setenv(key, "do-not-inherit")
+    for key in ("HOME", "GH_CONFIG_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
+        monkeypatch.setenv(key, f"synthetic-{key}")
+    assert _gh_login_token(str(binary)) == "synthetic-login-token"
+    env = dict(line.split("=", 1) for line in (tmp_path / "env").read_text().split("\0") if line)
+    assert "do-not-inherit" not in env.values()
+    assert env["GH_CONFIG_DIR"] == "synthetic-GH_CONFIG_DIR"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "synthetic-DBUS_SESSION_BUS_ADDRESS"
+    assert (env["PATH"], env["GH_PROMPT_DISABLED"]) == (str(binary), "1")
+
+
+def test_explicit_environment_never_reads_gh_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def login(_path: str) -> str:
+        raise AssertionError("stored login must not be read")
+
+    monkeypatch.setattr("haberdasher.runtime._gh_login_token", login)
+    runtime = Runtime(tmp_path / "workspace", environ={"PATH": os.defpath})
+    try:
+        assert "GH_TOKEN" not in runtime.environment_for("github")
+    finally:
+        runtime.close()
+
+
+def test_progress_receives_redacted_stderr_lines_as_they_arrive(tmp_path: Path) -> None:
+    runtime = Runtime(
+        tmp_path, environ={"PATH": os.defpath, "HD_CLOUDFLARE_ACCESS_KEY_ID": "synthetic-id"}
+    )
+    lines: list[str] = []
+    script = (
+        "import sys, time\n"
+        "sys.stderr.write('first synthetic-id\\nsec'); sys.stderr.flush(); time.sleep(0.1)\n"
+        "sys.stderr.write('ond\\nunterminated'); print('stdout')\n"
+    )
+    try:
+        result = runtime.run([sys.executable, "-c", script], progress=lines.append)
+    finally:
+        runtime.close()
+    assert lines == ["first [REDACTED]", "second"]
+    assert result.stderr == b"first [REDACTED]\nsecond\nunterminated"
+    assert result.stdout == b"stdout\n"

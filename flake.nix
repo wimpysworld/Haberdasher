@@ -54,6 +54,7 @@
           "basedpyright"
           "awscli2"
           "miniserve"
+          "cosign"
         ];
         {
           tools =
@@ -65,11 +66,10 @@
                 ];
               }
               ''
-                mkdir -p just/project tests/proofs
+                mkdir -p just/project
                 cp ${./just/project.just} just/project.just
                 cp ${./just/project/tools.sh} just/project/tools.sh
                 cp ${./just/project/proof.sh} just/project/proof.sh
-                cp ${./tests/proofs/common.sh} tests/proofs/common.sh
                 bash ${./just/project/test.sh}
                 ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   test "$(${pkgs.getopt}/bin/getopt --options h --longoptions help -- --help)" = " --help --"

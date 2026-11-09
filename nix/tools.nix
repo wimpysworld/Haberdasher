@@ -15,6 +15,7 @@ with pkgs;
   curl
   openssl
   gnupg
+  cosign
   shellcheck
   shfmt
   nixfmt

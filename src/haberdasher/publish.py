@@ -1,18 +1,18 @@
-"""Reconciliation and replay of frozen, conditionally published generations."""
+"""Locked reconciliation of releases into each format's public bucket."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
-import os
 import tempfile
-import uuid
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from haberdasher import admission, core, discovery, state
+from haberdasher import admission, discovery, state
 from haberdasher.config import Config, FormatPolicy, Policy
 from haberdasher.core import (
     AdmittedAsset,
@@ -20,20 +20,21 @@ from haberdasher.core import (
     NativeIdentity,
     ObjectRef,
     OutputObject,
-    Ownership,
     PreparedFormat,
-    PreparedGeneration,
+    Report,
     RetainedFormat,
+    UnsupportedAsset,
     VerifiedAsset,
-    canonical_json,
-    json_value,
-    public_inventory,
+    plural,
+    quiet,
     sha256_file,
+    stale_entries,
+    step,
     utc_now,
 )
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession, signing_session
-from haberdasher.state import FrozenGeneration, StateError, Store
+from haberdasher.state import Published, StateError, Store
 
 
 class Adapter(Protocol):
@@ -58,7 +59,7 @@ class Adapter(Protocol):
         out: Path,
     ) -> PreparedFormat: ...
     def validate_prepared(
-        self, prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
+        self, prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime
     ) -> None: ...
 
 
@@ -90,10 +91,11 @@ def _adapter(name: str) -> Adapter:
 
 @dataclass(frozen=True)
 class RunResult:
-    generation_id: str | None
     changed: bool
     published_objects: int
     pending_assets: int = 0
+    packages: int = 0
+    repositories: tuple[str, ...] = ()
 
 
 def _format(filename: str) -> str | None:
@@ -101,6 +103,7 @@ def _format(filename: str) -> str | None:
         (".deb", "apt"),
         (".rpm", "rpm"),
         (".pkg.tar.zst", "arch"),
+        (".pkg.tar.xz", "arch"),
         (".apk", "apk"),
         (".flatpak", "flatpak"),
     ):
@@ -109,20 +112,41 @@ def _format(filename: str) -> str | None:
     return None
 
 
-def _hash(value: object) -> str:
-    return hashlib.sha256(canonical_json(value)).hexdigest()
+def provided(scan: discovery.CompleteScan) -> set[str]:
+    """Formats that the scanned release assets contain."""
+    return {
+        name
+        for record in scan.state.records
+        if (name := _format(record.source.filename)) is not None
+    }
+
+
+def new_assets(
+    scan: discovery.CompleteScan, published: Mapping[str, Published]
+) -> dict[str, list[discovery.DiscoveredAsset]]:
+    """Group checksummed assets by format, without the bytes that each inventory already holds."""
+    result: dict[str, list[discovery.DiscoveredAsset]] = {name: [] for name in published}
+    for item in scan.checksummed:
+        name = _format(item.source.filename)
+        if name not in result or item.checksum is None:
+            continue
+        accepted = published[name].retained.accepted_history
+        if any(asset.inspected.verified.sha256 == item.checksum.sha256 for asset in accepted):
+            continue
+        result[name].append(item)
+    return result
 
 
 def prepare_bootstrap(
     prepared: Sequence[PreparedFormat],
-    committed: state.CommittedState,
+    published: Sequence[ObjectRef],
     signer: SigningSession,
     *,
     out: Path,
 ) -> tuple[tuple[OutputObject, ...], tuple[ObjectRef, ...]]:
     out.mkdir(mode=0o700)
     armoured, binary, rsa = signer.public_exports(out)
-    refs = {(ref.bucket_role, ref.key): ref for ref in committed.bootstrap_objects}
+    refs = {(ref.bucket_role, ref.key): ref for ref in published}
     outputs: list[OutputObject] = []
     for item in prepared:
         if item.retained.metadata:
@@ -131,9 +155,11 @@ def prepare_bootstrap(
                     ref for ref in item.referenced_objects if ref.key == "keys/haberdasher.rsa.pub"
                 )
                 if sha256_file(rsa) != (native.sha256, native.size):
-                    raise StateError("APK bootstrap key differs from the approved signing primary")
+                    raise StateError(
+                        "APK bootstrap key differs from the Haberdasher signing primary"
+                    )
             elif item.retained.metadata.get("fingerprint") != signer.fingerprint:
-                raise StateError("Native metadata differs from the approved signing fingerprint")
+                raise StateError("Native metadata differs from the expected signing fingerprint")
         for path in (armoured, binary):
             sha, size = sha256_file(path)
             ref = ObjectRef(
@@ -148,126 +174,53 @@ def prepare_bootstrap(
             previous = refs.get((item.format, ref.key))
             if previous is not None:
                 if previous != ref:
-                    raise StateError("Bootstrap key changes require explicit rotation approval")
+                    raise StateError(
+                        "Bootstrap key changes need a key rotation, which is not supported"
+                    )
             else:
                 refs[item.format, ref.key] = ref
                 outputs.append(OutputObject(ref, path, "create", None, len(outputs)))
     return tuple(outputs), tuple(refs.values())
 
 
-def replay(
-    frozen: FrozenGeneration,
-    *,
-    store: Store,
-    ownership: Ownership,
-    runtime: Runtime,
-    now: datetime,
-    clock: Callable[[], datetime] | None = None,
-) -> RunResult:
-    if clock is None:
-        clock = core.utc_now
-    state.check_owner(store, ownership)
-    if state.pending_generation(store) != frozen:
-        raise StateError("Replay must use the pending private generation")
-    with tempfile.TemporaryDirectory(prefix="hd-replay-", dir=runtime.root) as temporary:
-        root = Path(temporary)
-        generation, manifest = state.load_frozen(store, frozen, out=root / "frozen")
-        state.check_expiry(generation, clock())
-        policies = state.mapping(generation.scan.get("policies"))
-        for prepared in generation.formats:
-            if prepared.retained.metadata:
-                _adapter(prepared.format).validate_prepared(
-                    prepared,
-                    policy=state.decode_record(FormatPolicy, policies[prepared.format]),
-                    runtime=runtime,
-                    now=now,
-                )
-        outputs = state.publication_outputs(generation, out=root)
-        prior_etags = state.mapping(manifest.get("prior_etags"))
-        changed = {(output.ref.bucket_role, output.ref.key) for output in outputs}
-        for prepared in generation.formats:
-            for ref in prepared.referenced_objects:
-                if (ref.bucket_role, ref.key) not in changed:
-                    observed = store.stat(ref)
-                    if (
-                        observed is None
-                        or observed.size != ref.size
-                        or observed.etag != prior_etags.get(f"{ref.bucket_role}/{ref.key}")
-                    ):
-                        raise StateError("An unchanged public dependency changed before replay")
-        for ref in generation.bootstrap_objects:
-            if (ref.bucket_role, ref.key) not in changed:
-                observed = store.download(ref, root / "verified-bootstrap")
-                if observed.etag != prior_etags.get(f"{ref.bucket_role}/{ref.key}"):
-                    raise StateError("An unchanged bootstrap dependency changed before replay")
-        journal, _ = state.read_journal(store, frozen)
-        writes = state.mapping(journal["writes"])
-        count = 0
-        for ordinal, output in enumerate(outputs):
-            state.check_owner(store, ownership)
-            record = state.mapping(writes.get(str(ordinal), {}))
-            if record.get("status") == "ack":
-                observed = (
-                    store.download(output.ref, root / "verified-bootstrap")
-                    if output.ref in generation.bootstrap_objects
-                    else store.stat(output.ref)
-                )
-                if (
-                    record.get("sha256") != output.ref.sha256
-                    or observed is None
-                    or observed.size != output.ref.size
-                    or observed.etag != record.get("etag")
-                ):
-                    raise StateError("Acknowledged public object changed")
-                continue
-            if record and record.get("status") != "retry":
-                raise StateError("Unresolved write intent requires stopped-owner recovery")
-            state.journal_write(
-                store,
-                ownership,
-                frozen,
-                ordinal,
-                {
-                    "status": "intent",
-                    "ref": json_value(output.ref),
-                    "mode": output.mode,
-                    "expected_etag": output.expected_etag,
-                    "owner_nonce": ownership.owner_nonce,
-                },
-            )
-            state.check_owner(store, ownership)
-            if output.ref.bucket_role == "apt" and output.ref.object_class == "entry":
-                state.check_expiry(generation, clock())
-            receipt = (
-                store.create(output.ref, output.local_path)
-                if output.mode == "create"
-                else store.replace(
-                    output.ref, output.local_path, expected_etag=output.expected_etag or ""
-                )
-            )
-            observed = store.download(output.ref, root / "verified-write")
-            if (
-                observed.etag != receipt.etag
-                or receipt.sha256 != output.ref.sha256
-                or receipt.size != output.ref.size
-            ):
-                raise StateError("Write acknowledgement differs from verified public bytes")
-            state.journal_write(
-                store,
-                ownership,
-                frozen,
-                ordinal,
-                {
-                    "status": "ack",
-                    "etag": observed.etag,
-                    "sha256": output.ref.sha256,
-                },
-            )
-            count += 1
-        state.check_expiry(generation, clock())
-        state.complete(store, ownership, frozen, generation, clock=clock)
-        state.release(store, ownership)
-        return RunResult(generation.id, True, count)
+def _write(store: Store, output: OutputObject) -> None:
+    """Replace published entries conditionally. Overwrite unreferenced leftovers of a failed run."""
+    if output.mode == "replace":
+        store.replace(output.ref, output.local_path, expected_etag=output.expected_etag or "")
+        return
+    observed = store.stat(output.ref)
+    if observed is None:
+        store.create(output.ref, output.local_path)
+    else:
+        store.replace(output.ref, output.local_path, expected_etag=observed.etag)
+
+
+def _size(size: int) -> str:
+    if size >= 1_000_000:
+        return f"{size / 1_000_000:.0f} MB"
+    return f"{size / 1_000:.0f} KB" if size >= 1_000 else f"{size} B"
+
+
+def _listing(name: str, refs: Sequence[ObjectRef]) -> list[str]:
+    """Name each object and its size in key order, with Flatpak `objects/` as one line."""
+    lines: dict[str, str] = {}
+    objects = [ref for ref in refs if name == "flatpak" and ref.key.startswith("objects/")]
+    for ref in refs:
+        if ref not in objects:
+            lines[ref.key] = f"{ref.key} ({_size(ref.size)})"
+    if objects:
+        size = _size(sum(ref.size for ref in objects))
+        lines["objects/"] = f"objects/ {plural(len(objects), 'file')} ({size})"
+    return [f"  {lines[key]}" for key in sorted(lines)]
+
+
+def _duration(seconds: float) -> str:
+    minutes, seconds = divmod(round(seconds), 60)
+    return f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
+
+
+def _unchanged(published: Published) -> PreparedFormat:
+    return PreparedFormat(published.format, published.retained, (), published.retained.objects)
 
 
 def reconcile(
@@ -277,220 +230,225 @@ def reconcile(
     store: Store,
     runtime: Runtime,
     now: datetime,
-    clock: Callable[[], datetime] | None = None,
+    report: Report = quiet,
+    scan: discovery.CompleteScan | None = None,
 ) -> RunResult:
     now = utc_now(lambda: now)
-    names = tuple(sorted(policy.storage.public))
-    if not names:
+    if not policy.storage.public:
         raise ValueError("Publication needs explicit public destinations")
-    if policy.storage.backend == "r2":
-        policy.require_remote(names)
-    ownership = state.acquire(store, owner=f"local/CI:{os.getpid()}:{uuid.uuid4().hex}")
+    names = sorted(policy.storage.public)
+    lock = state.acquire(store, policy.storage.public, now=now)
+    for name in names:
+        step(report, name, "locked")
+    try:
+        result = _reconcile(
+            config, policy, store=store, runtime=runtime, now=now, report=report, scan=scan
+        )
+    except BaseException:
+        with contextlib.suppress(Exception):
+            state.release(store, lock)
+            for name in names:
+                step(report, name, "unlocked")
+        raise
+    state.release(store, lock)
+    for name in names:
+        step(report, name, "unlocked")
+    return result
+
+
+def inspect_new(
+    name: str,
+    changed: Sequence[discovery.DiscoveredAsset],
+    *,
+    policy: FormatPolicy,
+    runtime: Runtime,
+    out: Path,
+    report: Report = quiet,
+) -> list[InspectedAsset]:
+    """Download, verify, and inspect new assets. Skip an unsupported asset with one line."""
+    adapter = _adapter(name)
+    inspected: list[InspectedAsset] = []
+    for index, item in enumerate(changed):
+        if item.checksum is None:
+            raise StateError("Changed input lacks a verified checksum")
+        verified = discovery.verify_asset(
+            item.source, item.checksum, runtime=runtime, out=out.with_name(f"{name}-{index}-asset")
+        )
+        try:
+            inspected.append(
+                adapter.inspect(
+                    verified,
+                    policy=policy,
+                    runtime=runtime,
+                    out=out.with_name(f"{name}-{index}-inspect"),
+                )
+            )
+        except UnsupportedAsset as error:
+            step(report, name, f"skipped {error}")
+    return inspected
+
+
+def _reconcile(
+    config: Config,
+    policy: Policy,
+    *,
+    store: Store,
+    runtime: Runtime,
+    now: datetime,
+    report: Report,
+    scan: discovery.CompleteScan | None,
+) -> RunResult:
+    names = tuple(sorted(policy.storage.public))
+    fingerprint = policy.expected_signing_fingerprint
+    published = {name: state.read(store, name) for name in names}
+    for item in published.values():
+        value = item.retained.metadata.get("fingerprint")
+        if value is not None and value != fingerprint:
+            raise StateError(
+                "Native signing fingerprint changes need a key rotation, which is not supported"
+            )
+    policies = {name: config.format_policy(name) for name in names}
+    if scan is None:
+        scan = discovery.scan_releases(config, runtime=runtime, report=report)
+    changed = new_assets(scan, published)
+    missing_bootstrap: set[str] = (
+        {name for name in names if len(published[name].bootstrap) != 2}
+        if fingerprint is not None
+        else set()
+    )
     with tempfile.TemporaryDirectory(prefix="hd-reconcile-", dir=runtime.root) as temporary:
         root = Path(temporary)
-        committed = state.load_committed(store, ownership, out=root / "committed")
-        if committed.signing_fingerprint not in (None, policy.expected_signing_fingerprint):
-            raise StateError("Signing fingerprint changes require explicit rotation approval")
-        for retained_format in committed.formats:
-            fingerprint = retained_format.metadata.get("fingerprint")
-            if fingerprint is not None and fingerprint != policy.expected_signing_fingerprint:
-                raise StateError(
-                    "Native signing fingerprint changes require explicit rotation approval"
-                )
-        scan = discovery.scan_releases(config, runtime=runtime, previous=committed.discovery)
-        retained = {item.format: item for item in committed.formats}
-        if retained.keys() - set(names):
-            raise StateError("Publication cannot discard previously committed formats")
-        new_formats = set(names) - retained.keys()
-        for name in names:
-            retained.setdefault(name, RetainedFormat(name, None, (), (), {}, ()))
-        policies = {name: policy.format_policy(config, name) for name in names}
-        changed: dict[str, list[discovery.DiscoveredAsset]] = {name: [] for name in names}
-        candidates = (
-            *scan.changed,
-            *(item for item in scan.unchanged if _format(item.source.filename) in new_formats),
-        )
-        for item in candidates:
-            name = _format(item.source.filename)
-            if name in changed and item.checksum is not None:
-                changed[name].append(item)
-        renew: set[str] = set()
-        if "apt" in retained and retained["apt"].metadata:
-            expiry = retained["apt"].metadata.get("expires_at")
-            if not isinstance(expiry, str):
-                raise StateError("Committed APT state lacks expiry")
-            if datetime.fromisoformat(expiry) - now <= timedelta(
-                seconds=policies["apt"].renewal_seconds
-            ):
-                renew.add("apt")
-        config_digest, policy_digest = _hash(config), _hash(policy)
-        same_policy = (
-            committed.config_digest == config_digest and committed.policy_digest == policy_digest
-        )
-        missing_bootstrap: set[str] = (
-            set(names) - {ref.bucket_role for ref in committed.bootstrap_objects}
-            if policy.expected_signing_fingerprint is not None
-            else set()
-        )
-        if (
-            not missing_bootstrap
-            and not any(changed.values())
-            and not renew
-            and same_policy
-            and scan.state == committed.discovery
-        ):
-            state.release(store, ownership)
-            return RunResult(committed.generation_id, False, 0, len(scan.pending))
+        inspected = {
+            name: inspect_new(
+                name,
+                changed[name],
+                policy=policies[name],
+                runtime=runtime,
+                out=root / name,
+                report=report,
+            )
+            for name in names
+        }
+        if not missing_bootstrap and not any(inspected.values()):
+            for name in names:
+                step(report, name, "unchanged")
+            return RunResult(False, 0, len(scan.pending))
+        if fingerprint is None:
+            raise ValueError("Publication requires the expected signing fingerprint")
         prepared: list[PreparedFormat] = []
-        bootstrap_outputs: tuple[OutputObject, ...] = ()
-        bootstrap_objects = committed.bootstrap_objects
-        needed = {name for name in names if changed[name]} | renew
-        for name in names:
-            if retained[name].metadata:
-                _adapter(name).validate_retained(
-                    retained[name], policy=policies[name], runtime=runtime
-                )
-        if needed or missing_bootstrap:
-            if policy.expected_signing_fingerprint is None:
-                raise ValueError("Publication requires the expected signing fingerprint")
-            with signing_session(
-                runtime, expected_fingerprint=policy.expected_signing_fingerprint
-            ) as signer:
-                for name in names:
-                    if name not in needed:
-                        expiry = retained[name].metadata.get("expires_at")
-                        prepared.append(
-                            PreparedFormat(
-                                name,
-                                retained[name],
-                                (),
-                                retained[name].objects,
-                                expiry if isinstance(expiry, str) else None,
-                            )
-                        )
-                        continue
-                    adapter = _adapter(name)
-                    additions: list[AdmittedAsset] = []
-                    for index, item in enumerate(changed[name]):
-                        if item.checksum is None:
-                            raise StateError("Changed input lacks a verified checksum")
-                        verified = discovery.verify_asset(
-                            item.source,
-                            item.checksum,
-                            runtime=runtime,
-                            out=root / f"{name}-{index}-asset",
-                        )
-                        inspected = adapter.inspect(
-                            verified,
-                            policy=policies[name],
-                            runtime=runtime,
-                            out=root / f"{name}-{index}-inspect",
-                        )
-                        accepted = admission.admit(
-                            inspected,
-                            (*retained[name].accepted_history, *additions),
-                            compare=adapter.compare,
-                            policy=policies[name],
-                            runtime=runtime,
-                        )
-                        if (
-                            accepted not in retained[name].accepted_history
-                            and accepted not in additions
-                        ):
-                            additions.append(accepted)
-                    if not additions and name not in renew:
-                        expiry = retained[name].metadata.get("expires_at")
-                        prepared.append(
-                            PreparedFormat(
-                                name,
-                                retained[name],
-                                (),
-                                retained[name].objects,
-                                expiry if isinstance(expiry, str) else None,
-                            )
-                        )
-                        continue
-                    result = adapter.prepare(
-                        additions,
-                        retained[name],
+        with signing_session(runtime, expected_fingerprint=fingerprint) as signer:
+            for name in names:
+                if not inspected[name]:
+                    step(
+                        report,
+                        name,
+                        "adding public keys" if name in missing_bootstrap else "unchanged",
+                    )
+                    prepared.append(_unchanged(published[name]))
+                    continue
+                step(report, name, f"preparing {plural(len(inspected[name]), 'new package')}")
+                prepared.append(
+                    _prepare(
+                        name,
+                        inspected[name],
+                        state.materialise(store, published[name], out=root / f"{name}-published"),
                         policy=policies[name],
                         runtime=runtime,
                         signer=signer,
                         now=now,
-                        out=root / f"{name}-prepared",
-                    )
-                    prior_etags = state.mapping(retained[name].metadata.get("etags", {}))
-                    prior_keys = {ref.key for ref in retained[name].objects}
-                    for output in result.outputs:
-                        if output.ref.key in prior_keys:
-                            if output.mode != "replace" or output.expected_etag != prior_etags.get(
-                                output.ref.key
-                            ):
-                                raise StateError(
-                                    "Adapter changed the observed prior write precondition"
-                                )
-                        elif output.mode != "create":
-                            raise StateError("A new object requires conditional creation")
-                    if result.retained.metadata:
-                        result = replace(
-                            result,
-                            retained=replace(
-                                result.retained,
-                                metadata={**result.retained.metadata, "etags": dict(prior_etags)},
-                            ),
-                        )
-                    adapter.validate_prepared(
-                        result, policy=policies[name], runtime=runtime, now=now
-                    )
-                    prepared.append(result)
-                bootstrap_outputs, bootstrap_objects = prepare_bootstrap(
-                    prepared, committed, signer, out=root / "bootstrap"
-                )
-        else:
-            for name in names:
-                expiry = retained[name].metadata.get("expires_at")
-                prepared.append(
-                    PreparedFormat(
-                        name,
-                        retained[name],
-                        (),
-                        retained[name].objects,
-                        expiry if isinstance(expiry, str) else None,
+                        out=root / name,
                     )
                 )
-        inventories = {
-            item.format: json_value(
-                public_inventory(
-                    item.retained.accepted_history,
-                    (
-                        *item.referenced_objects,
-                        *(ref for ref in bootstrap_objects if ref.bucket_role == item.format),
-                    ),
-                )
+                if prepared[-1].outputs:
+                    step(report, name, "signed metadata")
+            bootstrap_outputs, bootstrap_objects = prepare_bootstrap(
+                prepared,
+                tuple(ref for item in published.values() for ref in item.bootstrap),
+                signer,
+                out=root / "bootstrap",
             )
-            for item in prepared
-        }
-        generation = PreparedGeneration(
-            uuid.uuid4().hex,
-            committed.generation_id,
-            committed.completion_etag,
-            ownership.owner_nonce,
-            config_digest,
-            policy_digest,
-            {
-                "state": json_value(scan.state),
-                "policies": json_value(policies),
-                "inventory_etags": json_value(committed.inventory_etags),
-            },
-            tuple(prepared),
-            inventories,
-            state.EMPTY_HASH,
-            bootstrap_outputs,
-            bootstrap_objects,
-            policy.expected_signing_fingerprint,
+        count = 0
+        packages = 0
+        repositories: list[str] = []
+        for item in prepared:
+            current = published[item.format]
+            bootstrap = tuple(ref for ref in bootstrap_objects if ref.bucket_role == item.format)
+            data = state.inventory(item, bootstrap, current)
+            outputs = (
+                *(output for output in bootstrap_outputs if output.ref.bucket_role == item.format),
+                *item.outputs,
+            )
+            if not outputs and hashlib.sha256(data).hexdigest() == current.sha256:
+                continue
+            batch = [
+                output
+                for output in outputs
+                if output.mode == "create" and output.ref.object_class != "entry"
+            ]
+            if batch:
+                size = sum(output.ref.size for output in batch)
+                step(
+                    report, item.format, f"uploading {plural(len(batch), 'object')} ({_size(size)})"
+                )
+                for line in _listing(item.format, [output.ref for output in batch]):
+                    step(report, item.format, line)
+                started = time.monotonic()
+                store.upload(
+                    batch, progress=lambda line, name=item.format: step(report, name, line)
+                )
+                elapsed = _duration(time.monotonic() - started)
+                step(report, item.format, f"uploaded {plural(len(batch), 'object')} in {elapsed}")
+                count += len(batch)
+            for output in outputs:
+                if output in batch:
+                    continue
+                step(report, item.format, f"  {output.ref.key} ({_size(output.ref.size)})")
+                _write(store, output)
+                count += 1
+            state.write_inventory(store, current, data)
+            step(report, item.format, f"wrote {state.INVENTORY_KEY}")
+            count += 1
+            repositories.append(item.format)
+            packages += len(item.retained.accepted_history) - len(current.retained.accepted_history)
+        return RunResult(True, count, len(scan.pending), packages, tuple(repositories))
+
+
+def _prepare(
+    name: str,
+    inspected_assets: Sequence[InspectedAsset],
+    retained: RetainedFormat,
+    *,
+    policy: FormatPolicy,
+    runtime: Runtime,
+    signer: SigningSession,
+    now: datetime,
+    out: Path,
+) -> PreparedFormat:
+    adapter = _adapter(name)
+    adapter.validate_retained(retained, policy=policy, runtime=runtime)
+    additions: list[AdmittedAsset] = []
+    for inspected in inspected_assets:
+        accepted = admission.admit(
+            inspected,
+            (*retained.accepted_history, *additions),
+            compare=adapter.compare,
+            policy=policy,
+            runtime=runtime,
         )
-        frozen = state.freeze(store, ownership, generation)
-        result = replay(
-            frozen, store=store, ownership=ownership, runtime=runtime, now=now, clock=clock
-        )
-        return replace(result, pending_assets=len(scan.pending))
+        if accepted not in retained.accepted_history and accepted not in additions:
+            additions.append(accepted)
+    if not additions and not stale_entries(retained):
+        return PreparedFormat(name, retained, (), retained.objects)
+    result = adapter.prepare(
+        additions, retained, policy=policy, runtime=runtime, signer=signer, now=now, out=out
+    )
+    etags = state.mapping(retained.metadata.get("etags", {}))
+    prior = {ref.key for ref in retained.objects}
+    for output in result.outputs:
+        if output.ref.key in prior:
+            if output.mode != "replace" or output.expected_etag != etags.get(output.ref.key):
+                raise StateError("Adapter changed the observed prior write precondition")
+        elif output.mode != "create":
+            raise StateError("A new object requires conditional creation")
+    adapter.validate_prepared(result, policy=policy, runtime=runtime)
+    return result

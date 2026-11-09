@@ -1,4 +1,4 @@
-"""Recorded GitHub transport, real adapters, durable storage and HTTP clients."""
+"""Recorded GitHub transport, real adapters, locked storage and HTTP clients."""
 
 from __future__ import annotations
 
@@ -9,25 +9,24 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Generator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import CompletedProcess
+from typing import cast
 from unittest.mock import patch
 from urllib.request import urlopen
 
 import pytest
 
-from haberdasher import cli, discovery, publish, state
+from haberdasher import cli, publish, state
 from haberdasher.config import (
     Config,
-    FormatPolicy,
     Policy,
-    RuntimePolicy,
     StoragePolicy,
-    TrustPolicy,
 )
 from haberdasher.core import (
     ObjectRef,
@@ -35,18 +34,46 @@ from haberdasher.core import (
     RetainedFormat,
     VerifiedAsset,
     WriteReceipt,
-    canonical_json,
-    json_value,
     sha256_file,
 )
 from haberdasher.runtime import Runtime, private_workspace
 from haberdasher.signing import signing_session
 from haberdasher.storage import LocalStore
 from tests.native.fixtures import apk, apt, arch, flatpak, rpm
-from tests.native.test_flatpak import add_remotes, client_run, installed
+from tests.native.test_flatpak import (
+    add_remotes,
+    client_run,
+    installed,
+    payload_objects,
+    published_remote,
+)
 from tests.support.http import serve
-from tests.support.keys import DisposableKey, disposable_key
+from tests.support.keys import DisposableKey, disposable_key, run
 from tests.support.native import NativeClient
+
+
+def printed_result(output: str) -> publish.RunResult:
+    """Rebuild the run result from the publish progress lines and summary."""
+    lines = output.splitlines()
+    assert lines and "{" not in output
+    objects = 0
+    uploading = False
+    for line in lines:
+        words = line.split()
+        if words[1:2] == ["uploading"]:
+            uploading = True
+        elif words[1:2] == ["uploaded"]:
+            uploading = False
+            objects += int(words[2])
+        elif line.endswith(f"wrote {state.INVENTORY_KEY}"):
+            uploading = False
+            objects += 1
+        elif not uploading and line.startswith(f"{words[0]:<5}   "):
+            objects += 1
+    pending = next((int(line.split()[1]) for line in lines if line.startswith("Skipped ")), 0)
+    changed = lines[-1].startswith("Published ")
+    assert changed or lines[-1].startswith("Nothing changed in ")
+    return publish.RunResult(changed, objects, pending)
 
 
 class RecordedGitHub:
@@ -65,6 +92,7 @@ class RecordedGitHub:
         }
         self.visible = len(self.assets) - 1
         self.checksummed = self.visible
+        self.extras: dict[str, bytes] = {}
         self.downloads: list[str] = []
         self.native: list[tuple[str, ...]] = []
         self.inspected: set[str] = set()
@@ -82,28 +110,33 @@ class RecordedGitHub:
             asset.source.filename: self.contents[asset.source.filename]
             for asset in self.assets[: self.visible]
         }
+        contents.update(self.extras)
         sums = "".join(
             f"{asset.sha256}  {asset.source.filename}\n"
             for asset in self.assets[: self.checksummed]
         ).encode()
+        sums += "".join(
+            f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in self.extras.items()
+        ).encode()
         contents["SHA256SUMS"] = sums
         rows: list[dict[str, object]] = []
         for index, (name, data) in enumerate(contents.items(), 1):
-            rows.append(
-                {
-                    "id": 999 if name == "SHA256SUMS" else index,
-                    "name": name,
-                    "size": len(data),
-                    "state": "uploaded",
-                    "updated_at": "2026-01-01T00:00:00Z",
-                    "browser_download_url": f"https://example.invalid/{name}",
-                    "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
-                }
-            )
+            row: dict[str, object] = {
+                "id": 999 if name == "SHA256SUMS" else index,
+                "name": name,
+                "size": len(data),
+                "state": "uploaded",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "browser_download_url": f"https://example.invalid/{name}",
+            }
+            # A late upload has neither a checksum entry nor a GitHub digest, so it stays pending.
+            if name == "SHA256SUMS" or index <= self.checksummed:
+                row["digest"] = "sha256:" + hashlib.sha256(data).hexdigest()
+            rows.append(row)
         return rows, contents
 
     def record_native(self, argv: Sequence[str], input: bytes | None = None) -> None:
-        if argv[0] == "gpgconf":
+        if argv[0] == "gpgconf" or (argv[0] == "gpg" and "--show-keys" in argv):
             return
         self.native.append(tuple(argv))
         assert not self.forbid_native, f"No-op ran native command: {argv}"
@@ -230,7 +263,7 @@ assert not any(k.startswith(('HD_','GH_','GITHUB_','AWS_','RCLONE_')) for k in o
 data=sys.stdin.buffer.read() if {command!r}=='haberdasher-flatpak-metadata' else None
 with (Path(__file__).parent/'native.jsonl').open('a') as log:
     log.write(json.dumps({{'argv':[{command!r},*sys.argv[1:]],'input':data.decode() if data else None}})+'\\n')
-if {recorded.forbid_native!r} and {command!r}!='gpgconf': sys.exit(88)
+if {recorded.forbid_native!r} and {command!r}!='gpgconf' and '--show-keys' not in sys.argv: sys.exit(88)
 if data is not None:
     sys.exit(subprocess.run([{target!r},*sys.argv[1:]],input=data).returncode)
 os.execv({target!r},[{target!r},*sys.argv[1:]])
@@ -239,6 +272,7 @@ os.execv({target!r},[{target!r},*sys.argv[1:]])
     path = str(shim) + ":" + os.environ["HABERDASHER_TOOL_PATH"]
     result = subprocess.run(
         [sys.executable, "-m", "haberdasher", *arguments],
+        cwd=root / "work",
         env={
             "PATH": path,
             "HABERDASHER_TOOL_PATH": path,
@@ -259,31 +293,51 @@ os.execv({target!r},[{target!r},*sys.argv[1:]])
     for line in (shim / "native.jsonl").read_text().splitlines():
         event = json.loads(line)
         recorded.record_native(event["argv"], event["input"].encode() if event["input"] else None)
-    return publish.RunResult(**json.loads(result.stdout))
+    return printed_result(result.stdout.decode())
 
 
 class InterruptedStore(LocalStore):
-    interrupt = False
+    """Fail a run after a set number of its entry writes, once packages are uploaded."""
 
     def __init__(self, policy: StoragePolicy) -> None:
         super().__init__(policy)
         self.downloads: list[ObjectRef] = []
+        self.writes: list[ObjectRef] = []
+        self.entries_before_failure: int | None = None
+        self.entries = 0
+
+    def interrupt_after(self, entries: int) -> None:
+        self.entries_before_failure = entries
+        self.entries = 0
 
     def download(self, ref: ObjectRef, destination: Path) -> ObjectStat:
         self.downloads.append(ref)
         return super().download(ref, destination)
 
+    def _check(self, ref: ObjectRef) -> None:
+        self.writes.append(ref)
+        if ref.object_class != "entry":
+            return
+        if self.entries == self.entries_before_failure:
+            self.entries_before_failure = None
+            raise RuntimeError(f"synthetic interruption after {self.entries} entry writes")
+        self.entries += 1
+
     def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
-        if self.interrupt and ref.bucket_role != "private":
-            self.interrupt = False
-            raise RuntimeError("synthetic interruption before public write")
+        self._check(ref)
         return super().create(ref, source)
 
     def replace(self, ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
-        if self.interrupt and ref.bucket_role != "private":
-            self.interrupt = False
-            raise RuntimeError("synthetic interruption before public write")
+        self._check(ref)
         return super().replace(ref, source, expected_etag=expected_etag)
+
+
+def snapshot(root: Path) -> dict[Path, tuple[bytes, int, int]]:
+    return {
+        path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
 
 
 def assets_for(name: str, runtime: Runtime) -> list[VerifiedAsset]:
@@ -464,24 +518,34 @@ def native_client(
             raise ValueError(name)
 
 
-def committed(store: LocalStore, runtime: Runtime) -> RetainedFormat:
-    owner = state.acquire(store, owner="test-read")
-    result = state.load_committed(store, owner, out=runtime.root / "restored")
-    state.release(store, owner)
-    assert len(result.formats) == 1
-    assert result.signing_fingerprint is not None
-    assert {ref.key for ref in result.bootstrap_objects} == {
-        "keys/haberdasher.asc",
-        "keys/haberdasher.gpg",
-    }
-    for ref in (*result.formats[0].objects, *result.bootstrap_objects):
+def strings(value: object) -> Generator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in cast(dict[str, object], value).values():
+            yield from strings(item)
+    elif isinstance(value, list):
+        for item in cast(list[object], value):
+            yield from strings(item)
+
+
+def committed(store: LocalStore, runtime: Runtime, name: str) -> RetainedFormat:
+    current = store.read(name, state.INVENTORY_KEY, max_bytes=state.MAX_INVENTORY_BYTES)
+    assert current is not None
+    roots = (tempfile.gettempdir(), "/tmp/")
+    assert not [item for item in strings(json.loads(current[0])) if any(r in item for r in roots)]
+    published = state.read(store, name)
+    assert {ref.key for ref in published.bootstrap} == set(state.BOOTSTRAP_KEYS)
+    assert all(ref.key != state.LOCK_KEY for ref in published.objects)
+    retained = state.materialise(store, published, out=runtime.root / "restored")
+    for ref in published.objects:
         store.download(ref, runtime.root / "checked-object")
-    return result.formats[0]
+    return retained
 
 
 @pytest.mark.parametrize("name", ["apt", "rpm", "arch", "apk", "flatpak"])
-@pytest.mark.parametrize("interrupted", [False, True], ids=["cli", "recovery"])
-def test_recorded_pipeline_and_frozen_recovery(
+@pytest.mark.parametrize("interrupted", [False, True], ids=["cli", "rerun"])
+def test_recorded_pipeline_and_full_rerun(
     name: str,
     interrupted: bool,
     monkeypatch: pytest.MonkeyPatch,
@@ -492,9 +556,8 @@ def test_recorded_pipeline_and_frozen_recovery(
         assets = assets_for(name, fixtures)
         recorded = RecordedGitHub(assets)
         local_root = fixtures.root / "store"
-        storage = StoragePolicy(
-            "local", str(local_root / "private"), {name: str(local_root / "public" / name)}
-        )
+        storage = StoragePolicy("local", {name: str(local_root / "public" / name)})
+        bucket = Path(storage.public[name])
         store = InterruptedStore(storage)
         (fixtures.root / "http").mkdir()
         runtime_commits = ("", "")
@@ -506,65 +569,13 @@ def test_recorded_pipeline_and_frozen_recovery(
                     fixtures, fixtures.root / "http", signer.fingerprint, signer.gnupghome
                 )
         http = stack.enter_context(serve(fixtures.root / "http"))
-        format_policy = apt.policy() if name == "apt" else FormatPolicy(name)
-        if name == "flatpak":
-            format_policy = replace(
-                format_policy,
-                trust=TrustPolicy(
-                    approved=True,
-                    approval_reference="synthetic-only",
-                    source_owner="wimpysworld",
-                    refs=(flatpak.REF,),
-                    runtime=RuntimePolicy(
-                        http.url("runtime-repo"),
-                        key.fingerprint,
-                        "",
-                        "stable",
-                        "x86_64",
-                        "provider",
-                        (flatpak.RREF,),
-                        (flatpak.EREF,),
-                    ),
-                ),
-            )
-        config = Config(
-            ("wimpysworld/fixture",), {name: replace(format_policy, trust=TrustPolicy())}
-        )
-        policy = Policy(
-            storage,
-            expected_signing_fingerprint=key.fingerprint,
-            clients={name: format_policy.trust},
-        )
+        config = Config(("wimpysworld/fixture",))
+        policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
         monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
-        config_file, policy_file = fixtures.root / "config.json", fixtures.root / "policy.json"
-        configured = {"architectures": json_value(format_policy.architectures)}
-        if name == "apt":
-            configured["suite"] = format_policy.suite
-        config_file.write_bytes(
-            canonical_json({"sources": config.sources, "formats": {name: configured}})
-        )
-        client_policy = {
-            key: value
-            for key, value in state.mapping(json_value(format_policy.trust)).items()
-            if value is not None
-        }
-        policy_file.write_bytes(
-            canonical_json(
-                {
-                    "storage": storage,
-                    "expected_signing_fingerprint": key.fingerprint,
-                    "clients": {name: client_policy},
-                }
-            )
-        )
-        arguments = [
-            "--local-root",
-            str(local_root),
-            "--format",
-            name,
-            "--policy-file",
-            str(policy_file),
-        ]
+        (fixtures.root / "work").mkdir()
+        config_file = fixtures.root / "work/haberdasher.yaml"
+        config_file.write_text("sources: [wimpysworld/fixture]\n")
+        arguments = ["publish", "--local-root", str(local_root)]
 
         @contextmanager
         def recorded_workspace() -> Generator[Runtime]:
@@ -578,7 +589,7 @@ def test_recorded_pipeline_and_frozen_recovery(
                     recorded,
                     fixtures.root,
                     key,
-                    ["--apply", "--config", str(config_file), *arguments],
+                    arguments,
                 )
             with private_workspace() as runtime:
                 recorded.bind(runtime)
@@ -586,19 +597,38 @@ def test_recorded_pipeline_and_frozen_recovery(
 
         def serve_generation(number: int) -> None:
             public = fixtures.root / "http" / name
-            shutil.copytree(Path(storage.public[name]), public, dirs_exist_ok=True)
+            shutil.copytree(bucket, public, dirs_exist_ok=True)
             http.set_generation_mtime(
                 [path for path in public.rglob("*") if path.is_file()], number
             )
 
+        def unchanged_rerun() -> None:
+            before = snapshot(bucket)
+            recorded.downloads.clear()
+            recorded.native.clear()
+            recorded.inspected.clear()
+            recorded.forbid_native = True
+            store.downloads.clear()
+            store.writes.clear()
+            result = reconcile()
+            assert not result.changed and result.published_objects == 0
+            assert recorded.downloads == ["SHA256SUMS"] and not recorded.native
+            assert not store.downloads
+            if interrupted:
+                assert [ref.key for ref in store.writes] == [state.LOCK_KEY]
+            assert snapshot(bucket) == before
+            recorded.forbid_native = False
+
         if interrupted:
+            monkeypatch.chdir(fixtures.root / "work")
             with patch.object(cli, "private_workspace", recorded_workspace):
-                assert cli.main(["--apply", "--config", str(config_file), *arguments]) == 0
-            first = publish.RunResult(**json.loads(capsys.readouterr().out))
+                assert cli.main(arguments) == 0
+            first = printed_result(capsys.readouterr().out)
         else:
             first = reconcile()
         assert first.changed and first.published_objects > 0
-        bootstrap_paths = sorted((Path(storage.public[name]) / "keys").iterdir())
+        assert not (bucket / state.LOCK_KEY).exists()
+        bootstrap_paths = sorted((bucket / "keys").iterdir())
         bootstrap_stats = {path: (path.read_bytes(), path.stat()) for path in bootstrap_paths}
         assert recorded.downloads == [
             "SHA256SUMS",
@@ -609,7 +639,7 @@ def test_recorded_pipeline_and_frozen_recovery(
             asset.local_path.unlink()
         serve_generation(1)
         with private_workspace() as runtime:
-            retained = committed(store, runtime)
+            retained = committed(store, runtime, name)
         check = native_client(
             name,
             fixtures,
@@ -620,150 +650,53 @@ def test_recorded_pipeline_and_frozen_recovery(
             runtime_commits,
         )
         check(retained, 1)
-        recorded.downloads.clear()
-        recorded.native.clear()
-        recorded.inspected.clear()
-        recorded.forbid_native = True
-        store.downloads.clear()
-        unchanged = reconcile()
-        assert not unchanged.changed and unchanged.published_objects == 0
-        assert recorded.downloads == ["SHA256SUMS"] and not recorded.native
-        package_hashes = {ref.sha256 for ref in retained.objects if ref.object_class == "package"}
-        assert not any(ref.sha256 in package_hashes for ref in store.downloads)
-        recorded.forbid_native = False
+        unchanged_rerun()
         recorded.visible += 1
         recorded.downloads.clear()
         pending = reconcile()
-        assert pending.pending_assets == 1
+        assert pending.pending_assets == 1 and not pending.changed
         assert recorded.downloads == ["SHA256SUMS"] and not recorded.inspected
         recorded.checksummed += 1
         recorded.downloads.clear()
         recorded.native.clear()
-        prior = state.read_control(store, "completed.json")
         if interrupted:
-            store.interrupt = True
-            with pytest.raises(RuntimeError, match="synthetic interruption"):
-                reconcile()
-            assert state.read_control(store, "completed.json") == prior
+            # Each rerun stops after one more entry write than the last, so that a full rerun
+            # recovers from an interruption before and after every entry write of the run.
+            entries = 0
+            while True:
+                inventory = (bucket / state.INVENTORY_KEY).read_bytes()
+                store.writes.clear()
+                store.interrupt_after(entries)
+                try:
+                    second = reconcile()
+                    break
+                except RuntimeError as error:
+                    assert str(error) == f"synthetic interruption after {entries} entry writes"
+                assert (bucket / state.INVENTORY_KEY).read_bytes() == inventory
+                assert not (bucket / state.LOCK_KEY).exists()
+                leftovers = {
+                    ref.key for ref in store.writes if ref.object_class in {"package", "dependency"}
+                }
+                assert leftovers and all((bucket / key).exists() for key in leftovers)
+                assert recorded.downloads == ["SHA256SUMS", assets[-1].source.filename]
+                recorded.downloads.clear()
+                recorded.inspected.clear()
+                entries += 1
+            store.entries_before_failure = None
+            assert entries == sum(ref.object_class == "entry" for ref in store.writes) > 0
         else:
             second = reconcile()
-            assert second.changed and second.pending_assets == 0
+        assert second.changed and second.pending_assets == 0
         assert recorded.downloads == ["SHA256SUMS", assets[-1].source.filename]
-        assert len(recorded.inspected) == 1
         assert {Path(path).name for path in recorded.inspected} == {f"{name}-0-asset"}
-        if not interrupted:
-            with private_workspace() as runtime:
-                restored = committed(store, runtime)
-            assert restored.accepted_history[:-1] == retained.accepted_history
-            assert all(
-                not asset.inspected.verified.local_path.exists()
-                for asset in restored.accepted_history
-            )
-            for path, (data, stat) in bootstrap_stats.items():
-                assert (path.read_bytes(), path.stat()) == (data, stat)
-            serve_generation(2)
-            check(restored, 2)
-            fresh = native_client(
-                name,
-                fixtures,
-                "fresh",
-                http.url(name),
-                key,
-                http.url("runtime-repo"),
-                runtime_commits,
-            )
-            fresh(restored, 2)
-            recorded.downloads.clear()
-            recorded.native.clear()
-            recorded.inspected.clear()
-            recorded.forbid_native = True
-            unchanged = reconcile()
-            assert not unchanged.changed and unchanged.published_objects == 0
-            assert recorded.downloads == ["SHA256SUMS"] and not recorded.native
-            for ref in restored.objects:
-                assert sha256_file(Path(storage.public[name]) / ref.key) == (ref.sha256, ref.size)
-            return
-        frozen = state.pending_generation(store)
-        assert frozen is not None
-        raw_manifest = store.read_private(
-            f"generations/{frozen.id}/manifest.json", max_bytes=state.MAX_CONTROL_BYTES
+        assert not (bucket / state.LOCK_KEY).exists()
+        with private_workspace() as runtime:
+            restored = committed(store, runtime, name)
+        assert len(restored.accepted_history) == len(assets)
+        assert restored.accepted_history[:-1] == retained.accepted_history
+        assert all(
+            not asset.inspected.verified.local_path.exists() for asset in restored.accepted_history
         )
-        assert raw_manifest is not None
-        journal, _ = state.read_journal(store, frozen)
-        outstanding = [
-            int(index)
-            for index, value in state.mapping(journal["writes"]).items()
-            if state.mapping(value)["status"] == "intent"
-        ]
-        assert len(outstanding) == 1
-        current = state.read_control(store, "ownership.json")
-        assert current is not None
-        nonce = str(current[0]["nonce"])
-        for asset in assets:
-            asset.local_path.unlink(missing_ok=True)
-        monkeypatch.delenv("HD_SIGNING_KEY_FILE")
-        with private_workspace() as runtime, ExitStack() as disabled:
-
-            def forbidden(*args: object, **kwargs: object) -> None:
-                raise AssertionError(
-                    "Frozen replay called discovery, inspection, preparation or signing"
-                )
-
-            disabled.enter_context(patch.object(discovery, "scan_releases", forbidden))
-            disabled.enter_context(patch.object(publish, "signing_session", forbidden))
-            for operation in ("inspect", "prepare"):
-                disabled.enter_context(patch(f"haberdasher.formats.{name}.{operation}", forbidden))
-            store = InterruptedStore(storage)
-            evidence = fixtures.root / "recovery.json"
-            evidence.write_bytes(
-                canonical_json(
-                    {
-                        "schema_version": 1,
-                        **state.mapping(
-                            json_value(
-                                state.RecoveryEvidence(
-                                    True,
-                                    True,
-                                    "test process stopped and public request was not sent",
-                                    "fresh-test-runtime",
-                                    tuple(
-                                        state.WriteResolution(index, "not-written")
-                                        for index in outstanding
-                                    ),
-                                )
-                            )
-                        ),
-                    }
-                )
-            )
-            assert (
-                cli.main(
-                    [
-                        "--replay",
-                        frozen.id,
-                        "--recover-owner",
-                        nonce,
-                        "--recovery-evidence",
-                        str(evidence),
-                        *arguments,
-                    ]
-                )
-                == 0
-            )
-            assert json.loads(capsys.readouterr().out)["generation_id"] == frozen.id
-            assert (
-                store.read_private(
-                    f"generations/{frozen.id}/manifest.json", max_bytes=state.MAX_CONTROL_BYTES
-                )
-                == raw_manifest
-            )
-            restored = committed(store, runtime)
-            assert len(restored.accepted_history) == len(assets)
-            assert restored.accepted_history[:-1] == retained.accepted_history
-            assert all(
-                not asset.inspected.verified.local_path.exists()
-                for asset in restored.accepted_history
-            )
         for path, (data, stat) in bootstrap_stats.items():
             assert (path.read_bytes(), path.stat()) == (data, stat)
         serve_generation(2)
@@ -772,127 +705,280 @@ def test_recorded_pipeline_and_frozen_recovery(
             name, fixtures, "fresh", http.url(name), key, http.url("runtime-repo"), runtime_commits
         )
         fresh(restored, 2)
+        assets[-1].local_path.unlink()
+        unchanged_rerun()
+        for ref in restored.objects:
+            assert sha256_file(bucket / ref.key) == (ref.sha256, ref.size)
         requests = http.requests()
         assert any(
             request.status == 200 and request.path.startswith(f"/{name}/") for request in requests
         )
-        for ref in restored.objects:
-            assert sha256_file(Path(storage.public[name]) / ref.key) == (ref.sha256, ref.size)
-        assert not any(
-            "private" in request.path or "generations" in request.path for request in requests
-        )
+        assert not any(state.LOCK_KEY in request.path for request in requests)
+
+
+def signed_upstream_assets(
+    name: str, runtime: Runtime, upstream: DisposableKey
+) -> tuple[list[VerifiedAsset], dict[str, bytes]]:
+    """Release assets that a separate upstream key signed, with a detached .sig for Arch."""
+    with signing_session(
+        upstream.runtime, expected_fingerprint=upstream.fingerprint, key_file=upstream.key_file
+    ) as signer:
+        match name:
+            case "rpm":
+                data = rpm.build(runtime, "hd-proof-data", "1", "dependency-v1", number=1)
+                app = rpm.build(runtime, "hd-proof-app", "1", "application-v1", number=2)
+                return [rpm.upstream_sign(runtime, asset, signer) for asset in (data, app)], {}
+            case "apk":
+                return [
+                    apk.fixture(
+                        runtime, "hd-dependency", "1.0-r0", payload="dependency", signer=signer
+                    ),
+                    apk.fixture(
+                        runtime,
+                        "hd-application",
+                        "1.0-r0",
+                        payload="first",
+                        dependency="hd-dependency",
+                        signer=signer,
+                    ),
+                ], {}
+            case "arch":
+                assets = [
+                    arch.fixture(runtime, "keeper", "1", dependency="updateable>=1"),
+                    arch.fixture(runtime, "updateable", "1"),
+                ]
+                signatures = {
+                    asset.source.filename + ".sig": run(
+                        runtime,
+                        "gpg",
+                        "--homedir",
+                        str(signer.gnupghome),
+                        "--batch",
+                        "--local-user",
+                        signer.fingerprint + "!",
+                        "--detach-sign",
+                        "--output",
+                        "-",
+                        str(asset.local_path),
+                    )
+                    for asset in assets
+                }
+                return assets, signatures
+            case _:
+                raise ValueError(name)
+
+
+@pytest.mark.parametrize("name", ["rpm", "arch", "apk"])
+def test_signed_upstream_publishes_installs_and_reruns(name: str) -> None:
+    with (
+        private_workspace() as fixtures,
+        disposable_key() as key,
+        disposable_key() as upstream,
+        ExitStack() as stack,
+    ):
+        assert key.fingerprint != upstream.fingerprint
+        assets, extras = signed_upstream_assets(name, fixtures, upstream)
+        recorded = RecordedGitHub(assets)
+        recorded.visible = recorded.checksummed = len(assets)
+        recorded.extras = extras
+        local_root = fixtures.root / "store"
+        bucket = local_root / "public" / name
+        (fixtures.root / "work").mkdir()
+        (fixtures.root / "work/haberdasher.yaml").write_text("sources: [wimpysworld/fixture]\n")
+        arguments = ["publish", "--local-root", str(local_root)]
+        first = apply_cli(recorded, fixtures.root, key, arguments)
+        assert first.changed and first.published_objects > 0
+        assert recorded.downloads == ["SHA256SUMS", *(a.source.filename for a in assets)]
+        public = fixtures.root / "http" / name
+        shutil.copytree(bucket, public)
+        http = stack.enter_context(serve(fixtures.root / "http"))
+        http.set_generation_mtime([path for path in public.rglob("*") if path.is_file()], 1)
+        storage = StoragePolicy("local", {name: str(bucket)})
+        with private_workspace() as runtime:
+            retained = committed(LocalStore(storage), runtime, name)
+        for asset in retained.accepted_history:
+            assert asset.inspected.verified.sha256 in {a.sha256 for a in assets}
+            if name != "arch":
+                assert asset.inspected.upstream_signature == "signed"
+                assert asset.published_sha256 != asset.inspected.verified.sha256
+        if name == "arch":
+            assert not [
+                path
+                for path in public.rglob("*.pkg.tar.zst.sig")
+                if path.read_bytes() in extras.values()
+            ]
+        check = native_client(name, fixtures, "signed", http.url(name), key, "", ("", ""))
+        check(retained, 1)
+        before = snapshot(bucket)
+        recorded.downloads.clear()
+        recorded.native.clear()
+        recorded.forbid_native = True
+        rerun = apply_cli(recorded, fixtures.root, key, arguments)
+        assert not rerun.changed and rerun.published_objects == 0
+        assert recorded.downloads == ["SHA256SUMS"] and not recorded.native
+        assert snapshot(bucket) == before
 
 
 @pytest.mark.parametrize("after", [False, True], ids=["before-key-write", "after-key-write"])
-def test_public_bootstrap_interruption_replays_without_source_or_signer(
-    after: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_public_bootstrap_interruption_converges_with_a_full_rerun(
+    after: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with private_workspace() as fixtures, disposable_key() as key:
         assets = assets_for("apt", fixtures)
         recorded = RecordedGitHub(assets)
-        local_root = fixtures.root / "store"
-        storage = StoragePolicy(
-            "local", str(local_root / "private"), {"apt": str(local_root / "public/apt")}
-        )
+        storage = StoragePolicy("local", {"apt": str(fixtures.root / "store/public/apt")})
+        bucket = Path(storage.public["apt"])
         target = "keys/haberdasher.gpg" if after else "keys/haberdasher.asc"
 
         class KeyFailure(LocalStore):
             def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
-                if ref.bucket_role == "apt" and ref.key == target:
+                if ref.key == target:
                     if after:
                         super().create(ref, source)
                     raise RuntimeError("synthetic bootstrap interruption")
                 return super().create(ref, source)
 
-        store = KeyFailure(storage)
-        config = Config(("wimpysworld/fixture",), {"apt": apt.policy()})
+        config = Config(("wimpysworld/fixture",))
+        assert config.format_policy("apt") == apt.policy()
         policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
         monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
         with private_workspace() as runtime:
             recorded.bind(runtime)
             with pytest.raises(RuntimeError, match="bootstrap interruption"):
                 publish.reconcile(
-                    config, policy, store=store, runtime=runtime, now=datetime.now(UTC)
+                    config,
+                    policy,
+                    store=KeyFailure(storage),
+                    runtime=runtime,
+                    now=datetime.now(UTC),
                 )
-        frozen = state.pending_generation(store)
-        current = state.read_control(store, "ownership.json")
-        assert frozen is not None and current is not None
-        assert state.read_control(store, "completed.json") is None
-        assert not (Path(storage.public["apt"]) / "dists").exists()
-        manifest = store.read_private(
-            f"generations/{frozen.id}/manifest.json", max_bytes=state.MAX_CONTROL_BYTES
-        )
-        assert manifest is not None
-        assert hashlib.sha256(manifest[0]).hexdigest() == frozen.manifest_hash
-        for forbidden_path in (str(key.key_file), str(key.runtime.root), "private-keys-v1.d"):
-            assert forbidden_path.encode() not in manifest[0]
-        with private_workspace() as runtime:
-            generation, _ = state.load_frozen(store, frozen, out=runtime.root / "frozen")
-            ordinal = 1 if after else 0
-            output = generation.bootstrap_outputs[ordinal]
-            assert output.ref.key == target
-            observed = store.stat(output.ref)
-            resolution = (
-                state.WriteResolution(ordinal, "written", observed.etag)
-                if after and observed
-                else state.WriteResolution(ordinal, "not-written")
-            )
-        for asset in assets:
-            asset.local_path.unlink()
-        key.key_file.unlink()
-        monkeypatch.delenv("HD_SIGNING_KEY_FILE")
-
-        def forbidden(*args: object, **kwargs: object) -> None:
-            raise AssertionError("Bootstrap replay attempted discovery or signing")
-
-        monkeypatch.setattr(discovery, "scan_releases", forbidden)
-        monkeypatch.setattr(publish, "signing_session", forbidden)
-        evidence = fixtures.root / "recovery.json"
-        evidence.write_bytes(
-            canonical_json(
-                {
-                    "schema_version": 1,
-                    **state.mapping(
-                        json_value(
-                            state.RecoveryEvidence(
-                                True,
-                                True,
-                                "synthetic request resolved",
-                                "fresh-runtime",
-                                (resolution,),
-                            )
-                        )
-                    ),
-                }
-            )
-        )
-        assert (
-            cli.main(
-                [
-                    "--replay",
-                    frozen.id,
-                    "--recover-owner",
-                    str(current[0]["nonce"]),
-                    "--recovery-evidence",
-                    str(evidence),
-                    "--local-root",
-                    str(local_root),
-                    "--format",
-                    "apt",
-                ]
-            )
-            == 0
-        )
-        assert json.loads(capsys.readouterr().out)["generation_id"] == frozen.id
+        assert not (bucket / "dists").exists()
+        assert not (bucket / state.INVENTORY_KEY).exists()
+        assert not (bucket / state.LOCK_KEY).exists()
+        assert (bucket / "keys/haberdasher.asc").exists() == after
         store = LocalStore(storage)
-        assert (
-            store.read_private(
-                f"generations/{frozen.id}/manifest.json", max_bytes=state.MAX_CONTROL_BYTES
-            )
-            == manifest
-        )
         with private_workspace() as runtime:
-            retained = committed(store, runtime)
-        with serve(local_root / "public") as http:
-            client = native_client("apt", fixtures, "recovered", http.url("apt"), key, "", ("", ""))
+            recorded.bind(runtime)
+            result = publish.reconcile(
+                config, policy, store=store, runtime=runtime, now=datetime.now(UTC)
+            )
+        assert result.changed
+        with private_workspace() as runtime:
+            retained = committed(store, runtime, "apt")
+        with serve(fixtures.root / "store/public") as http:
+            client = native_client("apt", fixtures, "rerun", http.url("apt"), key, "", ("", ""))
             client(retained, 1)
+
+
+def test_flatpak_runs_download_only_the_working_set() -> None:
+    """Three runs: an app, its second version, a second app. Later runs skip earlier payloads."""
+    other = "world.wimpress.HaberdasherOther"
+    with private_workspace() as fixtures, disposable_key() as key, ExitStack() as stack:
+        assets = [
+            flatpak.bundle(fixtures, fixtures.root, "1", 1),
+            flatpak.bundle(fixtures, fixtures.root, "2", 2),
+            flatpak.bundle(fixtures, fixtures.root, "1", 3, app=other),
+        ]
+        recorded = RecordedGitHub(assets)
+        storage = StoragePolicy("local", {"flatpak": str(fixtures.root / "store/public/flatpak")})
+        bucket = Path(storage.public["flatpak"])
+        store = InterruptedStore(storage)
+        (fixtures.root / "http").mkdir()
+        with signing_session(
+            fixtures, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer:
+            runtime_commits = flatpak.runtime_repo(
+                fixtures, fixtures.root / "http", signer.fingerprint, signer.gnupghome
+            )
+        http = stack.enter_context(serve(fixtures.root / "http"))
+        config = Config(("wimpysworld/fixture",))
+        policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
+        client = NativeClient(fixtures, "incremental")
+        downloads: list[tuple[int, int]] = []
+        with patch.dict(os.environ, {"HD_SIGNING_KEY_FILE": str(key.key_file)}):
+            for number in range(1, 4):
+                heads = (
+                    {
+                        path.relative_to(bucket / "refs/heads").as_posix(): path.read_text().strip()
+                        for path in (bucket / "refs/heads").rglob("*")
+                        if path.is_file()
+                    }
+                    if bucket.exists()
+                    else {}
+                )
+                earlier = set[str]().union(
+                    *(
+                        payload_objects(fixtures, bucket, ref)
+                        for ref in heads
+                        if ref.startswith("app/")
+                    )
+                )
+                recorded.visible = recorded.checksummed = number
+                store.downloads.clear()
+                with private_workspace() as runtime:
+                    recorded.bind(runtime)
+                    result = publish.reconcile(
+                        config, policy, store=store, runtime=runtime, now=datetime.now(UTC)
+                    )
+                assert result.changed
+                keys = {ref.key for ref in store.downloads}
+                assert len(keys) == len(store.downloads)
+                assert not keys & earlier
+                assert {key for key in keys if key.endswith(".commit")} == {
+                    f"objects/{commit[:2]}/{commit[2:]}.commit" for commit in heads.values()
+                }
+                downloads.append((len(keys), sum(ref.size for ref in store.downloads)))
+                public = fixtures.root / "http/flatpak"
+                shutil.copytree(bucket, public, dirs_exist_ok=True)
+                http.set_generation_mtime(
+                    [path for path in public.rglob("*") if path.is_file()], number
+                )
+                if number == 1:
+                    client_run(
+                        client,
+                        "remote-add",
+                        f"--gpg-import={key.public_file}",
+                        "provider",
+                        http.url("runtime-repo"),
+                    )
+                    repofile = published_remote(
+                        http.url("flatpak"), client.path("config/publisher.flatpakrepo")
+                    )
+                    client_run(client, "remote-add", "--from", "publisher", str(repofile))
+                    assert (
+                        "no-gpg-verify"
+                        not in client_run(client, "remotes", "--columns=name,options").decode()
+                    )
+                    client_run(client, "install", "--noninteractive", "publisher", flatpak.APP)
+                elif number == 2:
+                    client_run(client, "update", "--noninteractive")
+                else:
+                    client_run(client, "install", "--noninteractive", "publisher", other)
+                    client_run(client, "update", "--noninteractive")
+                with private_workspace() as runtime:
+                    retained = committed(store, runtime, "flatpak")
+                commit = next(
+                    identity.source_commit
+                    for identity in retained.active_identities
+                    if identity.name == flatpak.REF
+                )
+                assert commit is not None
+                if number < 3:
+                    installed(client, commit, str(number), runtime_commits)
+                else:
+                    assert (
+                        client_run(client, "info", "--show-commit", flatpak.APP).strip().decode()
+                        == commit
+                    )
+                    assert (
+                        client_run(client, "info", "--show-origin", other).strip() == b"publisher"
+                    )
+                    assert {
+                        f"{flatpak.APP}.flatpakref",
+                        f"{other}.flatpakref",
+                    } <= {path.name for path in bucket.glob("*.flatpakref")}
+        assert downloads[0] == (0, 0)
+        published = sum(path.stat().st_size for path in bucket.rglob("*") if path.is_file())
+        for count, size in downloads[1:]:
+            assert 0 < count < 100 and size < published / 2
+        print(f"Flatpak working-set downloads per run (objects, bytes): {downloads}")

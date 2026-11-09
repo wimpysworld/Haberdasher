@@ -25,6 +25,7 @@ def fixture(
     architecture: str = "x86_64",
     dependency: str | None = None,
     label: str = "normal",
+    extension: str = ".pkg.tar.zst",
 ) -> VerifiedAsset:
     directory = runtime.root / f"build-{name}-{version}-{release}-{label}"
     directory.mkdir()
@@ -36,7 +37,7 @@ def fixture(
         (Path(executable).parent.parent / "etc/makepkg.conf").read_text() + "\n"
         "BUILDENV=(!distcc !color !ccache !check !sign)\n"
         "OPTIONS=(!strip docs libtool staticlibs emptydirs !zipman !purge !debug !lto !autodeps)\n"
-        "PKGEXT='.pkg.tar.zst'\n"
+        f"PKGEXT='{extension}'\n" + (f"CARCH='{architecture}'\n" if architecture != "any" else "")
     )
     (directory / "PKGBUILD").write_text(
         f"pkgname={name}\npkgver={version}\npkgrel={release}\n"
@@ -51,7 +52,7 @@ def fixture(
     result = runtime.run(["makepkg", "--nodeps", "--config", str(config)], cwd=directory)
     if result.returncode:
         raise RuntimeError(result.stderr.decode() + result.stdout.decode())
-    package = directory / f"{name}-{version}-{release}-{architecture}.pkg.tar.zst"
+    package = directory / f"{name}-{version}-{release}-{architecture}{extension}"
     members = run(runtime, "bsdtar", "-tf", str(package)).splitlines()
     if b".INSTALL" in members:
         raise RuntimeError("Fixture contains an install script")
@@ -121,7 +122,13 @@ class Pacman:
 
 
 def client(
-    runtime: Runtime, name: str, url: str, key: DisposableKey, *, trusted: bool = True
+    runtime: Runtime,
+    name: str,
+    url: str,
+    key: DisposableKey,
+    *,
+    trusted: bool = True,
+    architecture: str = "x86_64",
 ) -> Pacman:
     private = NativeClient(runtime, name)
     for directory in ("db", "hooks"):
@@ -157,7 +164,7 @@ def client(
         f"RootDir = {private.root}\nDBPath = {private.path('db')}\n"
         f"CacheDir = {private.path('cache')}\nLogFile = {private.path('log/pacman.log')}\n"
         f"GPGDir = {home}\nHookDir = {private.path('hooks')}\n"
-        "Architecture = x86_64\nSigLevel = Required TrustedOnly\n"
+        f"Architecture = {architecture}\nSigLevel = Required TrustedOnly\n"
         "LocalFileSigLevel = Required TrustedOnly\nRemoteFileSigLevel = Required TrustedOnly\n"
         f"[haberdasher]\nServer = {url}\n"
     )

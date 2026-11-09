@@ -57,7 +57,7 @@ def _validate(data: bytes, fingerprint: str, *, secret: bool) -> str:
         or _field(records, "fpr", 9) != fingerprint
         or set(_field(records, kind, 11)) != set("scSC")
     ):
-        raise SigningFailure("Expected the approved RSA4096 signing and certification primary")
+        raise SigningFailure("Expected the Haberdasher RSA4096 signing and certification primary")
     primary = next(record for record in records if record[0] == kind)
     try:
         if primary[6] and int(primary[6]) <= time.time():
@@ -227,7 +227,9 @@ class SigningSession:
                 or signatures[0][8:10] != [b"1", b"8"]
                 or signatures[0][11] != self.fingerprint.encode()
             ):
-                raise SigningFailure("Signature must use the approved primary and SHA256")
+                raise SigningFailure(
+                    "Signature must use the Haberdasher signing primary and SHA256"
+                )
             atomic_write(output, temporary.read_bytes())
 
     def alpine_key(self) -> tuple[Path, Path]:
@@ -317,6 +319,21 @@ class SigningSession:
         for path, data in zip(paths, (armoured, binary, public.read_bytes()), strict=True):
             atomic_write(path, data)
         return paths[0], paths[1], paths[2]
+
+
+def key_fingerprint(runtime: Runtime) -> str | None:
+    """Primary fingerprint of the signing key in the environment, or None without a key."""
+    if not (os.environ.get("HD_SIGNING_KEY_FILE") or os.environ.get("HD_SIGNING_KEY")):
+        return None
+    data = _input(None, None)
+    with private_workspace(runtime.root / "tmp") as workspace:
+        home = str(workspace.root / "gnupg")
+        listing = _checked(
+            workspace,
+            ["gpg", "--no-options", "--homedir", home, "--batch", "--with-colons", "--show-keys"],
+            data=data,
+        )
+    return _field(_records(listing), "fpr", 9)
 
 
 @contextlib.contextmanager

@@ -1,128 +1,195 @@
 # Publisher operations
 
-Haberdasher defaults to a read-only plan. Write modes require an explicit destination and preserve a private recovery record.
+`just plan` is read-only. `just publish` writes to the R2 buckets in the `PUBLIC` table of `src/haberdasher/config.py`. A run takes a lock in each bucket that it writes. A full rerun is the only recovery.
 
 ## Configuration
 
-`haberdasher.yaml` contains public source and format settings. Operational policy belongs in a separate file selected by `--policy-file`. Keep operator attestations private.
-
-Both files use the strict loader in `src/haberdasher/config.py`. It rejects unknown fields, duplicate keys, merges, anchors, aliases, and invalid types. Limits are 1 MiB, depth 32, and 10,000 nodes. PyYAML must provide LibYAML `CSafeLoader`.
-
-This policy is a non-secret local example. Its fingerprint is a placeholder, not a signing identity:
+`haberdasher.yaml` is a list of GitHub repositories. It has no per-project settings and there is no separate policy file:
 
 ```yaml
-storage:
-  backend: local
-  private: /tmp/haberdasher-example/private
-  public:
-    apt: /tmp/haberdasher-example/public/apt
-approved_formats: []
-approval_references: {}
-expected_signing_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-clients:
-  apt:
-    approved: false
+sources: [wimpysworld/tailor]
 ```
 
-Replace the fingerprint with the independently verified disposable key fingerprint before an authorised local apply. `--local-root` replaces the local destination paths with `<root>/private` and `<root>/public/<format>`.
+The file uses the strict loader in `src/haberdasher/config.py`. Any key other than `sources` stops the run with one line that names the key. The loader also rejects duplicate keys, merges, anchors, aliases, and invalid types. Limits are 1 MiB, depth 32, and 10,000 nodes. PyYAML must provide LibYAML `CSafeLoader`.
 
-A local root must be disposable, outside the checkout, and distinct from the home root. Symlink paths reject. Local storage cannot override an R2 policy.
+### Derived settings
 
-### Format selection
+Haberdasher derives every other setting:
 
-All public destinations in `storage.public` share one discovery and completion state. With multiple configured public formats, `--format all` is mandatory before any writes.
+| Setting | Source |
+| --- | --- |
+| Format | Asset suffix: `.deb` APT, `.rpm` RPM, `.pkg.tar.zst` and `.pkg.tar.xz` Arch, `.apk` Alpine, `.flatpak` Flatpak. Native inspection confirms the type. Other assets are ignored. |
+| Architecture | Package metadata, never the file name |
+| Bucket and public URL | The `PUBLIC` table in `src/haberdasher/config.py` |
+| APT suite and component | Constants in `src/haberdasher/formats/apt.py`: `stable` and `main`. `Release` has a `Date` and no `Valid-Until`. |
+| Upstream signatures | Not checked. RPM inputs lose upstream signatures before Haberdasher signs them. APK inputs lose their `.SIGN.*` stream. Arch ignores release `.sig` assets. APT publishes `.deb` packages unchanged. Flatpak commits lose their detached upstream signatures. |
 
-`--format NAME` is allowed only when NAME is the sole configured public format. A fresh local bootstrap without configured public destinations can also select NAME. This constraint deliberately prevents partial global-state updates. A completed format cannot disappear from later publications.
+A `.flatpak` bundle supplies its own settings. The application ref gives the app ID, architecture, and branch. The application metadata gives the runtime. The bundle's `runtime-repo` gives the runtime repository, or Flathub (`https://dl.flathub.org/repo/flathub.flatpakrepo`) when the bundle has none. All applications go into one OSTree repository, with `wimpysworld.flatpakrepo` and one `<app-id>.flatpakref` per application at its root. The `.flatpakref` file takes its `Title` from the AppStream name and its `RuntimeRepo` from the bundle. A run fails when bundles name different runtime repositories, because `wimpysworld.flatpakrepo` holds one `RuntimeRepo`.
+
+### Architectures
+
+Each format accepts these architectures:
+
+| Format | Architectures | Architecture-independent placement |
+| --- | --- | --- |
+| APT | `amd64`, `arm64`, `all` | `all` packages appear in every `binary-<arch>/Packages` index |
+| RPM | `x86_64`, `aarch64`, `noarch` | One repository holds every architecture |
+| Arch | `x86_64`, `aarch64`, `any` | `any` packages appear in every `<arch>/` directory and database |
+| Alpine | `x86_64`, `aarch64`, `noarch` | `noarch/` holds the package, and every `<arch>/APKINDEX.tar.gz` lists it, because `apk` fetches from the directory of the package architecture |
+
+Flatpak accepts application bundles for `x86_64` and `aarch64`. A package with another architecture is skipped with one line that names the file and the architecture, for example `apt   skipped tool_1.0_armhf.deb: unsupported APT architecture 'armhf'`. An Android `.apk` is skipped the same way. `just plan` and `just publish` print the same line, and continue with the other assets and sources.
+
+### Releases
+
+Discovery reads only the GitHub "Latest" release of each source, from `repos/<owner>/<repo>/releases/latest`. GitHub never marks a draft or a pre-release as "Latest". When a source has no latest release (HTTP 404), the plan prints `<source>: no latest release` and continues. Any other failed request stops the run.
+
+A run adds the packages of each latest release to the published repositories. Versions that are already published stay published, and their objects stay in the buckets. When a new release becomes "Latest", the next run adds its packages beside the earlier versions. When an asset is added to the latest release after publication, the next run adds that asset. Older releases that were never published are not read and are not backfilled.
+
+### Checksums and cosign
+
+Each release needs a checksum before import. Discovery reads combined checksum files (`SHA256SUMS`, `checksums.txt`, `*_checksums.txt`, `*.sha256sum`) and per-asset `<asset>.sha256` files. A per-asset file can hold a bare digest. When two checksum files list the same asset, their digests must agree.
+
+GitHub reports a `sha256:` digest for each release asset. Discovery checks each checksum file and listed asset against it. When a release has no checksum file entry for a package, the GitHub digest is the checksum. A package without any checksum is skipped, and the plan line counts it.
+
+When a checksum file has a sibling `<checksum file>.sigstore.json`, discovery runs `cosign verify-blob --bundle` before it reads the file. The issuer must be `https://token.actions.githubusercontent.com`. The certificate identity must match `^https://github\.com/<owner>/<repo>/\.github/workflows/[^@]+@refs/tags/<tag>$`, for any workflow file. A failed bundle stops the run. A release without a bundle shows `no cosign bundle` instead of `cosign OK`.
+
+Cosign gets the Sigstore trust root through its normal online update in the private workspace.
+
+### Publication scope
+
+One publication covers every format that any source provides, plus every format that is already published. One discovery scan feeds it. A format without packages gets no writes, not even a lock.
 
 ## Commands
 
-After `just setup`, inspect the exact interface:
+After `just setup`, use the three recipes. None takes arguments. Each reads `haberdasher.yaml` in the working directory:
 
 ```sh
-just publish --help
-just publish --plan --config haberdasher.yaml
+just plan
+just publish
+just unlock
 ```
 
-The plan requires runtime `GH_TOKEN` or `GITHUB_TOKEN`. GitHub subprocesses use an isolated configuration, not a stored personal login. Native subprocesses receive neither GitHub nor storage credentials.
+`just plan` uses runtime `GH_TOKEN` or `GITHUB_TOKEN`. When both are unset, Haberdasher reads the token of the stored `gh` login with `gh auth token`. That command receives only `PATH`, `HOME`, and the `gh` configuration and keyring variables, never the storage or signing variables. The plan uses no storage credentials or signing. Other GitHub subprocesses use an isolated configuration. Native subprocesses receive neither GitHub nor storage credentials.
 
-These write examples are templates for approved operations, not activation instructions:
+`just publish` publishes each format in the publication scope to its R2 bucket. `just unlock` deletes stale locks, as described in [Locks](#locks).
 
-```sh
-env -u HD_SIGNING_KEY HD_SIGNING_KEY_FILE=/private/disposable-test-key.asc \
-  just publish --apply --local-root /tmp/haberdasher-example \
-    --format apt --config haberdasher.yaml --policy-file local-policy.yaml
-just publish --apply --remote --format all \
-  --config haberdasher.yaml --policy-file publisher-policy.yaml
+Each command prints plain text lines to stdout as each step starts or ends, then a short summary. An error prints one `Error:` line to stderr and exits with status 1.
+
+`just plan` checks the checksums and cosign bundle of the latest release of each source. Then it reads the public `haberdasher.json` of every format over HTTPS without credentials. HTTP 404 means that nothing is published. The table shows each format that the sources provide or that is already published. A repository that cannot be read shows `?` and the plan continues:
+
+```text
+Reading haberdasher.yaml: 2 sources
+wimpysworld/tailor: latest release v0.6.0
+  v0.6.0  checksums OK  cosign OK  8 packages
+wimpysworld/sidra: latest release 1.3.0
+  1.3.0  GitHub digests OK  no cosign bundle  6 packages
+Reading published state from apt.wimpys.world, rpm.wimpys.world, pkg.wimpys.world, apk.wimpys.world, flatpak.wimpys.world
+
+Format   Repository            Published  New
+apt      apt.wimpys.world              0    4
+rpm      rpm.wimpys.world              0    4
+arch     pkg.wimpys.world              0    2
+apk      apk.wimpys.world              0    2
+flatpak  flatpak.wimpys.world          0    2
+
+14 new packages. Nothing written. Run `just publish` to publish them.
 ```
 
-The local example requires a disposable test key outside the checkout, in a private file with mode `0400` or `0600`. Its independently verified full fingerprint must match `local-policy.yaml`. Do not copy or decrypt the canonical SOPS key for this fixture.
+The plan matches packages to the published state by the SHA256 checksum of each release asset, the same test that `just publish` uses to skip a download. It downloads and inspects each new asset, so it skips the same unsupported assets as `just publish`. It does not compare native identities with the published history.
+
+`just publish` prints the same discovery lines and one line for each format step:
+
+```text
+apk   locked
+apt   locked
+...
+apt   preparing 18 new packages
+apt   signed metadata
+...
+apt   uploading 10 objects (214 MB)
+apt     keys/haberdasher.asc (3 KB)
+apt     pool/main/s/sidra/sidra_1.3.0_amd64.deb (104 MB)
+...
+apt   138.106 MiB / 204.513 MiB, 68%, 156.941 KiB/s, ETA 7m13s
+apt   upload stalled, waiting
+apt   upload resumed
+apt   182.400 MiB / 204.513 MiB, 89%, 9.871 MiB/s, ETA 2s
+apt   uploaded 10 objects in 5m11s
+apt     dists/stable/main/binary-amd64/Packages (2 KB)
+...
+apt     dists/stable/InRelease (4 KB)
+apt   wrote haberdasher.json
+...
+flatpak uploading 530 objects (226 MB)
+flatpak   keys/haberdasher.asc (2 KB)
+flatpak   objects/ 522 files (225 MB)
+...
+flatpak uploaded 530 objects in 1m02s
+flatpak   refs/heads/app/world.wimpys.Sidra/x86_64/stable (65 B)
+...
+apt   unlocked
+Published 72 packages to 4 repositories.
+```
+
+Each upload lists every object by key and size before `rclone` starts. Flatpak lists OSTree `objects/` as one line. Each metadata line names the key before its write. `rclone` reports progress every 10 seconds while an upload runs. An upload that ends within 10 seconds prints no progress lines, and no upload prints the final total. When the byte count does not change, one `upload stalled, waiting` line replaces the repeated progress lines until the upload continues.
+
+When nothing is new, each format prints `unchanged` and the summary is `Nothing changed in 4 repositories.` A run that writes metadata but no new packages, for example the first public keys of a bucket, ends with `Refreshed apt metadata.`
+
+### Local test root
+
+Tests use a hidden `--local-root PATH` option on `python -m haberdasher publish` and `unlock`. It ignores the R2 buckets and writes to `<root>/public/<format>`. A local root must be disposable, outside the checkout, and distinct from the home root. Symlink paths reject. A local run uses the same publication scope, and treats a format as published when `<root>/public/<format>/haberdasher.json` exists.
+
+A local run takes its signing fingerprint from the key in `HD_SIGNING_KEY_FILE` or `HD_SIGNING_KEY`. Use a disposable test key outside the checkout, in a private file with mode `0400` or `0600`. Without a key, a local run can publish only output that needs no signature. Do not copy or decrypt the canonical SOPS key for this fixture.
 
 Production local signing reads the existing SOPS-managed path through `HD_SIGNING_KEY_FILE`. CI reads `HD_SIGNING_KEY`. Supply only one signing source. Keep the local SOPS convention. Do not copy, decrypt, or export the production key as a setup workaround. Signing requires the expected RSA4096 primary with signing and certification capabilities, without subkeys. Temporary keyrings and Alpine PKCS#8 conversion stay outside the checkout and Nix store. Cleanup stops owned agents and removes private exports.
 
-### Remote policy
+### Remote publication
 
-Remote policy requires `storage.backend: r2`, a separate private bucket, and public destinations by format. It requires the production fingerprint declared in `config.py`, approved formats, and per-format client approval references.
-
-`approval_references` requires `private_storage`, `signing`, `repository_policy`, `live_r2`, `hosted_publication`, and `public_delivery`. APK also requires `apk_v2`. Flatpak also requires `flatpak_runtime`, an approved source owner, application refs, and runtime policy.
-
-Runtime policy specifies URL, full fingerprint, collection, branch, architecture, remote, refs, and optional extensions. The current Flatpak adapter requires an empty collection. It rejects arbitrary runtime repository selection and signed upstream bundles. It does not add a source automatically.
-
-These fields record operator attestations. They do not automatically validate cloud permissions, environment protection, HTTPS, or cache behaviour.
+`just publish` checks the storage credentials before discovery. It always signs with the production fingerprint `PRODUCTION_FINGERPRINT` in `src/haberdasher/config.py`. The signing key must match that fingerprint.
 
 Storage subprocesses receive only the three documented `HD_CLOUDFLARE_*` storage variables through an isolated AWS configuration. Conditional create requires absence. Conditional replace requires the exact observed ETag. An ETag identifies a revision, not a SHA256 digest.
 
+Each format uploads its new packages, signatures, dependency metadata, keys, and Flatpak objects with one `rclone copy` run for each content type and cache policy, 16 transfers at a time, then confirms their sizes and MD5 checksums with one `rclone lsjson` run. While `rclone` runs, the format prints its transfer statistics every 10 seconds. Locks, entry metadata, and `haberdasher.json` use conditional single-object writes with `aws s3api`.
+
+APT places each package at `pool/main/<prefix>/<source>/<package>_<version>_<arch>.deb`, without the epoch, for example `pool/main/s/sidra/sidra_1.3.0_amd64.deb`. RPM places each package at `packages/<name>-<version>-<release>.<arch>.rpm`, for example `packages/sidra-1.3.0-1.x86_64.rpm`. When two packages need one file name, the run stops with one line that names the file and both sources.
+
 ## Publication and state
 
-`discovery.py` scans configured releases and assets, including additions to existing releases. Assets without a matching release checksum remain pending. Admission verifies source SHA256 before native import and rejects changed bytes under equivalent native identities.
+`discovery.py` scans the latest release of each source and its assets, including assets added to that release later. Assets without a matching release checksum are skipped. Admission verifies source SHA256 before native import and rejects changed bytes under equivalent native identities.
 
-Native adapters retain metadata and accepted history. Unchanged runs avoid package downloads, inspection, indexing, and signing. APT renews metadata within its configured renewal window. Flatpak restoration also requires current-head payload, not only metadata.
+Each bucket's public `haberdasher.json` is the publication state for its format. It holds the inventory allow-list (package identity, source, published digests, and referenced objects) and the accepted history and metadata keys that the native adapter needs. There is no private state bucket. A run reads each inventory first. An asset whose bytes are already in the inventory needs no download. When a format changes, the run downloads only the published metadata that the inventory references, not the package pool. Unchanged runs avoid package downloads, inspection, indexing, and signing, and write nothing except the locks. Flatpak restoration downloads only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. `flatpak build-update-repo` needs those AppStream paths to keep unchanged applications in the AppStream catalogue. Payload files and earlier commits stay published and are not downloaded again.
 
-The private store contains ownership, frozen files/manifests, write journals, pending state, and completion. Public buckets contain packages, repository metadata, public keys, and `haberdasher.json`, not private control state.
+Both OpenPGP exports appear in every published bucket. The native APK public key appears only with the first APK index. An empty APK bucket does not claim native APK trust. Changed public export bytes reject even when the fingerprint stays unchanged. Key rotation is not supported.
 
-The generation freezes exact public-key bytes before public writes. Both OpenPGP exports appear in every configured public role, including empty roles. The native APK public key appears only with the first APK index. An empty APK bucket does not claim native APK trust.
-
-Publication writes bootstrap keys first, then native outputs in dependency-before-entry order. Each format's inventory follows its native outputs. Private completion follows all writes. Each write requires a durable intent, a conditional request, downloaded verification, and acknowledgement.
-
-The frozen manifest binds bootstrap references, fingerprint, hashes, sizes, and order. Reuse verifies stored references and exact prior ETags. Changed public export bytes reject even when the fingerprint stays unchanged. Key rotation requires separate approval.
+For each format, a run writes the bootstrap keys and packages, then dependency metadata, then entry metadata, then `haberdasher.json`. A run replaces published entries only on the exact ETag that it read. Objects that the published inventory references never change. A run can overwrite an object that the published inventory does not reference, because an interrupted run can leave one with other signature bytes. RPM and Arch package signatures are not deterministic.
 
 There is no multi-object atomicity. Split entry/signature pairs can temporarily fail client verification. The publisher retains older referenced objects and performs no deletion or retention change.
 
-## Recovery
+## Locks
 
-Ownership is non-expiring. There is no time-to-live takeover or force-unlock flag. A failed run can leave ownership active even before it creates a pending generation.
+Before it writes, `just publish` creates `haberdasher.lock` in each bucket of the publication scope, in sorted format order, with a conditional create. The lock holds a random run identifier, the host name or GitHub runner and run URL, and the UTC start time. It never appears in `haberdasher.json`. A local test root holds the same file in each format directory.
 
-Stop the exact owner and resolve every outstanding request before recovery. Unknown write outcomes block further writes. A later read or apparent absence alone does not prove that a delayed request cannot commit.
+When a lock already exists, the run deletes the locks that it created and fails. The error names the bucket and shows the existing lock. At the end of a run, and after a handled error, the run deletes only its own locks, conditionally on the ETags that it created.
 
-Recovery evidence is schema-version-1 JSON. This example describes one confirmed request that did not write:
-
-```json
-{
-  "schema_version": 1,
-  "stopped_owner": true,
-  "requests_resolved": true,
-  "reference": "operator-record-of-stopped-run-and-request-resolution",
-  "runner_identity": "replacement-runner",
-  "writes": [
-    {"ordinal": 0, "outcome": "not-written", "etag": null}
-  ]
-}
-```
-
-Use actual outstanding ordinals from the private journal. A `written` outcome requires its exact ETag. Do not copy these assertions without evidence. Recovery rejects missing resolutions, extra ordinals, and conflicting observations.
-
-For a pending generation, name both the generation and stopped owner's nonce:
+A run that stops without cleanup, for example after a killed process, leaves its locks. When you know that the run has stopped, delete them explicitly:
 
 ```sh
-just publish --replay GENERATION --recover-owner NONCE \
-  --recovery-evidence /private/recovery.json \
-  --local-root /tmp/haberdasher-example --format apt \
-  --policy-file local-policy.yaml
+just unlock
 ```
 
-Use `--remote` instead of `--local-root` only with approved remote policy. If no pending output requires replay, omit `--replay` to recover and release ownership. `--recover-owner` always requires `--recovery-evidence`.
+`just unlock` deletes the existing locks in all five buckets and exits without publishing. It prints one line for each bucket:
 
-Replay uses exact frozen bytes. It requires no source packages, GitHub discovery, or private signing key. It still validates frozen native output and storage preconditions.
+```text
+apk   no lock
+apt   removed lock from builder started 2026-11-09T10:00:00+00:00
+```
 
-Expired frozen APT metadata rejects replay. Explicit new preparation requires a separate operator decision. There is no automatic re-sign, expiry bypass, or documented discard command. Do not delete pending state to bypass this gate.
+## Recovery
 
-See `src/haberdasher/{cli,core,state,publish,storage,signing}.py` and `tests/unit/test_recovery.py` for the exact records and transitions.
+Recover from an interrupted run with a full rerun of `just publish`. The rerun reads the last complete `haberdasher.json`, prepares and signs again, overwrites leftover unreferenced objects, and publishes new metadata. There is no write journal or crash-recovery state.
+
+An interrupted run can stop after it replaced some entry metadata and before it wrote `haberdasher.json`. Under the bucket lock, only that run can have changed those entries. The rerun accepts each entry whose bytes differ from the inventory, rebuilds it from the accepted history and the new packages, and replaces it on its current ETag. Changed bytes for a published package identity still stop the run. The rerun finds the changed entries only when it prepares that format, so the assets of the interrupted run must still be in the latest releases.
+
+An unknown write outcome stops the run. Delete a stale lock with `just unlock` first when the run could not release it.
+
+See `src/haberdasher/{cli,state,publish,storage}.py` and `tests/unit/test_publish.py` for the exact behaviour.

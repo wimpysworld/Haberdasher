@@ -9,8 +9,10 @@ import json
 import os
 import re
 import stat
+import subprocess
 import tempfile
-from collections.abc import Generator
+import time
+from collections.abc import Generator, Sequence
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -19,17 +21,25 @@ from haberdasher.config import StoragePolicy
 from haberdasher.core import (
     ObjectRef,
     ObjectStat,
+    OutputObject,
+    Report,
     WriteReceipt,
+    atomic_write,
     canonical_json,
     integer,
+    plural,
+    quiet,
     safe_key,
     safe_path,
     sha256_file,
     text,
 )
-from haberdasher.runtime import STORAGE_VARIABLES, Runtime, RuntimeFailure
+from haberdasher.runtime import STORAGE_VARIABLES, Runtime, RuntimeFailure, transfer_timeout
 
 MAX_OBJECT_SIZE = 5368709120
+UPLOAD_TRANSFERS = 16
+WRITE_ATTEMPTS = 3
+WRITE_RETRY_SECONDS = 5
 
 
 class StorageError(RuntimeError):
@@ -40,15 +50,21 @@ class PreconditionFailed(StorageError):
     pass
 
 
+class ObjectChanged(StorageError):
+    """Stored or local bytes differ from the expected SHA256 or size."""
+
+
 class UnknownWrite(StorageError):
-    """The caller must resolve its durable write intent before further writes.
+    """A write may or may not have committed. The run stops, and a full rerun converges."""
 
-    An observation proves bytes only, not which generation wrote them. Absence
-    does not prove failure: a request can commit after the verification read.
-    """
-
-    def __init__(self, observation: WriteReceipt | None = None) -> None:
-        super().__init__("Write outcome needs generation evidence before recovery")
+    def __init__(
+        self,
+        ref: ObjectRef | None = None,
+        cause: str = "an earlier write failed",
+        observation: WriteReceipt | None = None,
+    ) -> None:
+        target = f" for {ref.bucket_role} object {ref.key}" if ref is not None else ""
+        super().__init__(f"Write outcome is unknown{target} ({cause}); rerun the publication")
         self.observation = observation
 
 
@@ -60,11 +76,11 @@ def _check_ref(ref: ObjectRef) -> None:
         raise ValueError("Objects at or above 5 GiB are not supported")
 
 
-def _check_private_read(key: str, max_bytes: int) -> None:
+def _check_read(key: str, max_bytes: int) -> None:
     safe_key(key)
-    integer(max_bytes, "private read limit", 1)
+    integer(max_bytes, "read limit", 1)
     if max_bytes >= MAX_OBJECT_SIZE:
-        raise ValueError("Private read limits at or above 5 GiB are not supported")
+        raise ValueError("Read limits at or above 5 GiB are not supported")
 
 
 def _etag(value: str) -> str:
@@ -76,7 +92,50 @@ def _etag(value: str) -> str:
 
 def _verify(ref: ObjectRef, source: Path) -> None:
     if sha256_file(source) != (ref.sha256, ref.size):
-        raise StorageError("Object bytes differ from the expected SHA256 or size")
+        raise ObjectChanged("Object bytes differ from the expected SHA256 or size")
+
+
+def _stats(progress: Report) -> Report:
+    """Pass on the periodic `rclone` statistics lines of one run, without their log prefix.
+
+    A complete transfer prints no statistics, so a run that ends before the first
+    10 second interval prints nothing. A line whose byte count repeats the previous
+    one is suppressed. At less than 100% the first such line reports a stall, and the
+    next changed count reports the resume.
+    """
+    previous: str | None = None
+    stalled = False
+
+    def report(line: str) -> None:
+        nonlocal previous, stalled
+        _, marker, stats = line.partition(" NOTICE: ")
+        stats = stats.strip()
+        if not marker or " ETA " not in stats:
+            return
+        done, _, total = stats.partition(",")[0].partition(" / ")
+        if done == previous:
+            if not stalled and done != total:
+                stalled = True
+                progress("upload stalled, waiting")
+            return
+        previous = done
+        if stalled:
+            stalled = False
+            progress("upload resumed")
+        if done != total:
+            progress(stats)
+
+    return report
+
+
+def _rclone_error(result: subprocess.CompletedProcess[bytes]) -> str:
+    """Name the last `rclone` error line, or the exit status when it printed none."""
+    errors = [
+        line for line in result.stderr.decode(errors="replace").splitlines() if " ERROR : " in line
+    ]
+    if errors:
+        return errors[-1].partition(" ERROR : ")[2]
+    return f"rclone exited with {result.returncode}"
 
 
 def _sync_directory(path: Path) -> None:
@@ -142,16 +201,15 @@ def _install(source: Path, destination: Path) -> None:
 class LocalStore:
     """Directory storage for isolated execution, not an R2 emulator.
 
-    Each bucket directory is the process lock, without a public lock file.
-    The inode revision changes with replacement, including identical bytes.
+    A directory flock serialises each request. The inode revision changes
+    with replacement, including identical bytes.
     """
 
     def __init__(self, storage: StoragePolicy) -> None:
-        if storage.backend != "local" or storage.private is None:
-            raise ValueError("Local storage requires a private destination")
+        if storage.backend != "local":
+            raise ValueError("Local storage requires a local destination")
         storage.__post_init__()
         self._roots = {role: Path(path) for role, path in storage.public.items()}
-        self._roots["private"] = Path(storage.private)
         for root in self._roots.values():
             _mkdir(root)
         self._uncertain = False
@@ -160,6 +218,12 @@ class LocalStore:
         _check_ref(ref)
         try:
             return safe_path(self._roots[ref.bucket_role], ref.key)
+        except KeyError:
+            raise ValueError("No destination for this bucket role") from None
+
+    def _root(self, role: str) -> Path:
+        try:
+            return self._roots[role]
         except KeyError:
             raise ValueError("No destination for this bucket role") from None
 
@@ -207,9 +271,9 @@ class LocalStore:
                 _install(temporary, destination)
             return result
 
-    def read_private(self, key: str, *, max_bytes: int) -> tuple[bytes, ObjectStat] | None:
-        _check_private_read(key, max_bytes)
-        root = self._roots["private"]
+    def read(self, role: str, key: str, *, max_bytes: int) -> tuple[bytes, ObjectStat] | None:
+        _check_read(key, max_bytes)
+        root = self._root(role)
         path = safe_path(root, key)
         with contextlib.ExitStack() as stack:
             directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -232,7 +296,7 @@ class LocalStore:
                     raise StorageError("Stored object is not a regular file")
                 before = self._revision(info)
                 if before.size > max_bytes:
-                    raise StorageError("Private object exceeds the read limit")
+                    raise StorageError("Stored object exceeds the read limit")
                 data = stream.read(before.size + 1)
                 after = self._revision(os.fstat(stream.fileno()))
             if (
@@ -240,14 +304,38 @@ class LocalStore:
                 or after != before
                 or self._stat(safe_path(root, key)) != before
             ):
-                raise StorageError("Private object changed during read")
+                raise StorageError("Stored object changed during read")
             return data, before
+
+    def delete(self, role: str, key: str, *, expected_etag: str) -> None:
+        expected_etag = _etag(expected_etag)
+        root = self._root(role)
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            path = safe_path(root, key)
+            current = self._stat(path)
+            if current is None or current.etag != expected_etag:
+                raise PreconditionFailed("Local object precondition failed")
+            path.unlink()
+            _sync_directory(path.parent)
+        finally:
+            os.close(descriptor)
 
     def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
         return self._write(ref, source, None)
 
     def replace(self, ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
         return self._write(ref, source, _etag(expected_etag))
+
+    def upload(self, outputs: Sequence[OutputObject], *, progress: Report = quiet) -> None:
+        """Write new immutable objects, and overwrite unreferenced leftovers of a failed run."""
+        for output in outputs:
+            current = self.stat(output.ref)
+            if current is None:
+                self.create(output.ref, output.local_path)
+            else:
+                self.replace(output.ref, output.local_path, expected_etag=current.etag)
 
     def _write(self, ref: ObjectRef, source: Path, expected: str | None) -> WriteReceipt:
         if self._uncertain:
@@ -277,21 +365,20 @@ class LocalStore:
                 if not started:
                     raise
                 self._uncertain = True
-                raise UnknownWrite(receipt) from error
+                raise UnknownWrite(ref, type(error).__name__, receipt) from error
             return receipt
 
 
 class R2Store:
     def __init__(self, storage: StoragePolicy, *, runtime: Runtime) -> None:
-        if storage.backend != "r2" or storage.private is None:
-            raise ValueError("R2 storage requires a private bucket")
+        if storage.backend != "r2":
+            raise ValueError("R2 storage requires R2 buckets")
         storage.__post_init__()
         self._buckets = dict(storage.public)
-        self._buckets["private"] = storage.private
         self._runtime = runtime
         environment = runtime.environment_for("storage")
         if any(not environment.get(name) for name in STORAGE_VARIABLES):
-            raise ValueError("The three approved storage environment variables are required")
+            raise ValueError("The three HD_CLOUDFLARE storage environment variables are required")
         self._endpoint = text(environment[STORAGE_VARIABLES[0]], "storage endpoint")
         parsed = urlsplit(self._endpoint)
         if (
@@ -311,8 +398,11 @@ class R2Store:
 
     def _bucket(self, ref: ObjectRef) -> str:
         _check_ref(ref)
+        return self._role(ref.bucket_role)
+
+    def _role(self, role: str) -> str:
         try:
-            return self._buckets[ref.bucket_role]
+            return self._buckets[role]
         except KeyError:
             raise ValueError("No bucket for this role") from None
 
@@ -397,6 +487,7 @@ class R2Store:
                     "--low-level-retries=1",
                 ],
                 env_kind="storage",
+                timeout=transfer_timeout(ref.size),
             )
             if result.returncode:
                 raise StorageError("Native object download failed")
@@ -414,14 +505,14 @@ class R2Store:
     def replace(self, ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
         return self._write(ref, source, _etag(expected_etag))
 
-    def read_private(self, key: str, *, max_bytes: int) -> tuple[bytes, ObjectStat] | None:
-        _check_private_read(key, max_bytes)
-        bucket = self._buckets["private"]
+    def read(self, role: str, key: str, *, max_bytes: int) -> tuple[bytes, ObjectStat] | None:
+        _check_read(key, max_bytes)
+        bucket = self._role(role)
         before = self._head(bucket, key)
         if before is None:
             return None
         if before.size > max_bytes:
-            raise StorageError("Private object exceeds the read limit")
+            raise StorageError("Stored object exceeds the read limit")
         data = b""
         if before.size:
             with _temporary(self._runtime.root / "tmp") as temporary:
@@ -436,9 +527,10 @@ class R2Store:
                         str(temporary),
                     ),
                     env_kind="storage",
+                    timeout=transfer_timeout(before.size),
                 )
                 if result.returncode:
-                    raise StorageError("Native private object read failed")
+                    raise StorageError("Native object read failed")
                 value = self._response(result.stdout)
                 if (
                     self._response_etag(value) != before.etag
@@ -446,28 +538,203 @@ class R2Store:
                     or value["ContentLength"] != before.size
                     or temporary.stat().st_size != before.size
                 ):
-                    raise StorageError("Private object changed during read")
+                    raise StorageError("Stored object changed during read")
                 with temporary.open("rb") as stream:
                     data = stream.read(before.size + 1)
                 if len(data) != before.size:
-                    raise StorageError("Private object changed during read")
+                    raise StorageError("Stored object changed during read")
         if self._head(bucket, key) != before:
-            raise StorageError("Private object changed during read")
+            raise StorageError("Stored object changed during read")
         return data, before
 
-    def _observe(self, ref: ObjectRef) -> WriteReceipt | None:
+    def delete(self, role: str, key: str, *, expected_etag: str) -> None:
+        expected_etag = _etag(expected_etag)
+        safe_key(key)
+        bucket = self._role(role)
+        current = self._head(bucket, key)
+        if current is None or current.etag != expected_etag:
+            raise PreconditionFailed("Remote object precondition failed")
+        result = self._runtime.run(
+            self._aws("delete-object", {"Bucket": bucket, "Key": key, "IfMatch": expected_etag}),
+            env_kind="storage",
+        )
+        if result.returncode:
+            if re.search(
+                rb"\((?:412|PreconditionFailed)\) when calling the DeleteObject operation",
+                result.stderr,
+            ):
+                raise PreconditionFailed("Remote object precondition failed")
+            raise StorageError("Native object delete failed")
+
+    def _rclone(self, *arguments: str) -> list[str]:
+        return [
+            "rclone",
+            *arguments,
+            "--s3-provider=Cloudflare",
+            "--s3-env-auth",
+            "--s3-region=auto",
+            f"--s3-endpoint={self._endpoint}",
+            "--s3-no-check-bucket",
+        ]
+
+    def upload(self, outputs: Sequence[OutputObject], *, progress: Report = quiet) -> None:
+        """Copy new immutable objects of one bucket with one `rclone` run per header group.
+
+        The caller passes only objects that the published inventory does not reference.
+        `--checksum` skips identical leftovers of a failed run and overwrites changed ones.
+        One listing then confirms the size and MD5 of every uploaded key.
+        """
+        if self._uncertain:
+            raise UnknownWrite()
+        if not outputs:
+            return
+        roles = {output.ref.bucket_role for output in outputs}
+        if len(roles) != 1:
+            raise ValueError("One upload covers one bucket")
+        role = roles.pop()
+        bucket = self._role(role)
+        with tempfile.TemporaryDirectory(
+            prefix="hd-upload-", dir=self._runtime.root / "tmp"
+        ) as directory:
+            root = Path(directory)
+            staging = root / "objects"
+            expected: dict[str, tuple[int, str]] = {}
+            groups: dict[tuple[str, str], list[ObjectRef]] = {}
+            for output in outputs:
+                ref = output.ref
+                _check_ref(ref)
+                if ref.key in expected:
+                    raise ValueError("Duplicate upload key")
+                target = safe_path(staging, ref.key)
+                _mkdir(target.parent)
+                _snapshot(ref, output.local_path, target)
+                with target.open("rb") as stream:
+                    expected[ref.key] = ref.size, hashlib.file_digest(stream, "md5").hexdigest()
+                groups.setdefault((ref.content_type, ref.cache_control), []).append(ref)
+            keys = root / "all.list"
+            atomic_write(keys, "".join(f"{key}\n" for key in expected).encode())
+            try:
+                for index, ((content_type, cache_control), refs) in enumerate(
+                    sorted(groups.items())
+                ):
+                    listing = root / f"{index}.list"
+                    atomic_write(listing, "".join(f"{ref.key}\n" for ref in refs).encode())
+                    result = self._runtime.run(
+                        self._rclone(
+                            "copy",
+                            str(staging),
+                            f":s3:{bucket}",
+                            f"--files-from-raw={listing}",
+                            "--no-traverse",
+                            "--checksum",
+                            f"--transfers={UPLOAD_TRANSFERS}",
+                            f"--checkers={UPLOAD_TRANSFERS}",
+                            "--s3-upload-cutoff=16M",
+                            "--s3-chunk-size=16M",
+                            "--s3-upload-concurrency=4",
+                            f"--header-upload=Content-Type: {content_type}",
+                            f"--header-upload=Cache-Control: {cache_control}",
+                            "--stats=10s",
+                            "--stats-one-line",
+                            "--stats-log-level=NOTICE",
+                        ),
+                        env_kind="storage",
+                        timeout=transfer_timeout(sum(ref.size for ref in refs)),
+                        progress=_stats(progress),
+                    )
+                    if result.returncode:
+                        raise UnknownWrite(None, f"{role} upload: {_rclone_error(result)}")
+                result = self._runtime.run(
+                    self._rclone(
+                        "lsjson",
+                        f":s3:{bucket}",
+                        f"--files-from-raw={keys}",
+                        "--no-traverse",
+                        "--recursive",
+                        "--files-only",
+                        "--hash",
+                        "--hash-type=md5",
+                    ),
+                    env_kind="storage",
+                    timeout=transfer_timeout(0) + len(expected) / UPLOAD_TRANSFERS,
+                )
+                if result.returncode:
+                    raise UnknownWrite(None, f"{role} upload: {_rclone_error(result)}")
+                try:
+                    listed = {
+                        str(item["Path"]): (item["Size"], item.get("Hashes", {}).get("md5"))
+                        for item in json.loads(result.stdout)
+                    }
+                except ValueError, TypeError, KeyError, AttributeError:
+                    raise UnknownWrite(None, f"{role} upload: invalid rclone listing") from None
+                differ = sorted(key for key, value in expected.items() if listed.get(key) != value)
+                if differ:
+                    raise UnknownWrite(
+                        None,
+                        f"{role} upload: {plural(len(differ), 'object')} differ after upload,"
+                        f" first {differ[0]}",
+                    )
+            except (UnknownWrite, RuntimeFailure, OSError) as error:
+                self._uncertain = True
+                if isinstance(error, UnknownWrite):
+                    raise
+                raise UnknownWrite(None, f"{role} upload: {error}") from error
+
+    def _matches(self, ref: ObjectRef, bucket: str, md5: str) -> ObjectStat | None:
+        """Return the stored object when its size and single-part MD5 ETag match the upload."""
         try:
-            with _temporary(self._runtime.root / "tmp") as temporary:
-                result = self.download(ref, temporary)
-                return WriteReceipt(result.etag, ref.sha256, ref.size)
-        except OSError, StorageError, RuntimeFailure, ValueError:
+            current = self._head(bucket, ref.key)
+        except StorageError, RuntimeFailure:
             return None
+        if current is None or current.size != ref.size or current.etag.strip('"') != md5:
+            return None
+        return current
+
+    def _put(
+        self, ref: ObjectRef, bucket: str, command: list[str], md5: str, *, create: bool
+    ) -> WriteReceipt:
+        """Retry a create only. A precondition failure on a retry can be the earlier attempt."""
+        timeout = transfer_timeout(ref.size)
+        cause = ""
+        for attempt in range(WRITE_ATTEMPTS if create else 1):
+            if attempt:
+                time.sleep(WRITE_RETRY_SECONDS)
+            try:
+                result = self._runtime.run(command, env_kind="storage", timeout=timeout)
+            except RuntimeFailure as error:
+                cause = str(error)
+                continue
+            if result.returncode:
+                code = re.search(
+                    rb"\(([A-Za-z0-9]+)\) when calling the PutObject operation", result.stderr
+                )
+                cause = code[1].decode() if code else f"aws exited with {result.returncode}"
+                if cause in {"412", "PreconditionFailed", "409", "ConditionalRequestConflict"}:
+                    if not attempt:
+                        raise PreconditionFailed("Remote object precondition failed")
+                    cause += " on retry"
+                    break
+                continue
+            try:
+                etag = self._response_etag(self._response(result.stdout))
+            except StorageError as error:
+                cause = str(error)
+                break
+            current = self._matches(ref, bucket, md5)
+            if current is None or current.etag != etag:
+                raise UnknownWrite(ref, "stored object differs from the upload")
+            return WriteReceipt(etag, ref.sha256, ref.size)
+        current = self._matches(ref, bucket, md5)
+        if current is None:
+            raise UnknownWrite(ref, cause)
+        return WriteReceipt(current.etag, ref.sha256, ref.size)
 
     def _write(self, ref: ObjectRef, source: Path, expected: str | None) -> WriteReceipt:
         if self._uncertain:
             raise UnknownWrite()
+        bucket = self._bucket(ref)
         parameters: dict[str, str | int] = {
-            "Bucket": self._bucket(ref),
+            "Bucket": bucket,
             "Key": ref.key,
             "ContentLength": ref.size,
             "ContentType": ref.content_type,
@@ -482,32 +749,15 @@ class R2Store:
         try:
             with _temporary(self._runtime.root / "tmp") as temporary:
                 _snapshot(ref, source, temporary)
+                with temporary.open("rb") as stream:
+                    md5 = hashlib.file_digest(stream, "md5").hexdigest()
                 command = self._aws("put-object", parameters, "--body", str(temporary))
                 started = True
                 try:
-                    try:
-                        result = self._runtime.run(command, env_kind="storage")
-                    except RuntimeFailure:
-                        self._uncertain = True
-                        raise UnknownWrite(self._observe(ref)) from None
-                    if result.returncode:
-                        if re.search(
-                            rb"\((?:412|PreconditionFailed|409|ConditionalRequestConflict)\) when calling the PutObject operation",
-                            result.stderr,
-                        ):
-                            raise PreconditionFailed("Remote object precondition failed")
-                        self._uncertain = True
-                        raise UnknownWrite(self._observe(ref))
-                    try:
-                        etag = self._response_etag(self._response(result.stdout))
-                    except StorageError:
-                        self._uncertain = True
-                        raise UnknownWrite(self._observe(ref)) from None
-                    observed = self._observe(ref)
-                    if observed is None or observed.etag != etag:
-                        self._uncertain = True
-                        raise UnknownWrite(observed)
+                    observed = self._put(ref, bucket, command, md5, create=expected is None)
                 except (PreconditionFailed, UnknownWrite) as error:
+                    if isinstance(error, UnknownWrite):
+                        self._uncertain = True
                     failure = error
                     raise
         except OSError as error:
@@ -516,7 +766,7 @@ class R2Store:
             if not started:
                 raise
             self._uncertain = True
-            raise UnknownWrite(observed) from error
+            raise UnknownWrite(ref, type(error).__name__, observed) from error
         return observed
 
 

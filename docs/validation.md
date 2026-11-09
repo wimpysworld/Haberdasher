@@ -1,6 +1,6 @@
-# Validation and activation
+# Validation
 
-Local tests qualify the Python publisher and native adapters with synthetic inputs. They do not activate production services.
+This page is the status page. It lists the local checks, the production checks still to do, and the checks done. Other docs describe design and behaviour only.
 
 ## Reproduce locally
 
@@ -16,9 +16,9 @@ just lint
 just proof
 ```
 
-Setup checks `uv.lock` and synchronises the root `.venv` without Python downloads. Build creates the Python wheel and source archive. Test runs unit tests and shell routing/isolation tests. Lint checks Python formatting, Ruff, strict BasedPyright, dependency audit, shell scripts, workflows, and Nix formatting. Dependency audit can contact its advisory service.
+Setup checks `uv.lock` and synchronises the root `.venv` without Python downloads. Build creates the Python wheel and source archive. Test runs unit tests and the shell tests of the Just tool and proof routing scripts. Lint checks Python formatting, Ruff, strict BasedPyright, dependency audit, shell scripts, workflows, and Nix formatting. Dependency audit can contact its advisory service.
 
-`just proof` clears inherited credentials. It runs the five preserved shell proofs, then the native suite with private HOME and TMPDIR. Tests create disposable keys, roots, packages, and loopback servers. They make no production credential reads, cloud writes, host installs, or application launches.
+`just proof` clears inherited credentials and runs the native suite with private HOME and TMPDIR. Tests create disposable keys, roots, packages, and loopback servers. They make no production credential reads, cloud writes, host installs, or application launches.
 
 The path-based flake includes current files without Git staging:
 
@@ -27,60 +27,64 @@ nix flake check "path:$PWD" --no-write-lock-file
 nix flake check "path:$PWD" --no-write-lock-file --no-build --all-systems
 ```
 
-The first command builds the current system's checks. The second evaluates all declared systems. Evaluation does not prove runtime support. Only `x86_64-linux` has native runtime acceptance. ARM Linux and Darwin remain evaluation-only. The proof router rejects unqualified systems.
+The first command builds the current system's checks. The second evaluates all declared systems. Evaluation does not prove runtime support. Only `x86_64-linux` has native runtime acceptance. ARM Linux and Darwin are evaluation-only. The proof router rejects other systems.
 
 ## Evidence map
 
 | Boundary | Executable evidence | What it establishes |
 | --- | --- | --- |
-| CLI and configuration | `tests/unit/test_cli.py`, `test_config.py` | Default planning, strict policy, explicit destinations, early format-selection rejection |
-| Discovery and admission | `tests/unit/`, `tests/native/test_pipeline.py` | Release reconciliation, late assets, pending checksums, native identity conflicts, no-op behaviour |
-| Durable publication | `tests/unit/test_state.py`, `test_publish.py`, `test_recovery.py` | Conditional writes, exclusion, fault injection, exact frozen replay, private completion |
-| Hosted policy input | `tests/unit/test_publish_workflow.py` | Synthetic workflow execution, exact policy bytes, private permissions, empty-input rejection, cleanup on success, failure, and signals |
+| CLI and configuration | `tests/unit/test_cli.py`, `test_config.py` | Three commands without options, read-only planning, a `sources` list as the only key, early rejection of missing credentials |
+| Discovery and admission | `tests/unit/test_discovery.py`, `tests/native/test_pipeline.py` | Only the GitHub "Latest" release is read, a source without one, no backfill of older releases, late assets, packages without a checksum, cosign bundles, native identity conflicts, no-op behaviour |
+| Locked publication | `tests/unit/test_publish.py`, `test_storage.py` | Bucket locks, `unlock`, conditional writes and deletes, unchanged reruns, late assets, a new latest release that keeps the published version, unsupported assets skipped with one line, interruptions before and after an entry write followed by a full rerun |
+| Hosted workflow | `tests/unit/test_publish_workflow.py` | Workflow gates, step inputs, and the exact publish command, with a synthetic `nix` |
 | Storage clients | `tests/native/test_storage_clients.py` | Native transport against local protocol fixtures, not real R2 permissions |
-| Native adapters | `tests/native/test_{apt,rpm,arch,apk,flatpak}.py` | Retained state, install/update, rejection cases, local HTTP acquisition |
+| Native adapters | `tests/native/test_{apt,rpm,arch,apk,flatpak}.py` | Retained state, install/update, rejection cases, signed upstream packages, local HTTP acquisition |
 | Served trust | `tests/native/test_pipeline.py` | Fetched public keys, full independent fixture fingerprint, fresh and existing strict clients |
-| Historical proofs | `tests/proofs/` | Independent shell approaches and their original format boundaries |
 
-The pipeline runs the real CLI with recorded GitHub responses, real native adapters, durable local storage, and loopback HTTP clients. It checks unchanged runs and assets added to an existing release. Recovery removes source packages and signing access, then uses exact frozen bytes. Bootstrap interruptions check key-before-entry ordering and acknowledgement recovery.
+The pipeline runs the real CLI with recorded GitHub responses, real native adapters, durable local storage, and loopback HTTP clients. It checks unchanged runs, which write only their locks, and assets added to the latest release. For each format, interruptions before the first entry write and after each entry write, and interruptions during bootstrap key writes, each converge with a full rerun to signed metadata that native clients install with signature checks on. A further rerun writes only its locks.
 
-See [the proof index](proofs/README.md) for preserved shell evidence. Do not substitute those scripts for production adapter acceptance.
+See [the proof index](proofs/README.md) for the native tests of each format.
 
 ## Safe example checks
 
-`just publish --help` needs no token or key. Parse the README source example with `load_config` and the publisher policy example with `load_policy` from `src/haberdasher/config.py`.
+`python -m haberdasher --help` needs no token or key. Parse the README source example with `load_config` from `src/haberdasher/config.py`.
 
-Decode the recovery example with `state.parse` and `state.decode_record(state.RecoveryEvidence, ...)`. Schema validity proves no operator assertion. Never use sample evidence to unlock a real owner.
-
-Run `tests/native/test_pipeline.py` for served-key trust without production URLs or credentials. APT deb822 templates must retain the same scoped key, suite, component, and architecture as the tested client.
+Run `tests/native/test_pipeline.py` for served-key trust without production URLs or credentials. APT deb822 templates must keep the same scoped key, suite, component, and architecture as the tested client.
 
 ## CI boundary
 
 `.github/workflows/check.yml` uses pinned checkout and Determinate Nix actions. It runs the same Just setup, build, test, lint, and proof path. Permissions are `contents: read`, with no persisted checkout credentials.
 
-`.github/workflows/publish.yml` has only `workflow_dispatch`. The job requires `HD_PUBLISH_ENABLED == 'true'`, the default branch, and the `publisher` environment. Concurrency does not replace durable publisher ownership. There is no scheduled trigger.
+`.github/workflows/publish.yml` has only `workflow_dispatch`. The job requires `HD_PUBLISH_ENABLED == 'true'`, the default branch, and the `publisher` environment. Concurrency does not replace the bucket locks. There is no scheduled trigger.
 
 The workflow passes `github.token` as `GH_TOKEN` with `contents: read`. Storage variables and `HD_SIGNING_KEY` come from secrets. These inputs stay scoped to the publish step.
 
-Before activation, configure the protected `publisher` environment with the secret `HD_PUBLISH_POLICY`. Set its value to the complete, approved YAML publisher policy, using the [publisher policy example](publisher.md#configuration) as the schema reference. Do not put credentials or private signing keys in the policy. Keep those values in their existing dedicated secrets. Policy approvals require an operator decision, not a copy of sample approvals.
+The publish step runs `just publish`. It reads sources from the committed `haberdasher.yaml`. Buckets are in code. No secret holds publisher configuration.
 
-The publish step rejects an empty `HD_PUBLISH_POLICY` before publication. It writes the exact bytes without logging them to a mode `0600` temporary file under `/tmp`, outside the checkout and Nix store. It uses `umask 077` and passes the private path through `--policy-file`. Exit and `HUP`, `INT`, and `TERM` traps remove the file after success, failure, or interruption. The step removes `HD_PUBLISH_POLICY` from the environment before it starts Nix.
+## Production checks
 
-This change does not provision secrets, change environment protection, or enable `HD_PUBLISH_ENABLED`. Keep publication disabled until the activation gates below pass. Workflow configuration alone does not prove hosted access.
+Keep `HD_PUBLISH_ENABLED` unset until every check in this list is done, except while you test hosted execution. Unset it again after that test. Use publisher credentials for the R2 checks, not the administration token. A read-only credential check does not prove write or CI permissions.
 
-## Remaining activation gates
+To do:
 
-| Gate | Required action before activation |
-| --- | --- |
-| Real R2 | Approve and test publisher credentials, conditional create/replace, exact ETags, and ambiguous-request recovery against disposable destinations |
-| Private control storage | Approve a separate non-public bucket, access boundaries, and durable recovery records |
-| Production signing | Approve use of the existing production identity and verify its full fingerprint without exposing private bytes |
-| Hosted execution | Approve CI secrets, default-branch policy, environment protection, and hosted permissions |
-| Public delivery | Qualify custom-domain HTTPS, content types, cache headers, delayed clients, and split entry/signature recovery |
-| APK policy | Approve native v2 SHA1 control identity and declared real inputs/client compatibility |
-| Flatpak policy | Approve source owner, application refs, runtime origin, extensions, and empty collection policy |
-| Distribution clients | Test declared official distribution images and architectures separately from pinned Nix clients |
+- [ ] Real R2: test lock conflicts, conditional replace and delete, and exact ETags against disposable buckets.
+- [ ] Hosted execution: set the CI secrets, `HD_PUBLISH_ENABLED`, and the `publisher` environment protection, then test hosted permissions.
+- [ ] Public delivery: test HTTPS, content types, cache headers, delayed clients, and split entry/signature reads on the live domains.
+- [ ] Distribution clients: test official images for each format, including `arm64` APT and `aarch64` packages, separately from the pinned Nix clients.
 
-Already-signed RPMs and signed upstream Flatpak bundles remain rejected. Flatpak source/runtime approval is pending, with no automatic source addition. No activation test above ran as part of the local acceptance path.
+Done:
 
-Obtain explicit approval before production credentials, key use, public actions, or external permission tests. No deletion or retention change forms part of activation.
+- [x] Real R2 publication with publisher credentials: conditional lock writes, lock release, and parallel `rclone` uploads with size and MD5 checks.
+- [x] Real R2 recovery after a network interruption during upload: the first full publish on 2026-11-09 completed after a router restart stalled the APT upload for about 3 minutes.
+- [x] Live installs with signature checks on, using the pinned Nix clients in private roots: Tailor 0.6.0 with APT, DNF5, pacman, and apk on x86_64, with `tailor --version` from each; arm64 and aarch64 packages downloaded and verified for every format; Sidra 1.3.0 from its `.flatpakref`, with the runtime from Flathub. Served packages match the upstream assets byte for byte, except where Haberdasher signs them.
+- [x] Production signing: `just publish` matched the production key to `PRODUCTION_FINGERPRINT` and signed all five formats.
+- [x] Real inputs: the latest Tailor and Sidra releases published to all five repositories.
+- [x] Live APT metadata: `dists/stable/InRelease` has a `Date` and no `Valid-Until`, and the APT inventory has no expiry.
+- [x] Domain activation: each custom domain is attached to its bucket, with SSL and ownership `active` and `r2.dev` access off.
+- [x] Native signature checks on pinned Nix clients for all five formats, over loopback HTTP.
+- [x] Latest-release discovery, checksum verification, and cosign verification against recorded GitHub responses.
+- [x] Bucket locks, `just unlock`, and a full rerun after an interruption before or after any entry write, on local storage.
+- [x] Unchanged reruns that write only locks, and assets added to the latest release.
+- [x] Signed upstream RPM, Arch, APK, and Flatpak inputs that Haberdasher publishes with its own signature.
+- [x] Flatpak runs that download only the working set.
+- [x] Publish workflow gates and step inputs, with a synthetic `nix`.

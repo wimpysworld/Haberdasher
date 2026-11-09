@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
 
@@ -28,6 +28,47 @@ STORAGE_VARIABLES = (
 
 class RuntimeFailure(RuntimeError):
     pass
+
+
+def transfer_timeout(size: int) -> float:
+    """Allow 120 seconds plus a slow 64 KiB/s for each transfer of `size` bytes."""
+    return 120 + size / 65536
+
+
+# The variables that locate a stored `gh` login and its system keyring.
+GH_LOGIN_VARIABLES = (
+    "HOME",
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+)
+
+
+def _gh_login_token(path: str) -> str | None:
+    """Read the token of the operator's stored `gh` login, when one exists."""
+    executable = shutil.which("gh", path=path)
+    if executable is None:
+        return None
+    login = {key: os.environ[key] for key in GH_LOGIN_VARIABLES if key in os.environ}
+    try:
+        result = subprocess.run(
+            [executable, "auth", "token", "--hostname", "github.com"],
+            env={**login, "PATH": path, "GH_PROMPT_DISABLED": "1"},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return None
+    token = result.stdout.decode("ascii", "replace").strip()
+    if result.returncode != 0 or not token or any(char.isspace() for char in token):
+        return None
+    return token
 
 
 class Runtime:
@@ -46,6 +87,7 @@ class Runtime:
         source = os.environ if environ is None else environ
         self._path = source.get("HABERDASHER_TOOL_PATH", source.get("PATH", os.defpath))
         self._github = {key: source[key] for key in GITHUB_VARIABLES if key in source}
+        self._github_login = environ is None and not self._github
         self._storage = {key: source[key] for key in STORAGE_VARIABLES if key in source}
         self._children: set[subprocess.Popen[bytes]] = set()
         self._closed = False
@@ -81,6 +123,11 @@ class Runtime:
     def environment_for(self, kind: str) -> dict[str, str]:
         env = dict(self._base)
         if kind == "github":
+            if self._github_login and not self._closed:
+                self._github_login = False
+                token = _gh_login_token(self._path)
+                if token:
+                    self._github = {"GH_TOKEN": token}
             env.update(self._github)
             env.update(
                 {
@@ -137,7 +184,9 @@ class Runtime:
         input: bytes | None = None,
         timeout: float = 120,
         env_kind: str = "native",
+        progress: Callable[[str], None] | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
+        """Run one native command. `progress` receives each redacted stderr line as it arrives."""
         if self._closed:
             raise RuntimeFailure("Runtime is closed")
         if (
@@ -167,7 +216,7 @@ class Runtime:
             raise RuntimeFailure("Could not start native command") from None
         self._children.add(process)
         outputs = {"stdout": bytearray(), "stderr": bytearray()}
-        total = sent = 0
+        total = sent = streamed = 0
         try:
             with selectors.DefaultSelector() as selector:
                 for stream, name in ((process.stdout, "stdout"), (process.stderr, "stderr")):
@@ -184,7 +233,9 @@ class Runtime:
                 while selector.get_map():
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise RuntimeFailure("Native command timed out")
+                        raise RuntimeFailure(
+                            f"Native command timed out after {timeout:.0f} seconds"
+                        )
                     for key, _ in selector.select(remaining):
                         if key.data == "stdin":
                             try:
@@ -204,10 +255,17 @@ class Runtime:
                             if total > self.max_output:
                                 raise RuntimeFailure("Native command exceeded the output limit")
                             outputs[key.data].extend(block)
+                            if progress is not None and key.data == "stderr":
+                                lines = outputs["stderr"][streamed:].split(b"\n")
+                                for line in lines[:-1]:
+                                    progress(self.redact(bytes(line)).decode(errors="replace"))
+                                streamed = len(outputs["stderr"]) - len(lines[-1])
                 try:
                     process.wait(timeout=max(0, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
-                    raise RuntimeFailure("Native command timed out") from None
+                    raise RuntimeFailure(
+                        f"Native command timed out after {timeout:.0f} seconds"
+                    ) from None
             return subprocess.CompletedProcess(
                 [self.redact(arg.encode()).decode() for arg in argv],
                 process.returncode,

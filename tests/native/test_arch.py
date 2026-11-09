@@ -16,7 +16,13 @@ import pytest
 
 from haberdasher.admission import AdmissionFailure, admit
 from haberdasher.config import FormatPolicy
-from haberdasher.core import AdmittedAsset, PreparedFormat, RetainedFormat, sha256_file
+from haberdasher.core import (
+    AdmittedAsset,
+    PreparedFormat,
+    RetainedFormat,
+    UnsupportedAsset,
+    sha256_file,
+)
 from haberdasher.formats import arch
 from haberdasher.runtime import Runtime, private_workspace
 from haberdasher.signing import signing_session
@@ -173,7 +179,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
         print(run(runtime, "pacman", "--version").decode())
         print(run(runtime, "repo-add", "--version").decode())
         print("pacman:", shutil.which("pacman", path=runtime.environment["PATH"]))
-        empty = RetainedFormat("arch", None, (), (), {}, ())
+        empty = RetainedFormat("arch", (), (), {}, ())
         arch.validate_retained(empty, policy=POLICY, runtime=runtime)
         assets = [
             fixture(runtime, "keeper", "1", dependency="updateable>=1"),
@@ -197,8 +203,11 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         with pytest.raises(AdmissionFailure, match="Changed bytes"):
             admit(inspected, accepted, compare=arch.compare, policy=POLICY, runtime=runtime)
-        unqualified = fixture(runtime, "unqualified", "1", architecture="any")
-        with pytest.raises(arch.ArchFailure, match="qualified"):
+        unqualified = fixture(runtime, "unqualified", "1", architecture="armv7h")
+        with pytest.raises(
+            UnsupportedAsset,
+            match="^unqualified-1-1-armv7h.pkg.tar.zst: unsupported Arch architecture 'armv7h'$",
+        ):
             arch.inspect(
                 unqualified, policy=POLICY, runtime=runtime, out=runtime.root / "unqualified"
             )
@@ -213,7 +222,6 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         state = replace(
             first.retained,
-            prior_generation="one",
             metadata={
                 **first.retained.metadata,
                 "etags": {output.ref.key: "opaque-one" for output in first.outputs},
@@ -236,12 +244,12 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
             now=NOW,
             out=runtime.root / "generation2",
         )
-        arch.validate_prepared(second, policy=POLICY, runtime=runtime, now=NOW)
+        arch.validate_prepared(second, policy=POLICY, runtime=runtime)
         assert len(second.retained.accepted_history) == 3
         assert len(second.retained.active_identities) == 2
         assert [
             output.ref.key for output in second.outputs if output.ref.object_class == "entry"
-        ] == list(arch.ENTRIES)
+        ] == list(arch.entries("x86_64"))
         assert all(not output.local_path.is_symlink() for output in second.outputs)
         assert all(
             output.expected_etag == "opaque-one"
@@ -406,7 +414,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
             saved = path.read_bytes()
             path.write_bytes(b"")
             with pytest.raises((arch.ArchFailure, ValueError)):
-                arch.validate_prepared(second, policy=POLICY, runtime=runtime, now=NOW)
+                arch.validate_prepared(second, policy=POLICY, runtime=runtime)
             path.write_bytes(saved)
         reordered = replace(
             second,
@@ -416,7 +424,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
             ),
         )
         with pytest.raises(arch.ArchFailure):
-            arch.validate_prepared(reordered, policy=POLICY, runtime=runtime, now=NOW)
+            arch.validate_prepared(reordered, policy=POLICY, runtime=runtime)
         real_run = runtime.run
         real_gpg = shutil.which("gpg", path=runtime.environment["PATH"])
         shell = shutil.which("bash", path=runtime.environment["PATH"])
@@ -475,3 +483,161 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
                     now=NOW,
                     out=runtime.root / "failed-package-signature",
                 )
+
+
+def test_arch_native_multiarch() -> None:
+    policy = FormatPolicy("arch", ("x86_64", "aarch64"))
+    with (
+        disposable_key() as key,
+        private_workspace(Path("/tmp")) as runtime,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+    ):
+        empty = RetainedFormat("arch", (), (), {}, ())
+        accepted: list[AdmittedAsset] = []
+        for architecture in ("x86_64", "aarch64"):
+            asset = fixture(
+                runtime,
+                "multi",
+                "1",
+                architecture=architecture,
+                content=f"multi-{architecture}",
+                label=architecture,
+            )
+            inspected = arch.inspect(
+                asset, policy=policy, runtime=runtime, out=runtime.root / f"inspect-{architecture}"
+            )
+            assert inspected.identity.architecture == architecture
+            accepted.append(
+                admit(inspected, accepted, compare=arch.compare, policy=policy, runtime=runtime)
+            )
+        with pytest.raises(UnsupportedAsset, match="unsupported Arch architecture 'aarch64'"):
+            arch.inspect(
+                accepted[1].inspected.verified,
+                policy=POLICY,
+                runtime=runtime,
+                out=runtime.root / "inspect-unconfigured",
+            )
+        prepared = arch.prepare(
+            accepted,
+            empty,
+            policy=policy,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "generation1",
+        )
+        assert [
+            output.ref.key for output in prepared.outputs if output.ref.object_class == "entry"
+        ] == [*arch.entries("aarch64"), *arch.entries("x86_64")]
+        live = runtime.root / "live"
+        live.mkdir()
+        publish(prepared, live)
+        with serve(live) as http:
+            for architecture in ("x86_64", "aarch64"):
+                http.set_generation_mtime(list((live / architecture).iterdir()), 1)
+                pacman = client(
+                    runtime,
+                    f"multi-{architecture.replace('_', '-')}",
+                    http.url(architecture),
+                    key,
+                    architecture=architecture,
+                )
+                pacman.checked("-Sy")
+                pacman.checked("-S", "multi")
+                assert pacman.checked("-Q", "multi").strip() == b"multi 1-1"
+                assert (
+                    pacman.client.path("root/usr/share/arch-test/multi.txt").read_text()
+                    == f"multi-{architecture}\n"
+                )
+                package = f"multi-1-1-{architecture}.pkg.tar.zst"
+                source = next(
+                    item.inspected.verified
+                    for item in accepted
+                    if item.inspected.identity.architecture == architecture
+                )
+                assert sha256_file(pacman.client.path("cache/" + package)) == (
+                    source.sha256,
+                    source.size,
+                )
+            mismatched = client(
+                runtime, "mismatched", http.url("aarch64"), key, architecture="x86_64"
+            )
+            mismatched.checked("-Sy")
+            assert mismatched.run("-S", "multi").returncode != 0
+            assert not mismatched.client.path("root/usr/share/arch-test/multi.txt").exists()
+
+
+def test_arch_native_any_package_in_every_architecture() -> None:
+    policy = FormatPolicy("arch", ("x86_64", "aarch64"))
+    with (
+        disposable_key() as key,
+        private_workspace(Path("/tmp")) as runtime,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+    ):
+        empty = RetainedFormat("arch", (), (), {}, ())
+        accepted: list[AdmittedAsset] = []
+        for name, architecture, extension in (
+            ("native", "x86_64", ".pkg.tar.zst"),
+            ("shared", "any", ".pkg.tar.xz"),
+        ):
+            asset = fixture(
+                runtime,
+                name,
+                "1",
+                architecture=architecture,
+                content=f"{name}-{architecture}",
+                extension=extension,
+            )
+            inspected = arch.inspect(
+                asset, policy=policy, runtime=runtime, out=runtime.root / f"inspect-{name}"
+            )
+            assert inspected.identity.architecture == architecture
+            accepted.append(
+                admit(inspected, accepted, compare=arch.compare, policy=policy, runtime=runtime)
+            )
+        prepared = arch.prepare(
+            accepted,
+            empty,
+            policy=policy,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "generation1",
+        )
+        keys = [output.ref.key for output in prepared.outputs]
+        for directory in ("x86_64", "aarch64"):
+            assert f"{directory}/shared-1-1-any.pkg.tar.xz" in keys
+            assert f"{directory}/shared-1-1-any.pkg.tar.xz.sig" in keys
+        assert "aarch64/native-1-1-x86_64.pkg.tar.zst" not in keys
+        assert [key for key in keys if key.endswith(".db.tar.gz")] == [
+            "aarch64/haberdasher.db.tar.gz",
+            "x86_64/haberdasher.db.tar.gz",
+        ]
+        arch.validate_retained(prepared.retained, policy=policy, runtime=runtime)
+        live = runtime.root / "live"
+        live.mkdir()
+        publish(prepared, live)
+        shared = accepted[1].inspected.verified
+        with serve(live) as http:
+            for architecture in ("x86_64", "aarch64"):
+                http.set_generation_mtime(list((live / architecture).iterdir()), 1)
+                pacman = client(
+                    runtime,
+                    f"any-{architecture.replace('_', '-')}",
+                    http.url(architecture),
+                    key,
+                    architecture=architecture,
+                )
+                pacman.checked("-Sy")
+                pacman.checked("-S", "shared")
+                assert pacman.checked("-Q", "shared").strip() == b"shared 1-1"
+                assert sha256_file(pacman.client.path("cache/shared-1-1-any.pkg.tar.xz")) == (
+                    shared.sha256,
+                    shared.size,
+                )
+                native = pacman.run("-S", "native")
+                assert (native.returncode == 0) is (architecture == "x86_64")

@@ -10,7 +10,7 @@ export PATH="$HABERDASHER_TOOL_PATH"
 tools=(
     bash env cat cp mv rm mkdir mktemp chmod sha256sum sort timeout id
     find xargs grep sed tar gzip xz zstd bsdtar
-    jq curl openssl gpg gpgv gpgsm gpgconf shellcheck shfmt nixfmt rclone
+    jq curl openssl gpg gpgv gpgsm gpgconf cosign shellcheck shfmt nixfmt rclone
     gh just actionlint python3 tailor-python uv ruff basedpyright aws miniserve
 )
 case "${HABERDASHER_TOOL_SYSTEM:-}" in

@@ -14,9 +14,7 @@ from haberdasher.core import (
     ObjectRef,
     ObjectStat,
     OutputObject,
-    Ownership,
     PreparedFormat,
-    PreparedGeneration,
     RetainedFormat,
     SourceAsset,
     VerifiedAsset,
@@ -67,21 +65,15 @@ def ref() -> ObjectRef:
 def test_records(tmp_path: Path) -> None:
     asset = admitted(tmp_path / "package.deb")
     output = OutputObject(ref(), tmp_path / "package.deb", "create", None, 0)
-    retained = RetainedFormat("apt", None, (asset,), (asset.inspected.identity,), {}, (ref(),))
-    prepared = PreparedFormat("apt", retained, (output,), (ref(),), NOW)
-    generation = PreparedGeneration(
-        "one", None, None, "owner", HASH, HASH, {}, (prepared,), {}, HASH
-    )
-    assert json.loads(canonical_json(generation.to_dict()))["schema_version"] == 1
-    assert Ownership("nonce", '"opaque"', "runner", NOW).etag == '"opaque"'
+    retained = RetainedFormat("apt", (asset,), (asset.inspected.identity,), {}, (ref(),))
+    prepared = PreparedFormat("apt", retained, (output,), (ref(),))
+    assert json.loads(canonical_json(prepared.to_dict()))["schema_version"] == 1
     assert ObjectStat('"not-a-hash"', 3).size == 3
     assert WriteReceipt("opaque", HASH, 3).sha256 == HASH
     with pytest.raises(FrozenInstanceError):
         asset.history_key = "changed"  # type: ignore[misc]
     with pytest.raises(ValueError):
         replace(prepared, outputs=(output, output))
-    with pytest.raises(ValueError):
-        replace(generation, previous_completion_id="previous")
     with pytest.raises(ValueError):
         replace(retained, format="rpm")
 
@@ -163,15 +155,15 @@ def test_canonical_json_and_clock() -> None:
         utc_now(lambda: datetime(2026, 1, 1))
 
 
-def test_private_fields_do_not_enter_inventory(tmp_path: Path) -> None:
+def test_inventory_allow_list_excludes_local_and_control_fields(tmp_path: Path) -> None:
     asset = admitted(tmp_path / "PRIVATE-PATH")
     inventory = canonical_json(public_inventory([asset], [ref()]))
     for forbidden in (b"PRIVATE-PATH", b"checksum", b"history_key", b"evidence", b"transformation"):
         assert forbidden not in inventory
     assert HASH.encode() in inventory
-    private = ObjectRef("private", "journal", "private", 3, HASH, "application/json", "no-store")
+    lock = ObjectRef("apt", "haberdasher.lock", "lock", 3, HASH, "application/json", "no-store")
     with pytest.raises(ValueError):
-        public_inventory([asset], [private])
+        public_inventory([asset], [lock])
 
 
 @pytest.mark.parametrize(
@@ -199,37 +191,10 @@ def test_invalid_records(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         replace(ref(), bucket_role="private")
     with pytest.raises(ValueError):
+        replace(ref(), object_class="private")
+    with pytest.raises(ValueError):
         OutputObject(ref(), tmp_path, "replace", None, 0)
     with pytest.raises(ValueError):
         OutputObject(ref(), tmp_path, "create", "unexpected", 0)
     with pytest.raises(ValueError):
         NativeIdentity("apt", "name", "amd64", "1", epoch=True)
-
-
-def test_bootstrap_records_are_explicit_immutable_public_pairs(tmp_path: Path) -> None:
-    from tests.unit.test_state import generation
-
-    owner = Ownership("nonce", "etag", "runner", NOW)
-    original = generation(tmp_path / "input", owner, bootstrap=True)
-    asc, binary = original.bootstrap_objects
-    output = original.bootstrap_outputs[0]
-    for changes in (
-        {"bootstrap_objects": (asc,)},
-        {"bootstrap_objects": (asc, asc)},
-        {"bootstrap_objects": (replace(asc, key="keys/private.key"), binary)},
-        {"bootstrap_objects": (replace(asc, bucket_role="rpm"), binary)},
-        {"bootstrap_objects": (replace(asc, object_class="entry"), binary)},
-        {"bootstrap_outputs": (replace(output, mode="replace", expected_etag="etag"),)},
-        {"bootstrap_outputs": (output, output)},
-        {"bootstrap_outputs": (replace(output, ordinal=3),)},
-        {"signing_fingerprint": None},
-        {"signing_fingerprint": "A" * 16},
-    ):
-        with pytest.raises(ValueError):
-            replace(original, **changes)
-    prepared = original.formats[0]
-    with pytest.raises(ValueError, match="outside native"):
-        replace(
-            original,
-            formats=(replace(prepared, referenced_objects=(*prepared.referenced_objects, asc)),),
-        )

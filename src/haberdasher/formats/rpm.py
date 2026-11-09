@@ -25,12 +25,14 @@ from haberdasher.core import (
     OutputObject,
     PreparedFormat,
     RetainedFormat,
+    UnsupportedAsset,
     VerifiedAsset,
     atomic_write,
     canonical_json,
     safe_key,
     safe_path,
     sha256_file,
+    stale_entries,
 )
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
@@ -81,11 +83,21 @@ def _identity(path: Path, runtime: Runtime) -> NativeIdentity:
         raise RpmFailure("Invalid native RPM identity") from error
 
 
-def _unsigned(path: Path, runtime: Runtime) -> None:
+def _signed(path: Path, runtime: Runtime) -> bool:
     signatures = _run(runtime, ["rpm", "-qp", "--qf", SIGNATURE_QUERY, str(path)])
-    if signatures != b"(none)|(none)|(none)|(none)":
-        raise RpmFailure("Signed upstream RPMs are not supported by the unsigned-input policy")
-    _run(runtime, ["rpmkeys", "--checksig", str(path)])
+    return signatures != b"(none)|(none)|(none)|(none)"
+
+
+def _unsign(source: Path, target: Path, runtime: Runtime) -> str:
+    """Copy source to target without upstream signatures, and check the package digests."""
+    shutil.copyfile(source, target)
+    status = "signed" if _signed(target, runtime) else "unsigned"
+    if status == "signed":
+        _run(runtime, ["rpmsign", "--delsign", str(target)])
+        if _signed(target, runtime):
+            raise RpmFailure("RPM upstream signature removal failed")
+    _run(runtime, ["rpmkeys", "--checksig", str(target)])
+    return status
 
 
 def inspect(
@@ -96,13 +108,17 @@ def inspect(
         raise RpmFailure("Verified RPM bytes changed")
     identity = _identity(asset.local_path, runtime)
     if identity.architecture not in (*policy.architectures, "noarch"):
-        raise RpmFailure("RPM architecture is not approved")
-    _unsigned(asset.local_path, runtime)
+        raise UnsupportedAsset(
+            f"{asset.source.filename}: unsupported RPM architecture {identity.architecture!r}"
+        )
+    out.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="rpm-inspect-", dir=out) as directory:
+        status = _unsign(asset.local_path, Path(directory) / "package.rpm", runtime)
     header = _run(runtime, ["rpm", "-qp", "--xml", str(asset.local_path)])
     parse_xml(header)
     requires = _run(runtime, ["rpm", "-qp", "--requires", str(asset.local_path)]).decode()
     return InspectedAsset(
-        asset, identity, {"header_xml": header.decode()}, {"requires": requires}, "unsigned"
+        asset, identity, {"header_xml": header.decode()}, {"requires": requires}, status
     )
 
 
@@ -229,6 +245,46 @@ def metadata_documents(root: Path) -> dict[str, tuple[str, ET.Element]]:
     return documents
 
 
+def _packages(path: Path) -> int:
+    with gzip.open(path) as stream:
+        data = stream.read(MAX_XML + 1)
+    return int(parse_xml(data).attrib.get("packages", "-1"))
+
+
+def _restore_repomd(root: Path, history: Sequence[AdmittedAsset], runtime: Runtime) -> None:
+    """Write repomd.xml for the published documents that list exactly the accepted history.
+
+    Documents stay published under their digests, and each run adds packages, so only the
+    current documents list as many packages as the history.
+    """
+    with tempfile.TemporaryDirectory(prefix="rpm-repomd-", dir=runtime.root) as directory:
+        work = Path(directory)
+        _run(runtime, ["createrepo_c", "--no-database", "--general-compress-type", "gz", str(work)])
+        for kind in NAMESPACES:
+            current = [
+                path
+                for path in safe_path(root, "repodata").glob(f"*-{kind}.xml.gz")
+                if _packages(path) == len(history)
+            ]
+            if len(current) != 1:
+                raise RpmFailure(f"Cannot find the published {kind} metadata")
+            document = work / f"{kind}.xml.gz"
+            shutil.copyfile(current[0], document)
+            _run(
+                runtime,
+                [
+                    "modifyrepo_c",
+                    "--mdtype",
+                    kind,
+                    "--compress-type",
+                    "gz",
+                    str(document),
+                    str(work / "repodata"),
+                ],
+            )
+        shutil.copyfile(work / ENTRIES[0], safe_path(root, ENTRIES[0]))
+
+
 def _package_identity(package: ET.Element, kind: str) -> NativeIdentity:
     namespace = NAMESPACES[kind][0]
     version = _child(package, namespace + "version")
@@ -288,7 +344,7 @@ def _string(metadata: dict[str, JSONValue], key: str) -> str:
     return value
 
 
-def _trust(retained: RetainedFormat, runtime: Runtime) -> Path:
+def _trust(retained: RetainedFormat, runtime: Runtime) -> None:
     keyring = Path(_string(retained.metadata, "keyring"))
     fingerprint = _string(retained.metadata, "fingerprint")
     if re.fullmatch(r"[A-F0-9]{40}", fingerprint) is None:
@@ -300,7 +356,9 @@ def _trust(retained: RetainedFormat, runtime: Runtime) -> Path:
         line.split(b":")[9].decode() for line in listing.splitlines() if line.startswith(b"fpr:")
     ]
     if fingerprints != [fingerprint]:
-        raise RpmFailure("Retained public trust must contain only the approved primary")
+        raise RpmFailure("Retained public trust must contain only the Haberdasher signing primary")
+    if stale_entries(retained) & set(ENTRIES):
+        return
     root = Path(_string(retained.metadata, "root"))
     status = _run(
         runtime,
@@ -324,8 +382,7 @@ def _trust(retained: RetainedFormat, runtime: Runtime) -> Path:
         or signatures[0][8:10] != [b"1", b"8"]
         or signatures[0][11].decode() != fingerprint
     ):
-        raise RpmFailure("Metadata signature must use the approved primary and SHA256")
-    return keyring
+        raise RpmFailure("Metadata signature must use the Haberdasher signing primary and SHA256")
 
 
 def _verify_package(path: Path, keyring: Path, runtime: Runtime) -> None:
@@ -370,16 +427,14 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
     if retained.format != "rpm":
         raise RpmFailure("Expected retained RPM state")
     if not retained.accepted_history:
-        if (
-            retained.prior_generation is not None
-            or retained.metadata
-            or retained.objects
-            or retained.active_identities
-        ):
+        if retained.metadata or retained.objects or retained.active_identities:
             raise RpmFailure("Incomplete retained RPM state")
         return
     _trust(retained, runtime)
     root = Path(_string(retained.metadata, "root"))
+    stale = stale_entries(retained)
+    if ENTRIES[0] in stale and not safe_path(root, ENTRIES[0]).exists():
+        _restore_repomd(root, retained.accepted_history, runtime)
     records = _records(root, retained.accepted_history)
     objects = {ref.key: ref for ref in retained.objects}
     if len(objects) != len(retained.objects):
@@ -390,13 +445,13 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
         raise RpmFailure("Incomplete active RPM identities")
     for asset in retained.accepted_history:
         if asset.inspected.identity.architecture not in (*policy.architectures, "noarch"):
-            raise RpmFailure("Retained RPM architecture is not approved")
+            raise RpmFailure("Unsupported retained RPM architecture")
         if asset.inspected.metadata.get("rpm_records") != records[asset.history_key]:
             raise RpmFailure("Complete retained RPM records changed")
-        if (
-            asset.transformation_policy != "rpm-sign"
-            or asset.inspected.upstream_signature != "unsigned"
-        ):
+        if asset.transformation_policy != "rpm-sign" or asset.inspected.upstream_signature not in {
+            "unsigned",
+            "signed",
+        }:
             raise RpmFailure("Invalid retained RPM transformation")
         location = _string(asset.inspected.metadata, "location")
         ref = objects.get(location)
@@ -410,8 +465,18 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
             raise RpmFailure("Incomplete source/signed RPM digest evidence")
     for key in (*ENTRIES, *(location for location, _ in metadata_documents(root).values())):
         ref = objects.get(key)
-        if ref is None or sha256_file(safe_path(root, key)) != (ref.sha256, ref.size):
+        if ref is None or (
+            key not in stale and sha256_file(safe_path(root, key)) != (ref.sha256, ref.size)
+        ):
             raise RpmFailure("Retained metadata reference mismatch")
+
+
+def _location(identity: NativeIdentity) -> str:
+    """Name a package `<name>-<version>-<release>.<arch>.rpm`, without the epoch, as Fedora does."""
+    return safe_key(
+        f"packages/{identity.name}-{identity.version}-{identity.release}"
+        f".{identity.architecture}.rpm"
+    )
 
 
 def _ref(path: Path, key: str, kind: str) -> ObjectRef:
@@ -449,9 +514,9 @@ def prepare(
         if (
             asset.inspected.identity.format != "rpm"
             or asset.transformation_policy != "rpm-sign"
-            or asset.inspected.upstream_signature != "unsigned"
+            or asset.inspected.upstream_signature not in {"unsigned", "signed"}
         ):
-            raise RpmFailure("Expected admitted unsigned RPM")
+            raise RpmFailure("Expected an admitted RPM")
         equivalents = [
             prior
             for prior in (*history, *additions)
@@ -465,7 +530,7 @@ def prepare(
                 raise RpmFailure("Changed bytes for accepted native RPM identity")
         else:
             additions.append(asset)
-    if not additions:
+    if not additions and not stale_entries(retained):
         return PreparedFormat("rpm", retained, (), retained.objects)
     out = safe_path(out.parent, out.name)
     out.mkdir(mode=0o700)
@@ -492,17 +557,21 @@ def prepare(
         source = asset.inspected.verified
         if sha256_file(source.local_path) != (source.sha256, source.size):
             raise RpmFailure("Verified RPM bytes changed before signing")
-        _unsigned(source.local_path, runtime)
         identity = asset.inspected.identity
         if _identity(source.local_path, runtime) != identity:
             raise RpmFailure("RPM identity changed before signing")
-        filename = (
-            f"{identity.name}-{identity.version}-{identity.release}.{identity.architecture}.rpm"
-        )
-        key = safe_key(f"packages/{source.sha256}/{filename}")
+        key = _location(identity)
+        for prior in history:
+            if _location(prior.inspected.identity) == key:
+                raise RpmFailure(
+                    f"{key} comes from both {prior.inspected.verified.source.repository}"
+                    f" ({prior.inspected.verified.source.filename}) and {source.source.repository}"
+                    f" ({source.source.filename}); publish one of them"
+                )
         target = safe_path(out, key)
-        target.parent.mkdir(mode=0o700, parents=True)
-        shutil.copyfile(source.local_path, target)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if _unsign(source.local_path, target, runtime) != asset.inspected.upstream_signature:
+            raise RpmFailure("RPM upstream signature status changed before signing")
         gpg = shutil.which("gpg", path=runtime.environment["PATH"])
         if gpg is None:
             raise RpmFailure("GPG is unavailable")
@@ -537,31 +606,32 @@ def prepare(
             )
         )
         paths.append((target, key, "package"))
-    package_list = out / "new.list"
-    atomic_write(package_list, ("\n".join(key for _, key, _ in paths) + "\n").encode())
-    read_list = out / "read.list"
-    _run(
-        runtime,
-        [
-            "createrepo_c",
-            "--general-compress-type",
-            "gz",
-            "--checksum",
-            "sha256",
-            "--no-database",
-            "--update",
-            "--recycle-pkglist",
-            "--skip-stat",
-            "--pkglist",
-            str(package_list),
-            "--read-pkgs-list",
-            str(read_list),
-            str(out),
-        ],
-    )
-    reads = _read(read_list).decode().splitlines()
-    if sorted(reads) != sorted(key for _, key, _ in paths):
-        raise RpmFailure("Indexer did not read exactly the new RPMs")
+    if paths:
+        package_list = out / "new.list"
+        atomic_write(package_list, ("\n".join(key for _, key, _ in paths) + "\n").encode())
+        read_list = out / "read.list"
+        _run(
+            runtime,
+            [
+                "createrepo_c",
+                "--general-compress-type",
+                "gz",
+                "--checksum",
+                "sha256",
+                "--no-database",
+                "--update",
+                "--recycle-pkglist",
+                "--skip-stat",
+                "--pkglist",
+                str(package_list),
+                "--read-pkgs-list",
+                str(read_list),
+                str(out),
+            ],
+        )
+        reads = _read(read_list).decode().splitlines()
+        if sorted(reads) != sorted(key for _, key, _ in paths):
+            raise RpmFailure("Indexer did not read exactly the new RPMs")
     records = _records(out, history)
     for prior in retained.accepted_history:
         if records[prior.history_key] != prior.inspected.metadata.get("rpm_records"):
@@ -610,21 +680,18 @@ def prepare(
     }
     resulting = RetainedFormat(
         "rpm",
-        retained.prior_generation,
         tuple(history),
         tuple(asset.inspected.identity for asset in history),
         metadata,
         tuple(objects.values()),
     )
     prepared = PreparedFormat("rpm", resulting, tuple(outputs), resulting.objects)
-    validate_prepared(prepared, policy=policy, runtime=runtime, now=now)
+    validate_prepared(prepared, policy=policy, runtime=runtime)
     return prepared
 
 
-def validate_prepared(
-    prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
-) -> None:
-    if prepared.format != "rpm" or prepared.expires_at is not None:
+def validate_prepared(prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
+    if prepared.format != "rpm":
         raise RpmFailure("Invalid prepared RPM format")
     validate_retained(prepared.retained, policy=policy, runtime=runtime)
     if prepared.referenced_objects != prepared.retained.objects:
@@ -634,7 +701,7 @@ def validate_prepared(
     for output in prepared.outputs:
         ref = output.ref
         if refs.get(ref.key) != ref or sha256_file(output.local_path) != (ref.sha256, ref.size):
-            raise RpmFailure("Frozen RPM output bytes changed")
+            raise RpmFailure("Prepared RPM output bytes changed")
         keys.append(ref.key)
         if ref.object_class == "package":
             _verify_package(

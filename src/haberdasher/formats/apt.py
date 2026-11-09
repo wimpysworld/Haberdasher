@@ -1,9 +1,11 @@
-"""Native APT records, immutable DEBs and expiring signed Release entries.
+"""Native APT records, immutable DEBs and signed Release entries without an expiry.
 
-Retained metadata contains private ``files`` (public key to restored path),
-``etags`` (public key to observed revision), ``keyring`` and its SHA256,
-``fingerprint``, ``expires_at`` and ``policy``. The state layer restores files
-and supplies observed ETags before replacement. Historical DEBs are not required.
+Retained metadata contains ``files`` (object key to downloaded path),
+``etags`` (object key to observed revision), ``stale`` (entries to rebuild),
+``keyring`` and its SHA256, ``fingerprint`` and ``policy``. The state layer
+downloads files and supplies observed ETags before replacement. Each run
+rebuilds every index and Release from the accepted history, so historical DEBs
+and stale entries are not required.
 """
 
 from __future__ import annotations
@@ -15,8 +17,8 @@ import shutil
 import tempfile
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import datetime, timedelta
-from email.utils import format_datetime, parsedate_to_datetime
+from datetime import datetime
+from email.utils import format_datetime
 from functools import cmp_to_key
 from itertools import pairwise
 from pathlib import Path
@@ -31,14 +33,19 @@ from haberdasher.core import (
     OutputObject,
     PreparedFormat,
     RetainedFormat,
+    UnsupportedAsset,
     VerifiedAsset,
     atomic_write,
     safe_path,
     sha256_file,
+    stale_entries,
     utc_now,
 )
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
+
+SUITE = "stable"
+COMPONENT = "main"
 
 
 class AptFailure(ValueError):
@@ -74,10 +81,8 @@ def _policy(policy: FormatPolicy) -> dict[str, JSONValue]:
         raise AptFailure("APT requires concrete index architectures")
     return {
         "architectures": list(policy.architectures),
-        "suite": policy.suite,
-        "component": policy.component,
-        "validity_seconds": policy.validity_seconds,
-        "renewal_seconds": policy.renewal_seconds,
+        "suite": SUITE,
+        "component": COMPONENT,
     }
 
 
@@ -88,8 +93,19 @@ def _identity(fields: dict[str, str], policy: FormatPolicy) -> NativeIdentity:
         or re.fullmatch(r"[0-9][A-Za-z0-9.+:~\-]*", version) is None
         or arch not in (*policy.architectures, "all")
     ):
-        raise AptFailure("Invalid or unapproved Debian identity")
+        raise AptFailure("Invalid Debian identity or unsupported architecture")
     return NativeIdentity("apt", name, arch, version)
+
+
+def _pool_key(fields: dict[str, str]) -> str:
+    """Return the Debian pool path, without the epoch, as `dak` names packages."""
+    name, version, arch = fields["Package"], fields["Version"], fields["Architecture"]
+    source = fields.get("Source", name).split(" ", 1)[0]
+    if re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", source) is None:
+        raise AptFailure("Invalid Debian source name")
+    prefix = source[:4] if source.startswith("lib") else source[0]
+    version = version.partition(":")[2] or version
+    return f"pool/{COMPONENT}/{prefix}/{source}/{name}_{version}_{arch}.deb"
 
 
 def _record(asset: AdmittedAsset, policy: FormatPolicy) -> str:
@@ -102,12 +118,27 @@ def _record(asset: AdmittedAsset, policy: FormatPolicy) -> str:
         _identity(fields, policy) != inspected.identity
         or fields.get("SHA256") != inspected.verified.sha256
         or fields.get("Size") != str(inspected.verified.size)
-        or fields.get("Filename") != f"pool/{inspected.verified.sha256}.deb"
+        or fields.get("Filename") != _pool_key(fields)
         or asset.transformation_policy != "preserve"
         or asset.published_sha256 not in (None, inspected.verified.sha256)
     ):
         raise AptFailure("APT record differs from accepted identity or bytes")
     return record.rstrip("\n") + "\n\n"
+
+
+def _check_names(history: Sequence[AdmittedAsset], policy: FormatPolicy) -> None:
+    """Reject two packages that differ in bytes but share one pool file name."""
+    names: dict[str, AdmittedAsset] = {}
+    for asset in history:
+        key = _pool_key(_fields(_record(asset, policy)))
+        prior = names.setdefault(key, asset)
+        if prior.inspected.verified.sha256 != asset.inspected.verified.sha256:
+            raise AptFailure(
+                f"{key} comes from both {prior.inspected.verified.source.repository}"
+                f" ({prior.inspected.verified.source.filename}) and"
+                f" {asset.inspected.verified.source.repository}"
+                f" ({asset.inspected.verified.source.filename}); publish one of them"
+            )
 
 
 def inspect(
@@ -116,9 +147,12 @@ def inspect(
     _policy(policy)
     if sha256_file(asset.local_path) != (asset.sha256, asset.size):
         raise AptFailure("Verified DEB bytes changed before inspection")
-    control = _run(runtime, ["dpkg-deb", "-f", str(asset.local_path)]).decode("utf-8")
-    identity = _identity(_fields(control), policy)
-    filename = f"pool/{asset.sha256}.deb"
+    control = _fields(_run(runtime, ["dpkg-deb", "-f", str(asset.local_path)]).decode("utf-8"))
+    arch = control.get("Architecture", "")
+    if arch not in (*policy.architectures, "all"):
+        raise UnsupportedAsset(f"{asset.source.filename}: unsupported APT architecture {arch!r}")
+    identity = _identity(control, policy)
+    filename = _pool_key(control)
     target = safe_path(out, filename)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     shutil.copyfile(asset.local_path, target)
@@ -178,7 +212,7 @@ def _indexes(history: Sequence[AdmittedAsset], policy: FormatPolicy) -> dict[str
         (asset.inspected.identity.architecture, _record(asset, policy)) for asset in history
     )
     for arch in policy.architectures:
-        prefix = f"dists/{policy.suite}/{policy.component}/binary-{arch}/Packages"
+        prefix = f"dists/{SUITE}/{COMPONENT}/binary-{arch}/Packages"
         data = "".join(
             record for architecture, record in records if architecture in (arch, "all")
         ).encode()
@@ -207,8 +241,8 @@ def _refs(retained: RetainedFormat) -> dict[str, ObjectRef]:
     return refs
 
 
-def _entries(policy: FormatPolicy) -> tuple[str, str, str]:
-    prefix = f"dists/{policy.suite}/"
+def _entries() -> tuple[str, str, str]:
+    prefix = f"dists/{SUITE}/"
     return prefix + "Release", prefix + "Release.gpg", prefix + "InRelease"
 
 
@@ -218,26 +252,20 @@ def _byhash(key: str, sha256: str) -> str:
 
 def _verify_release(retained: RetainedFormat, policy: FormatPolicy) -> None:
     files = _strings(retained.metadata.get("files"), "restored metadata files")
-    release = _fields(Path(files[_entries(policy)[0]]).read_text())
+    release = _fields(Path(files[_entries()[0]]).read_text())
     if any(
         release.get(key) != value
         for key, value in {
-            "Suite": policy.suite,
-            "Codename": policy.suite,
-            "Components": policy.component,
+            "Suite": SUITE,
+            "Codename": SUITE,
+            "Components": COMPONENT,
             "Architectures": " ".join(policy.architectures),
             "Acquire-By-Hash": "yes",
         }.items()
     ):
-        raise AptFailure("Release policy differs from approved policy")
-    expiry = datetime.fromisoformat(_string(retained.metadata, "expires_at"))
-    try:
-        date = parsedate_to_datetime(release["Date"])
-        valid = parsedate_to_datetime(release["Valid-Until"])
-    except (KeyError, ValueError, TypeError) as error:
-        raise AptFailure("Invalid Release validity") from error
-    if valid != expiry or valid - date != timedelta(seconds=policy.validity_seconds):
-        raise AptFailure("Release expiry differs from retained state")
+        raise AptFailure("Release fields differ from the APT repository policy")
+    if "Valid-Until" in release:
+        raise AptFailure("Release must not expire")
     checksums: dict[str, tuple[str, int]] = {}
     for line in release.get("SHA256", "").splitlines():
         if not line.strip():
@@ -247,7 +275,7 @@ def _verify_release(retained: RetainedFormat, policy: FormatPolicy) -> None:
             raise AptFailure("Invalid Release SHA256 list")
         checksums[parts[2]] = (parts[0], int(parts[1]))
     expected = {
-        key.removeprefix(f"dists/{policy.suite}/"): (hashlib.sha256(data).hexdigest(), len(data))
+        key.removeprefix(f"dists/{SUITE}/"): (hashlib.sha256(data).hexdigest(), len(data))
         for key, data in _indexes(retained.accepted_history, policy).items()
     }
     if checksums != expected:
@@ -259,12 +287,7 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
     if retained.format != "apt":
         raise AptFailure("Expected APT retained state")
     if not retained.accepted_history:
-        if (
-            retained.prior_generation is not None
-            or retained.objects
-            or retained.metadata
-            or retained.active_identities
-        ):
+        if retained.objects or retained.metadata or retained.active_identities:
             raise AptFailure("Incomplete retained APT history")
         return
     if retained.metadata.get("policy") != expected_policy:
@@ -272,6 +295,7 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
     refs = _refs(retained)
     files = _strings(retained.metadata.get("files"), "restored metadata files")
     _strings(retained.metadata.get("etags"), "observed ETags")
+    stale = stale_entries(retained)
     keyring = Path(_string(retained.metadata, "keyring"))
     if sha256_file(keyring)[0] != _string(retained.metadata, "keyring_sha256"):
         raise AptFailure("Retained public keyring changed")
@@ -285,7 +309,7 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
     for asset in retained.accepted_history:
         _record(asset, policy)
         verified = asset.inspected.verified
-        ref = refs.get(f"pool/{verified.sha256}.deb")
+        ref = refs.get(_pool_key(_fields(_record(asset, policy))))
         if ref is None or (ref.sha256, ref.size, ref.object_class) != (
             verified.sha256,
             verified.size,
@@ -309,14 +333,14 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
             if order(left, right) == 0:
                 raise AptFailure("Duplicate retained Debian identity")
     indexes = _indexes(retained.accepted_history, policy)
-    if set(files) != set(indexes) | set(_entries(policy)):
+    if set(files) != set(indexes) | set(_entries()):
         raise AptFailure("Incomplete restored APT metadata")
     for key, filename in files.items():
         ref = refs.get(key)
         if (
             ref is None
             or ref.object_class != "entry"
-            or sha256_file(Path(filename)) != (ref.sha256, ref.size)
+            or (key not in stale and sha256_file(Path(filename)) != (ref.sha256, ref.size))
         ):
             raise AptFailure("Retained metadata bytes are missing or changed")
     for key, data in indexes.items():
@@ -329,8 +353,9 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
             or (hashed.sha256, hashed.size, hashed.object_class) != (sha, len(data), "dependency")
         ):
             raise AptFailure("Retained indexes or by-hash references are incomplete")
-    _verify_release(retained, policy)
-    _verify_signatures(retained, policy=policy, runtime=runtime)
+    if not stale & set(_entries()):
+        _verify_release(retained, policy)
+        _verify_signatures(retained, runtime=runtime)
 
 
 def prepare(
@@ -366,10 +391,10 @@ def prepare(
             additions.append(accepted)
     if not history:
         return PreparedFormat("apt", retained, (), retained.objects)
-    if retained.accepted_history and not additions:
-        expires = _string(retained.metadata, "expires_at")
-        if datetime.fromisoformat(expires) - now > timedelta(seconds=policy.renewal_seconds):
-            return PreparedFormat("apt", retained, (), retained.objects, expires)
+    _check_names(history, policy)
+    stale = stale_entries(retained)
+    if retained.accepted_history and not additions and not stale:
+        return PreparedFormat("apt", retained, (), retained.objects)
     if retained.accepted_history and signer.fingerprint != retained.metadata["fingerprint"]:
         raise AptFailure("APT signing primary changed without a trust transition")
     safe_path(out, "validation")
@@ -399,7 +424,11 @@ def prepare(
             "public, max-age=31536000, immutable" if immutable else "no-cache",
         )
         previous = old_refs.get(key)
-        if previous is not None and previous.sha256 == sha and previous.size == size:
+        if (
+            previous is not None
+            and (previous.sha256, previous.size) == (sha, size)
+            and key not in stale
+        ):
             refs[key] = previous
             return
         if previous is not None and immutable:
@@ -421,67 +450,46 @@ def prepare(
         verified = asset.inspected.verified
         if sha256_file(verified.local_path) != (verified.sha256, verified.size):
             raise AptFailure("Admitted DEB bytes changed")
-        key = f"pool/{verified.sha256}.deb"
+        key = _pool_key(_fields(_record(asset, policy)))
         path = safe_path(out, key)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         shutil.copyfile(verified.local_path, path)
         output(key, path, "package")
     indexes = _indexes(history, policy)
-    if additions:
-        for key, data in indexes.items():
-            path = safe_path(out, key)
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            atomic_write(path, data)
-            files[key] = str(path)
-            hashed = _byhash(key, hashlib.sha256(data).hexdigest())
-            hashed_path = safe_path(out, hashed)
-            hashed_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            atomic_write(hashed_path, data)
-            output(hashed, hashed_path, "dependency")
-        for key in indexes:
-            output(key, safe_path(out, key), "entry")
-    else:
-        previous_files = _strings(retained.metadata.get("files"), "restored metadata files")
-        files.update({key: previous_files[key] for key in indexes})
-    release_key, detached_key, clear_key = _entries(policy)
+    for key, data in indexes.items():
+        path = safe_path(out, key)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        atomic_write(path, data)
+        files[key] = str(path)
+        hashed = _byhash(key, hashlib.sha256(data).hexdigest())
+        hashed_path = safe_path(out, hashed)
+        hashed_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        atomic_write(hashed_path, data)
+        output(hashed, hashed_path, "dependency")
+    for key in indexes:
+        output(key, safe_path(out, key), "entry")
+    release_key, detached_key, clear_key = _entries()
     release_path = safe_path(out, release_key)
     release_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    expiry = now + timedelta(seconds=policy.validity_seconds)
     options = {
         "MD5": "false",
         "SHA1": "false",
         "SHA512": "false",
-        "Suite": policy.suite,
-        "Codename": policy.suite,
+        "Suite": SUITE,
+        "Codename": SUITE,
         "Architectures": " ".join(policy.architectures),
-        "Components": policy.component,
+        "Components": COMPONENT,
         "Acquire-By-Hash": "yes",
         "Date": format_datetime(now, usegmt=True),
     }
-    if additions or not retained.accepted_history:
-        args = [
-            item
-            for key, value in options.items()
-            for item in ("-o", f"APT::FTPArchive::Release::{key}={value}")
-        ]
-        release = _run(
-            runtime, ["apt-ftparchive", *args, "release", "."], cwd=release_path.parent
-        ).decode()
-        if "Valid-Until:" in release:
-            raise AptFailure("Unexpected native Release expiry")
-        release += f"Valid-Until: {format_datetime(expiry, usegmt=True)}\n"
-    else:
-        previous_files = _strings(retained.metadata.get("files"), "restored metadata files")
-        release = Path(previous_files[release_key]).read_text()
-        release = re.sub(
-            r"^Date:.*$", f"Date: {format_datetime(now, usegmt=True)}", release, flags=re.M
-        )
-        release = re.sub(
-            r"^Valid-Until:.*$",
-            f"Valid-Until: {format_datetime(expiry, usegmt=True)}",
-            release,
-            flags=re.M,
-        )
+    args = [
+        item
+        for key, value in options.items()
+        for item in ("-o", f"APT::FTPArchive::Release::{key}={value}")
+    ]
+    release = _run(
+        runtime, ["apt-ftparchive", *args, "release", "."], cwd=release_path.parent
+    ).decode()
     atomic_write(release_path, release.encode())
     signer.sign_file(release_path, safe_path(out, detached_key))
     signer.sign_file(release_path, safe_path(out, clear_key), clear=True)
@@ -512,7 +520,6 @@ def prepare(
         raise AptFailure("Empty APT public key export")
     resulting = RetainedFormat(
         "apt",
-        retained.prior_generation,
         tuple(history),
         tuple(asset.inspected.identity for asset in history),
         {
@@ -521,42 +528,32 @@ def prepare(
             "keyring": str(keyring),
             "keyring_sha256": sha256_file(keyring)[0],
             "fingerprint": signer.fingerprint,
-            "expires_at": expiry.isoformat(),
             "policy": _policy(policy),
         },
         tuple(refs.values()),
     )
-    prepared = PreparedFormat(
-        "apt", resulting, tuple(outputs), resulting.objects, expiry.isoformat()
-    )
-    validate_prepared(prepared, policy=policy, runtime=runtime, now=now)
+    prepared = PreparedFormat("apt", resulting, tuple(outputs), resulting.objects)
+    validate_prepared(prepared, policy=policy, runtime=runtime)
     return prepared
 
 
-def validate_prepared(
-    prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
-) -> None:
-    now = utc_now(lambda: now)
+def validate_prepared(prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
     if prepared.format != "apt" or prepared.referenced_objects != prepared.retained.objects:
         raise AptFailure("Prepared APT references differ from retained state")
     validate_retained(prepared.retained, policy=policy, runtime=runtime)
     if not prepared.retained.accepted_history:
-        if prepared.outputs or prepared.expires_at is not None:
+        if prepared.outputs:
             raise AptFailure("Empty APT state contains outputs")
         return
-    if prepared.expires_at != prepared.retained.metadata["expires_at"]:
-        raise AptFailure("Frozen APT expiry differs from Release")
-    if datetime.fromisoformat(str(prepared.expires_at)) <= now:
-        raise AptFailure("Frozen APT Release expired; regeneration is required")
     refs = _refs(prepared.retained)
     previous_rank = -1
-    entries = _entries(policy)
+    entries = _entries()
     for output in prepared.outputs:
         if refs.get(output.ref.key) != output.ref or sha256_file(output.local_path) != (
             output.ref.sha256,
             output.ref.size,
         ):
-            raise AptFailure("Frozen APT output bytes changed")
+            raise AptFailure("Prepared APT output bytes changed")
         rank = (
             0
             if output.ref.object_class == "package"
@@ -571,10 +568,10 @@ def validate_prepared(
         previous_rank = rank
 
 
-def _verify_signatures(retained: RetainedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
+def _verify_signatures(retained: RetainedFormat, *, runtime: Runtime) -> None:
     metadata = retained.metadata
     files = _strings(metadata.get("files"), "restored metadata files")
-    entries = _entries(policy)
+    entries = _entries()
     with tempfile.TemporaryDirectory(prefix="apt-verify-", dir=runtime.root / "tmp") as directory:
         extracted = Path(directory) / "Release"
         for key in (entries[1], entries[2]):

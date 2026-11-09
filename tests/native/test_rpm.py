@@ -22,7 +22,7 @@ from haberdasher.core import (
 from haberdasher.formats import rpm
 from haberdasher.runtime import private_workspace
 from haberdasher.signing import SigningFailure, signing_session
-from tests.native.fixtures.rpm import NOW, DnfClient, build, checked, publish
+from tests.native.fixtures.rpm import NOW, DnfClient, build, checked, publish, upstream_sign
 from tests.support.http import serve
 from tests.support.keys import disposable_key
 
@@ -55,7 +55,7 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
         data = build(runtime, "hd-proof-data", "1", "dependency-v1", number=1)
         app = build(runtime, "hd-proof-app", "1", "application-v1", number=2)
         update = build(runtime, "hd-proof-app", "2", "application-v2", epoch=0, number=3)
-        empty = RetainedFormat("rpm", None, (), (), {}, ())
+        empty = RetainedFormat("rpm", (), (), {}, ())
         admissions = [
             admit(
                 rpm.inspect(asset, policy=POLICY, runtime=runtime, out=runtime.root),
@@ -81,6 +81,16 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
             asset.published_sha256 != asset.inspected.verified.sha256
             for asset in first.retained.accepted_history
         )
+        assert [item.ref.key for item in first.outputs if item.ref.object_class == "package"] == [
+            "packages/hd-proof-data-1-1.noarch.rpm",
+            "packages/hd-proof-app-1-1.noarch.rpm",
+        ]
+        primary = gzip.decompress(
+            (
+                runtime.root / "one" / rpm.metadata_documents(runtime.root / "one")["primary"][0]
+            ).read_bytes()
+        )
+        assert b'<location href="packages/hd-proof-app-1-1.noarch.rpm"/>' in primary
         assert first.outputs[-2].ref.key == "repodata/repomd.xml"
         assert first.outputs[-1].ref.key == "repodata/repomd.xml.asc"
         first_root = runtime.root / "one"
@@ -122,20 +132,8 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
             left = NativeIdentity("rpm", "app", "noarch", "1.01", release="1")
             assert rpm.compare(left, replace(left, version="1.1"), runtime=runtime) == 0
             assert rpm.compare(left, replace(left, epoch=1), runtime=runtime) == -1
-            for output in first.outputs:
-                if output.ref.object_class == "package":
-                    signed = replace(
-                        app,
-                        local_path=output.local_path,
-                        sha256=output.ref.sha256,
-                        size=output.ref.size,
-                        source=replace(app.source, size=output.ref.size),
-                    )
-                    with pytest.raises(rpm.RpmFailure, match="Signed upstream"):
-                        rpm.inspect(signed, policy=POLICY, runtime=runtime, out=runtime.root)
             retained = replace(
                 first.retained,
-                prior_generation="one",
                 metadata={
                     **first.retained.metadata,
                     "etags": {key: "first-etag" for key in rpm.ENTRIES},
@@ -179,7 +177,7 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
             ):
                 assert old == current
             assert len(second.retained.accepted_history) == 3
-            frozen = {item.ref.key: item.local_path.read_bytes() for item in second.outputs}
+            before = {item.ref.key: item.local_path.read_bytes() for item in second.outputs}
             publish(second, installed, server, 2)
             client.run("upgrade", "hd-proof-app")
             client.state("2")
@@ -205,7 +203,7 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
                     target = negative_root / path.relative_to(installed)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(path, target)
-                # Frozen generation one package outputs are unavailable, but their published bytes remain.
+                # Generation one package outputs are unavailable, but their published bytes remain.
                 for output in first.outputs:
                     if output.ref.object_class != "package":
                         target = negative_root / output.ref.key
@@ -251,15 +249,15 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
                 publish(second, negative_root, server, 13)
                 negative.run("upgrade", "hd-proof-app")
                 negative.state("2")
-            assert frozen == {item.ref.key: item.local_path.read_bytes() for item in second.outputs}
+            assert before == {item.ref.key: item.local_path.read_bytes() for item in second.outputs}
             assert first_hash == hashlib.sha256(canonical_json(first)).hexdigest()
             original_sign = signer.sign_file
 
             def forbidden(*args: object, **kwargs: object) -> None:
-                raise AssertionError("Frozen validation called a signer")
+                raise AssertionError("Validation called a signer")
 
             monkeypatch.setattr(signer, "sign_file", forbidden)
-            rpm.validate_prepared(second, policy=POLICY, runtime=runtime, now=NOW)
+            rpm.validate_prepared(second, policy=POLICY, runtime=runtime)
             monkeypatch.setattr(signer, "sign_file", original_sign)
             print(
                 "RPM STATE: same-client app 1 -> 2; dependency 1; both payloads; file provider; HTTP package hashes"
@@ -322,9 +320,9 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
             with pytest.raises(rpm.RpmFailure):
                 rpm._verify_package(package.local_path, wrong.public_file, runtime)
         second_package = next(item for item in second.outputs if item.ref.object_class == "package")
-        second_package.local_path.write_bytes(b"changed frozen bytes")
-        with pytest.raises(rpm.RpmFailure, match="Frozen"):
-            rpm.validate_prepared(second, policy=POLICY, runtime=runtime, now=NOW)
+        second_package.local_path.write_bytes(b"changed prepared bytes")
+        with pytest.raises(rpm.RpmFailure, match="Prepared"):
+            rpm.validate_prepared(second, policy=POLICY, runtime=runtime)
 
 
 def test_signer_failure_does_not_produce_prepared_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -343,7 +341,7 @@ def test_signer_failure_does_not_produce_prepared_state(monkeypatch: pytest.Monk
             policy=POLICY,
             runtime=runtime,
         )
-        empty = RetainedFormat("rpm", None, (), (), {}, ())
+        empty = RetainedFormat("rpm", (), (), {}, ())
         before = canonical_json(empty)
 
         def fail(source: Path, output: Path, *, clear: bool = False, armour: bool = True) -> None:
@@ -362,3 +360,127 @@ def test_signer_failure_does_not_produce_prepared_state(monkeypatch: pytest.Monk
             )
         assert canonical_json(empty) == before
         assert sha256_file(asset.local_path) == (asset.sha256, asset.size)
+
+
+def test_signed_upstream_rpm_installs_with_haberdasher_trust() -> None:
+    with (
+        disposable_key() as key,
+        disposable_key() as upstream_key,
+        private_workspace() as runtime,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+        signing_session(
+            upstream_key.runtime,
+            expected_fingerprint=upstream_key.fingerprint,
+            key_file=upstream_key.key_file,
+        ) as upstream_signer,
+    ):
+        data = build(runtime, "hd-proof-data", "1", "dependency-v1", number=1)
+        app = build(runtime, "hd-proof-app", "1", "application-v1", number=2)
+        app = upstream_sign(runtime, app, upstream_signer)
+        assert upstream_key.fingerprint[-16:].lower().encode() in checked(
+            runtime, "rpm", "-qp", "--qf", "%{RSAHEADER:pgpsig}", str(app.local_path)
+        )
+        inspected = [
+            rpm.inspect(asset, policy=POLICY, runtime=runtime, out=runtime.root / "inspect")
+            for asset in (data, app)
+        ]
+        assert [item.upstream_signature for item in inspected] == ["unsigned", "signed"]
+        admissions = [
+            admit(item, (), compare=rpm.compare, policy=POLICY, runtime=runtime)
+            for item in inspected
+        ]
+        prepared = rpm.prepare(
+            admissions,
+            RetainedFormat("rpm", (), (), {}, ()),
+            policy=POLICY,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "one",
+        )
+        signed = next(
+            asset
+            for asset in prepared.retained.accepted_history
+            if asset.inspected.identity.name == "hd-proof-app"
+        )
+        assert signed.inspected.verified.sha256 == app.sha256
+        assert signed.published_sha256 not in (None, app.sha256)
+        package = next(
+            output
+            for output in prepared.outputs
+            if output.ref.object_class == "package" and output.ref.sha256 == signed.published_sha256
+        )
+        signature = checked(
+            runtime, "rpm", "-qp", "--qf", "%{RSAHEADER:pgpsig}", str(package.local_path)
+        )
+        assert key.fingerprint[-16:].lower().encode() in signature
+        assert upstream_key.fingerprint[-16:].lower().encode() not in signature
+        root = runtime.root / "published"
+        root.mkdir()
+        with serve(root) as server:
+            publish(prepared, root, server, 1)
+            client = DnfClient(
+                runtime, "signed-upstream", server.url(), runtime.root / "one/public.gpg"
+            )
+            client.run("install", "hd-proof-app")
+            client.state("1")
+            cached = {sha256_file(path)[0] for path in client.base.glob("cache/**/packages/*.rpm")}
+            assert signed.published_sha256 in cached
+        rerun = admit(
+            rpm.inspect(app, policy=POLICY, runtime=runtime, out=runtime.root / "rerun"),
+            prepared.retained.accepted_history,
+            compare=rpm.compare,
+            policy=POLICY,
+            runtime=runtime,
+        )
+        assert rerun in prepared.retained.accepted_history
+        unchanged = rpm.prepare(
+            [rerun],
+            prepared.retained,
+            policy=POLICY,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "two",
+        )
+        assert unchanged.outputs == () and unchanged.retained == prepared.retained
+
+
+def test_two_sources_with_one_rpm_file_name_fail_with_one_line() -> None:
+    with (
+        disposable_key() as key,
+        private_workspace() as runtime,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+    ):
+        first = build(runtime, "hd-proof-app", "1", "application-v1", number=1)
+        second = build(runtime, "hd-proof-app", "1", "conflicting-payload", epoch=1, number=2)
+        second = replace(second, source=replace(second.source, repository="example/other"))
+        admissions = [
+            admit(
+                rpm.inspect(asset, policy=POLICY, runtime=runtime, out=runtime.root / str(index)),
+                (),
+                compare=rpm.compare,
+                policy=POLICY,
+                runtime=runtime,
+            )
+            for index, asset in enumerate((first, second))
+        ]
+        with pytest.raises(rpm.RpmFailure) as error:
+            rpm.prepare(
+                admissions,
+                RetainedFormat("rpm", (), (), {}, ()),
+                policy=POLICY,
+                runtime=runtime,
+                signer=signer,
+                now=NOW,
+                out=runtime.root / "out",
+            )
+        assert str(error.value) == (
+            f"packages/hd-proof-app-1-1.noarch.rpm comes from both {first.source.repository}"
+            f" ({first.source.filename}) and example/other ({second.source.filename});"
+            " publish one of them"
+        )

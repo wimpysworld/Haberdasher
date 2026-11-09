@@ -8,7 +8,7 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 
-from haberdasher.config import FormatPolicy, TrustPolicy
+from haberdasher.config import FormatPolicy
 from haberdasher.core import (
     JSONValue,
     PreparedFormat,
@@ -23,12 +23,7 @@ from tests.support.native import NativeClient
 
 
 def policy() -> FormatPolicy:
-    return FormatPolicy(
-        "apt",
-        architectures=("amd64", "arm64"),
-        suite="proof",
-        trust=TrustPolicy(approved=True, approval_reference="synthetic-local-test"),
-    )
+    return FormatPolicy("apt", architectures=("amd64", "arm64"))
 
 
 def build(
@@ -39,6 +34,7 @@ def build(
     *,
     arch: str = "amd64",
     depends: str = "",
+    source: str = "",
     asset_id: int = 1,
 ) -> VerifiedAsset:
     root = runtime.root / f"build-{asset_id}"
@@ -48,7 +44,8 @@ def build(
     destination.parent.mkdir(parents=True)
     control.write_text(
         f"Package: {name}\nVersion: {version}\nArchitecture: {arch}\n"
-        "Maintainer: Synthetic test <test@invalid>\n"
+        + (f"Source: {source}\n" if source else "")
+        + "Maintainer: Synthetic test <test@invalid>\n"
         + (f"Depends: {depends}\n" if depends else "")
         + "Description: Disposable APT fixture\n Complete multiline description.\n"
         "X-Haberdasher-Fixture: preserved-extension\n"
@@ -86,7 +83,6 @@ def publish(prepared: PreparedFormat, root: Path, generation: int) -> RetainedFo
     set_generation_mtime(paths, generation)
     return replace(
         prepared.retained,
-        prior_generation=f"generation-{generation}",
         metadata={**prepared.retained.metadata, "etags": etags},
     )
 
@@ -105,7 +101,7 @@ class Client:
             client.path(relative).mkdir(parents=True, exist_ok=True)
         client.path("root/var/lib/dpkg/status").touch()
         client.path("config/sources.list").write_text(
-            f"deb [arch=amd64 signed-by={keyring}] {url} proof main\n"
+            f"deb [arch=amd64 signed-by={keyring}] {url} stable main\n"
         )
         self.config = client.path("config/apt.conf")
         dpkg = shutil.which("dpkg", path=runtime.environment["PATH"])

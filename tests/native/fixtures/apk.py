@@ -150,7 +150,6 @@ def committed(prepared: PreparedFormat, etag: str = '"synthetic-etag"') -> Retai
     }
     return replace(
         prepared.retained,
-        prior_generation="synthetic-generation",
         metadata={
             **prepared.retained.metadata,
             "indexes": indexes,
@@ -189,7 +188,10 @@ def wrong_public_key(runtime: Runtime, public: Path, output: Path) -> None:
 
 
 class Client:
-    def __init__(self, runtime: Runtime, name: str, url: str, key: Path | None) -> None:
+    def __init__(
+        self, runtime: Runtime, name: str, url: str, key: Path | None, arch: str = "x86_64"
+    ) -> None:
+        self.arch = arch
         self.native = NativeClient(runtime, name)
         self.root = self.native.root
         self.keys = self.native.path("config/keys")
@@ -207,7 +209,7 @@ class Client:
             "--root",
             str(self.root),
             "--arch",
-            "x86_64",
+            self.arch,
             "--keys-dir",
             str(self.keys),
             "--repositories-file",

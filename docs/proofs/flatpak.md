@@ -1,8 +1,8 @@
-# Flatpak local proof
+# Flatpak proof
 
-The preserved WW-375 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance. Production source/runtime approval remains pending.
+The native Flatpak tests check that Flatpak verifies signed commits and summaries from a local HTTP repository. No test executes an application.
 
-## Run and boundary
+## Reproduce
 
 In the project Linux Nix development shell, run:
 
@@ -10,77 +10,27 @@ In the project Linux Nix development shell, run:
 just proof flatpak
 ```
 
-This command now runs the preserved shell proof and `tests/native/test_flatpak.py`. The historical shell boundary below is x86_64 Linux, Flatpak 1.18.4, OSTree 2026.2, GnuPG 2.4.9, and `file://` transport. That client version is not an established compatibility floor.
+This command runs `tests/native/test_flatpak.py`. `tests/native/test_pipeline.py` separately checks the complete publisher path.
 
-The [proof](../../tests/proofs/flatpak.sh) uses the
-[common isolation helper](../../tests/proofs/common.sh), disposable RSA4096
-primary keys without subkeys, and private clients. No app executes. Deployment
-triggers fail UID mapping with
-`bwrap: setting up uid map: Permission denied`. Sandbox execution, successful
-triggers, and desktop integration remain unproved.
+Native catalogue export requires the pinned MIME database from `shared-mime-info`. The tests use pinned Nix clients in private roots. They do not test sandbox execution, deployment triggers, or desktop integration.
 
-Native catalogue export requires the pinned MIME database from
-`shared-mime-info`. The proof sets `XDG_DATA_DIRS` from that tool's store path and
-requires `mime/mime.cache`. It does not edit trusted client cache bytes.
+## Publisher adapter
 
-## Admission and native clients
+`src/haberdasher/formats/flatpak.py` admits application bundles by source SHA256, native commit and ref bindings, and the AppStream version. The application ref gives the app ID, architecture, and branch. The application metadata gives the runtime, and the bundle gives the runtime repository, or Flathub when it names none. The adapter rejects a bundle with a collection ID.
 
-The full application ref is `app/world.wimpress.HaberdasherProof/x86_64/stable`.
-Admission checks native commit/ref bindings, source SHA256, expected
-name/version/runtime metadata, and the version payload. Asset history accepts
-identical replay and rejects changed bytes under an accepted identity. Wrong
-checksums and source ownership reject.
+Import keeps the upstream commit identity and replaces any detached upstream signature with the publisher signature. Commit, summary, and summary-index signatures use SHA256. `flatpak build-update-repo` writes the summary and the AppStream branches. All applications share one OSTree repository, with `wimpysworld.flatpakrepo` and one `<app-id>.flatpakref` per application.
 
-A valid native bundle passes first. Separate wrong-name, wrong-runtime, and
-wrong-version bundles then reach their intended predicates and reject. Accepted
-state stays byte-identical, with no publisher, public pool, state directory, or
-completion marker.
+A run restores only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. Payload files and earlier commits stay published and are not downloaded again.
 
-The collection decision is `collection=none`. A non-empty collection binding
-rejects. Import preserves source bundle bytes and commit identity, while adding
-detached signatures. Commit, summary, and summary-index signatures use SHA256.
-Native verification stays enabled.
+## Native client evidence
 
-Native search discovers version one. A fresh client installs the app and approved
-local runtime fixture `world.wimpress.HaberdasherRuntime/x86_64/stable`. Checks
-cover exact refs, commits, runtime, origin, and installed data. Normal update
-deploys the exact version-two commit. Another fresh client installs that commit
-and runtime.
+`tests/native/test_flatpak.py` runs private clients with `gpg-verify-summary=true`:
 
-## Cold restoration and publication
+- A client searches the AppStream catalogue, installs the application with its runtime and extension, and updates to the exact next commit.
+- A cold restore downloads only the working set, and the payload of the application head stays out of it.
+- A tampered summary index and a missing signature each stop installation without deployment. Corrupt retained files stop preparation.
+- Signed upstream applications and several architectures share one repository.
 
-The [cold helper](../../tests/proofs/flatpak/cold.sh) starts a fresh publisher
-process without old bundles or the old working repository. Retained state
-contains asset history, expected refs/digests, trust, and native configuration.
-Only the next app bundle remains as new input.
+## Limits
 
-Restoration fetches current-head trees plus payload for the app, runtime,
-`appstream/x86_64`, and `appstream2/x86_64`. Catalogue entries and 64/128-pixel
-icons survive. Commit-only restoration fails checkout. This is not metadata-only
-restoration.
-
-The validated restore measures **13,594 logical bytes**, including
-**1,991 compressed payload bytes**, across 51 files and 38 native objects.
-The
-[inventory helper](../../tests/proofs/flatpak/fixture.py) measures stored bytes,
-not network traffic.
-
-Three generations retain modern digest-addressed signatures and dependencies.
-Delayed clients work without canonical `summary.idx.sig`. Both legacy
-summary-first and signature-first mismatches fail native trust checks.
-Missing/wrong keys, altered commits/indexes, and missing signatures reject
-without deployment.
-
-Dependency, entry, and inventory interruptions recover exact frozen bytes without
-re-signing or deletion. Completion follows recovery. Split legacy entries can
-temporarily remove availability. No multi-object atomicity is proved.
-
-## Production adapter and remaining gates
-
-`src/haberdasher/formats/flatpak.py` implements approved bundle admission, retained heads/payload, signed commit/summary output, and exact frozen replay. It rejects signed upstream bundles. It requires explicit source owner, application refs, runtime URL, fingerprint, branch, architecture, remote, refs, and extensions. The collection policy is empty.
-
-`tests/native/test_flatpak.py` checks HTTP search, install/update, commit/summary trust, approved runtime and extension origins, exact deployed commits, and rejection cases. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and source-free/signer-free recovery.
-
-The runtime origin remains separate from the application origin. Arbitrary `RuntimeRepo` selection is not allowed. No production source is automatically added. See [Flatpak setup](../clients.md#flatpak).
-
-Production source/runtime approval, real upstream inputs, public HTTPS/cache behaviour, older clients, other architectures, sandbox execution, and production permissions remain pending. Use the [activation gates](../validation.md#remaining-activation-gates) before public use.
+The runtime origin is separate from the application origin. A `.flatpakref` install adds the runtime repository that the bundle names, or Flathub when it names none. `flatpak remote-add` from `wimpysworld.flatpakrepo` adds no runtime source. See [Flatpak setup](../clients.md#flatpak).

@@ -1,4 +1,4 @@
-"""Complete GitHub scans and checksum-verified private inputs."""
+"""GitHub "Latest" release scans and checksum-verified inputs."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,26 +18,35 @@ from urllib.parse import quote
 from haberdasher.config import Config
 from haberdasher.core import (
     Record,
+    Report,
     SourceAsset,
     VerifiedAsset,
     canonical_json,
     digest,
     integer,
+    plural,
+    quiet,
     repository_name,
     safe_key,
     safe_path,
     sha256_file,
     text,
 )
-from haberdasher.runtime import Runtime
+from haberdasher.runtime import Runtime, transfer_timeout
 
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_SECONDS = 2
 MAX_PAGE_BYTES = 8 * 1024 * 1024
 MAX_PAGES = 10_000
 MAX_ITEMS = 100_000
 MAX_CHECKSUM_BYTES = 1024 * 1024
 MAX_CHECKSUM_ENTRIES = 10_000
+MAX_BUNDLE_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 5 * 1024 * 1024 * 1024 - 1
-PACKAGE_SUFFIXES = (".deb", ".rpm", ".apk", ".pkg.tar.zst", ".flatpak")
+PACKAGE_SUFFIXES = (".deb", ".rpm", ".apk", ".pkg.tar.zst", ".pkg.tar.xz", ".flatpak")
+PER_ASSET_SUFFIXES = (".sha256", ".sha256sum")
+COSIGN_BUNDLE_SUFFIX = ".sigstore.json"
+COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
 
 
 class DiscoveryFailure(ValueError):
@@ -71,19 +81,17 @@ class ChecksumEntry(Record):
 class DiscoveredAsset(Record):
     source: SourceAsset
     checksum: ChecksumEntry | None
-    fingerprint: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, SourceAsset):
             raise ValueError("Invalid discovered source")
-        digest(self.fingerprint)
         if self.checksum is not None:
             _match_checksum(self.source, self.checksum)
 
 
 @dataclass(frozen=True)
 class DiscoveryState(Record):
-    """A proposed scan, committed only with the publication that consumes it."""
+    """One scan of the latest release of each configured source."""
 
     records: tuple[DiscoveredAsset, ...] = ()
     assets: tuple[SourceAsset, ...] = ()
@@ -116,10 +124,8 @@ class DiscoveryState(Record):
 @dataclass(frozen=True)
 class CompleteScan(Record):
     state: DiscoveryState
-    changed: tuple[DiscoveredAsset, ...]
-    unchanged: tuple[DiscoveredAsset, ...]
+    checksummed: tuple[DiscoveredAsset, ...]
     pending: tuple[DiscoveredAsset, ...]
-    disappeared: tuple[SourceAsset, ...]
 
 
 def _asset_key(source: SourceAsset) -> tuple[str, int]:
@@ -138,7 +144,10 @@ def _match_checksum(source: SourceAsset, checksum: ChecksumEntry) -> None:
 
 
 def parse_checksums(data: bytes, source: SourceAsset) -> tuple[ChecksumEntry, ...]:
-    """Read GNU SHA256 or BSD SHA256 lines, without path or name normalisation."""
+    """Read GNU SHA256 or BSD SHA256 lines, without path or name normalisation.
+
+    A per-asset document, such as app.deb.sha256, can also hold one bare digest for app.deb.
+    """
     if len(data) > MAX_CHECKSUM_BYTES or len(data) != source.size:
         raise DiscoveryFailure("Invalid checksum document size")
     checksum_hash = hashlib.sha256(data).hexdigest()
@@ -154,8 +163,11 @@ def parse_checksums(data: bytes, source: SourceAsset) -> tuple[ChecksumEntry, ..
         if not line:
             continue
         match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](.+)", line)
+        bare = re.fullmatch(r"[0-9a-fA-F]{64}", line)
         if match:
             value, name = match.groups()
+        elif bare and source.filename.lower().endswith(PER_ASSET_SUFFIXES):
+            value, name = line, source.filename.rsplit(".", 1)[0]
         else:
             match = re.fullmatch(r"SHA256 \((.+)\) = ([0-9a-fA-F]{64})", line)
             if match is None:
@@ -191,7 +203,8 @@ def _invalid_constant(value: str) -> object:
     raise DiscoveryFailure(f"Invalid JSON constant: {value}")
 
 
-def _json_request(endpoint: str, runtime: Runtime) -> object:
+def _json_request(endpoint: str, runtime: Runtime, *, missing: object = None) -> object:
+    """Return missing for HTTP 404 when missing is given. Raise on any other failure."""
     result = runtime.run(
         [
             "gh",
@@ -209,7 +222,11 @@ def _json_request(endpoint: str, runtime: Runtime) -> object:
         env_kind="github",
     )
     if result.returncode != 0:
-        raise DiscoveryFailure("GitHub metadata request failed")
+        if missing is not None and b"(HTTP 404)" in result.stderr:
+            return missing
+        raise DiscoveryFailure(
+            "GitHub metadata request failed. Run `gh auth login` or set GH_TOKEN"
+        )
     if len(result.stdout) > MAX_PAGE_BYTES:
         raise DiscoveryFailure("GitHub response exceeds the byte limit")
     try:
@@ -308,7 +325,7 @@ def _check_current(source: SourceAsset, runtime: Runtime) -> None:
 
 
 @contextmanager
-def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[Path]:
+def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[tuple[Path, str]]:
     if source.size > limit:
         raise DiscoveryFailure("Asset exceeds the download size limit")
     base = f"repos/{source.repository}/releases"
@@ -322,25 +339,33 @@ def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[Pa
     with tempfile.TemporaryDirectory(prefix="asset-", dir=root) as directory:
         path = Path(directory) / "payload"
         pattern = "".join("\\" + char if char in "*?[]" else char for char in source.filename)
-        result = runtime.run(
-            [
-                "gh",
-                "release",
-                "download",
-                "--repo",
-                f"https://github.com/{source.repository}",
-                "--pattern",
-                pattern,
-                "--output",
-                str(path),
-                "--",
-                tag,
-            ],
-            env_kind="github",
-            timeout=600,
-        )
-        if result.returncode != 0:
-            raise DiscoveryFailure("GitHub asset download failed")
+        for attempt in range(DOWNLOAD_ATTEMPTS):
+            if attempt:
+                path.unlink(missing_ok=True)
+                time.sleep(DOWNLOAD_RETRY_SECONDS * attempt)
+            result = runtime.run(
+                [
+                    "gh",
+                    "release",
+                    "download",
+                    "--repo",
+                    f"https://github.com/{source.repository}",
+                    "--pattern",
+                    pattern,
+                    "--output",
+                    str(path),
+                    "--",
+                    tag,
+                ],
+                env_kind="github",
+                timeout=transfer_timeout(source.size),
+            )
+            if result.returncode == 0:
+                break
+        else:
+            raise DiscoveryFailure(
+                f"GitHub asset download failed after {DOWNLOAD_ATTEMPTS} attempts"
+            )
         safe_path(path.parent, path.name)
         if not path.is_file() or path.stat().st_size != source.size or path.stat().st_size > limit:
             raise DiscoveryFailure("Downloaded asset has an invalid size")
@@ -351,72 +376,152 @@ def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[Pa
             current
         ):
             raise DiscoveryFailure("Release tag changed during download")
-        yield path
+        yield path, tag
 
 
-def scan_releases(config: Config, *, runtime: Runtime, previous: DiscoveryState) -> CompleteScan:
-    """Return a proposed complete scan. Any failed request raises without changing previous."""
+def cosign_identity(repository: str, tag: str) -> str:
+    """Pin a release workflow certificate to the source repository and the release tag."""
+    owner, name = repository_name(repository).split("/")
+    return (
+        rf"^https://github\.com/{re.escape(owner)}/{re.escape(name)}"
+        rf"/\.github/workflows/[^@]+@refs/tags/{re.escape(text(tag, 'release tag'))}$"
+    )
+
+
+def _verify_bundle(
+    checksum: SourceAsset, bundle: SourceAsset, tag: str, path: Path, runtime: Runtime
+) -> None:
+    """Fail closed unless cosign verifies the checksum document against its release bundle."""
+    with _download(bundle, runtime, MAX_BUNDLE_BYTES) as (bundle_path, bundle_tag):
+        if bundle_tag != tag:
+            raise DiscoveryFailure("Release tag changed during download")
+        result = runtime.run(
+            [
+                "cosign",
+                "verify-blob",
+                "--bundle",
+                str(bundle_path),
+                "--certificate-identity-regexp",
+                cosign_identity(checksum.repository, tag),
+                "--certificate-oidc-issuer",
+                COSIGN_ISSUER,
+                str(path),
+            ]
+        )
+    if result.returncode != 0:
+        raise DiscoveryFailure(
+            f"Cosign bundle {bundle.filename} does not verify for "
+            f"{checksum.repository} at tag {tag}"
+        )
+
+
+def _release_label(release: dict[str, object], release_id: int) -> str:
+    tag = release.get("tag_name")
+    try:
+        return text(tag, "release tag")
+    except ValueError:
+        return f"release {release_id}"
+
+
+_MISSING = object()
+
+
+def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -> CompleteScan:
+    """Scan the GitHub "Latest" release of each source. Any failed request raises."""
     assets: dict[tuple[str, int], SourceAsset] = {}
-    groups: list[tuple[SourceAsset, ...]] = []
+    groups: dict[str, tuple[str, tuple[SourceAsset, ...]] | None] = {}
     for repository in config.sources:
-        for release in _pages(f"repos/{repository}/releases", runtime):
-            if not _eligible(release):
-                continue
-            release_id = integer(release.get("id"), "release ID", 1)
-            names: set[str] = set()
-            release_assets: list[SourceAsset] = []
-            for row in _pages(f"repos/{repository}/releases/{release_id}/assets", runtime):
-                source = _source(row, repository, release_id)
-                key = _asset_key(source)
-                if key in assets or source.filename in names:
-                    raise DiscoveryFailure("Ambiguous asset ID or filename")
-                names.add(source.filename)
-                assets[key] = source
-                release_assets.append(source)
-                if len(assets) > MAX_ITEMS:
-                    raise DiscoveryFailure("Too many discovered assets")
-            groups.append(tuple(release_assets))
-    old = {_asset_key(record.source): record for record in previous.records}
+        value = _json_request(f"repos/{repository}/releases/latest", runtime, missing=_MISSING)
+        if value is _MISSING:
+            groups[repository] = None
+            continue
+        release = _mapping(value)
+        if not _eligible(release):
+            raise DiscoveryFailure(f"{repository}: the latest release is a draft or pre-release")
+        release_id = integer(release.get("id"), "release ID", 1)
+        names: set[str] = set()
+        release_assets: list[SourceAsset] = []
+        for row in _pages(f"repos/{repository}/releases/{release_id}/assets", runtime):
+            source = _source(row, repository, release_id)
+            key = _asset_key(source)
+            if key in assets or source.filename in names:
+                raise DiscoveryFailure("Ambiguous asset ID or filename")
+            names.add(source.filename)
+            assets[key] = source
+            release_assets.append(source)
+            if len(assets) > MAX_ITEMS:
+                raise DiscoveryFailure("Too many discovered assets")
+        groups[repository] = (_release_label(release, release_id), tuple(release_assets))
     records: list[DiscoveredAsset] = []
-    changed: list[DiscoveredAsset] = []
-    unchanged: list[DiscoveredAsset] = []
+    checksummed: list[DiscoveredAsset] = []
     pending: list[DiscoveredAsset] = []
-    for group in groups:
+    for repository in config.sources:
+        latest = groups[repository]
+        if latest is None:
+            report(f"{repository}: no latest release")
+            continue
+        label, group = latest
+        report(f"{repository}: latest release {label}")
         checksums: dict[str, ChecksumEntry] = {}
+        documents = signed = 0
+        siblings = {source.filename: source for source in group}
         for source in sorted(group, key=lambda item: item.asset_id):
             if not _is_checksum(source.filename):
                 continue
-            with _download(source, runtime, MAX_CHECKSUM_BYTES) as path:
-                with path.open("rb") as stream:
-                    entries = parse_checksums(stream.read(MAX_CHECKSUM_BYTES + 1), source)
+            documents += 1
+            try:
+                with _download(source, runtime, MAX_CHECKSUM_BYTES) as (path, tag):
+                    bundle = siblings.get(source.filename + COSIGN_BUNDLE_SUFFIX)
+                    if bundle is not None:
+                        _verify_bundle(source, bundle, tag, path, runtime)
+                        signed += 1
+                    with path.open("rb") as stream:
+                        entries = parse_checksums(stream.read(MAX_CHECKSUM_BYTES + 1), source)
+            except DiscoveryFailure as error:
+                raise DiscoveryFailure(
+                    f"{source.repository} {label}, {source.filename}: {error}"
+                ) from error
             for entry in entries:
-                if entry.filename in checksums:
-                    raise DiscoveryFailure("Ambiguous checksum sources for an asset")
-                checksums[entry.filename] = entry
+                prior = checksums.setdefault(entry.filename, entry)
+                if prior.sha256 != entry.sha256:
+                    raise DiscoveryFailure(
+                        f"Conflicting checksums in {repository} {label}: checksum files "
+                        f"disagree about {entry.filename}"
+                    )
+        packages = 0
+        missing = 0
+        digests = 0
         for source in sorted(group, key=lambda item: item.asset_id):
             if not source.filename.endswith(PACKAGE_SUFFIXES):
                 continue
+            packages += 1
             checksum = checksums.get(source.filename)
-            fingerprint = hashlib.sha256(
-                canonical_json((source, checksum.sha256 if checksum is not None else None))
-            ).hexdigest()
-            record = DiscoveredAsset(source, checksum, fingerprint)
+            if checksum is None and source.github_sha256 is not None:
+                checksum = ChecksumEntry(
+                    source, source.filename, source.github_sha256, source.github_sha256
+                )
+                digests += 1
+            record = DiscoveredAsset(source, checksum)
             records.append(record)
-            prior = old.get(_asset_key(source))
             if checksum is None:
+                missing += 1
                 pending.append(record)
-            elif (
-                prior is not None
-                and prior.source == source
-                and prior.checksum is not None
-                and prior.checksum.sha256 == checksum.sha256
-            ):
-                unchanged.append(record)
             else:
-                changed.append(record)
+                checksummed.append(record)
+        if checksums:
+            status = "checksums OK"
+        elif digests:
+            status = "GitHub digests OK"
+        else:
+            status = "no checksums"
+        line = f"  {label}  {status}"
+        line += "  cosign OK" if documents and signed == documents else "  no cosign bundle"
+        line += f"  {plural(packages, 'package')}"
+        if missing:
+            line += f", {missing} without a checksum (skipped)"
+        report(line)
     state = DiscoveryState(tuple(records), tuple(assets.values()), config.sources)
-    disappeared = tuple(asset for asset in previous.assets if _asset_key(asset) not in assets)
-    return CompleteScan(state, tuple(changed), tuple(unchanged), tuple(pending), disappeared)
+    return CompleteScan(state, tuple(checksummed), tuple(pending))
 
 
 def verify_asset(
@@ -428,7 +533,7 @@ def verify_asset(
     destination = safe_path(runtime.root, relative.as_posix())
     if destination.exists():
         raise DiscoveryFailure("Verified output already exists")
-    with _download(source, runtime, MAX_ASSET_BYTES) as path:
+    with _download(source, runtime, MAX_ASSET_BYTES) as (path, _tag):
         actual, size = sha256_file(path)
         if actual != checksum.sha256 or source.github_sha256 not in (None, actual):
             raise DiscoveryFailure("Downloaded asset differs from SHA256 checksum")

@@ -1,4 +1,4 @@
-"""Validated private records and durable file primitives."""
+"""Validated records and durable file primitives."""
 
 from __future__ import annotations
 
@@ -17,8 +17,26 @@ from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
 FORMATS = frozenset({"apt", "rpm", "arch", "apk", "flatpak"})
-OBJECT_CLASSES = frozenset({"package", "dependency", "entry", "inventory", "private"})
+OBJECT_CLASSES = frozenset({"package", "dependency", "entry", "inventory", "lock"})
 type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+type Report = Callable[[str], None]
+
+
+class UnsupportedAsset(ValueError):
+    """A release asset that its format cannot publish, such as an unsupported architecture."""
+
+
+def quiet(line: str) -> None:
+    """A Report that prints nothing."""
+
+
+def step(report: Report, name: str, text: str) -> None:
+    """Report one publication step for a format."""
+    report(f"{name:<5} {text}")
+
+
+def plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
 def text(value: object, label: str) -> str:
@@ -264,7 +282,7 @@ class InspectedAsset(Record):
             raise ValueError("Expected complete metadata and evidence mappings")
         canonical_json(self.metadata)
         canonical_json(self.evidence)
-        if self.upstream_signature not in {"unsigned", "verified", "unknown", "invalid"}:
+        if self.upstream_signature not in {"unsigned", "signed"}:
             raise ValueError("Invalid upstream signature status")
 
 
@@ -295,10 +313,8 @@ class ObjectRef(Record):
     cache_control: str
 
     def __post_init__(self) -> None:
-        if self.bucket_role not in FORMATS | {"private"} or self.object_class not in OBJECT_CLASSES:
+        if self.bucket_role not in FORMATS or self.object_class not in OBJECT_CLASSES:
             raise ValueError("Invalid bucket role or object class")
-        if (self.bucket_role == "private") != (self.object_class == "private"):
-            raise ValueError("Private objects require private storage")
         safe_key(self.key)
         integer(self.size, "size")
         digest(self.sha256)
@@ -329,7 +345,6 @@ class OutputObject(Record):
 @dataclass(frozen=True)
 class RetainedFormat(Record):
     format: str
-    prior_generation: str | None
     accepted_history: tuple[AdmittedAsset, ...]
     active_identities: tuple[NativeIdentity, ...]
     metadata: dict[str, JSONValue]
@@ -337,8 +352,6 @@ class RetainedFormat(Record):
 
     def __post_init__(self) -> None:
         format_name(self.format)
-        if self.prior_generation is not None:
-            safe_key(self.prior_generation)
         if not isinstance(self.metadata, dict):
             raise ValueError("Invalid retained metadata")
         canonical_json(self.metadata)
@@ -353,13 +366,20 @@ class RetainedFormat(Record):
                 raise ValueError("Invalid retained public object")
 
 
+def stale_entries(retained: RetainedFormat) -> frozenset[str]:
+    """Entry keys whose published bytes differ from the inventory, after an interrupted run."""
+    value = retained.metadata.get("stale", [])
+    if not isinstance(value, list) or not all(isinstance(key, str) for key in value):
+        raise ValueError("Invalid stale entry list")
+    return frozenset(key for key in value if isinstance(key, str))
+
+
 @dataclass(frozen=True)
 class PreparedFormat(Record):
     format: str
     retained: RetainedFormat
     outputs: tuple[OutputObject, ...]
     referenced_objects: tuple[ObjectRef, ...]
-    expires_at: str | None = None
 
     def __post_init__(self) -> None:
         format_name(self.format)
@@ -379,102 +399,6 @@ class PreparedFormat(Record):
         for ref in self.referenced_objects:
             if not isinstance(ref, ObjectRef) or ref.bucket_role != self.format:
                 raise ValueError("Invalid referenced public object")
-        if self.expires_at is not None:
-            timestamp(self.expires_at)
-
-
-@dataclass(frozen=True)
-class PreparedGeneration(Record):
-    id: str
-    previous_completion_id: str | None
-    previous_completion_etag: str | None
-    owner_nonce: str
-    config_digest: str
-    policy_digest: str
-    scan: dict[str, JSONValue]
-    formats: tuple[PreparedFormat, ...]
-    public_inventories: dict[str, JSONValue]
-    frozen_manifest_hash: str
-    bootstrap_outputs: tuple[OutputObject, ...] = ()
-    bootstrap_objects: tuple[ObjectRef, ...] = ()
-    signing_fingerprint: str | None = None
-
-    def __post_init__(self) -> None:
-        safe_key(self.id)
-        text(self.owner_nonce, "owner nonce")
-        for value in (self.config_digest, self.policy_digest, self.frozen_manifest_hash):
-            digest(value)
-        if (self.previous_completion_id is None) != (self.previous_completion_etag is None):
-            raise ValueError("Previous completion needs both ID and ETag")
-        if self.previous_completion_id is not None:
-            safe_key(self.previous_completion_id)
-            text(self.previous_completion_etag, "previous completion ETag")
-        if not isinstance(self.scan, dict) or not isinstance(self.public_inventories, dict):
-            raise ValueError("Invalid generation mappings")
-        canonical_json(self.scan)
-        canonical_json(self.public_inventories)
-        names: set[str] = set()
-        for item in self.formats:
-            if not isinstance(item, PreparedFormat) or item.format in names:
-                raise ValueError("Invalid or repeated prepared format")
-            names.add(item.format)
-        if self.signing_fingerprint is not None and (
-            not isinstance(self.signing_fingerprint, str)
-            or re.fullmatch(r"[A-F0-9]{40}", self.signing_fingerprint) is None
-        ):
-            raise ValueError("Invalid bootstrap signing fingerprint")
-        if not isinstance(self.bootstrap_objects, tuple) or not isinstance(
-            self.bootstrap_outputs, tuple
-        ):
-            raise ValueError("Invalid bootstrap sequences")
-        refs: dict[tuple[str, str], ObjectRef] = {}
-        for ref in self.bootstrap_objects:
-            if (
-                not isinstance(ref, ObjectRef)
-                or ref.bucket_role not in names
-                or ref.key not in {"keys/haberdasher.asc", "keys/haberdasher.gpg"}
-                or ref.object_class != "dependency"
-                or (ref.bucket_role, ref.key) in refs
-            ):
-                raise ValueError("Invalid bootstrap public reference")
-            refs[ref.bucket_role, ref.key] = ref
-        if refs and self.signing_fingerprint is None:
-            raise ValueError("Bootstrap references require a signing fingerprint")
-        for name in {ref.bucket_role for ref in self.bootstrap_objects}:
-            if sum(ref.bucket_role == name for ref in self.bootstrap_objects) != 2:
-                raise ValueError("Bootstrap requires both public OpenPGP exports")
-        keys: set[tuple[str, str]] = set()
-        for index, output in enumerate(self.bootstrap_outputs):
-            if not isinstance(output, OutputObject):
-                raise ValueError("Invalid bootstrap output")
-            key = (output.ref.bucket_role, output.ref.key)
-            if (
-                refs.get(key) != output.ref
-                or key in keys
-                or output.mode != "create"
-                or output.ordinal != index
-            ):
-                raise ValueError("Invalid or mutable bootstrap output")
-            keys.add(key)
-        if any(
-            (ref.bucket_role, ref.key) in refs
-            for prepared in self.formats
-            for ref in prepared.referenced_objects
-        ):
-            raise ValueError("Bootstrap objects must remain outside native references")
-
-
-@dataclass(frozen=True)
-class Ownership(Record):
-    owner_nonce: str
-    etag: str
-    runner_identity: str
-    acquired_at: str
-
-    def __post_init__(self) -> None:
-        for value in (self.owner_nonce, self.etag, self.runner_identity):
-            text(value, "ownership")
-        timestamp(self.acquired_at)
 
 
 @dataclass(frozen=True)
@@ -520,8 +444,8 @@ def public_inventory(
                 "published_sha256": asset.published_sha256,
             }
         )
-    if any(ref.bucket_role == "private" for ref in objects):
-        raise ValueError("Private objects cannot appear in a public inventory")
+    if any(ref.object_class in {"inventory", "lock"} for ref in objects):
+        raise ValueError("Inventory and lock objects cannot appear in a public inventory")
     return {
         "schema_version": SCHEMA_VERSION,
         "assets": entries,

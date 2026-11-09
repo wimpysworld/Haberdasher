@@ -1,20 +1,14 @@
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from haberdasher.config import (
-    APPROVAL_GATES,
     MAX_BYTES,
-    PRODUCTION_FINGERPRINT,
+    PUBLIC,
     Config,
     FormatPolicy,
-    Policy,
-    RuntimePolicy,
     StoragePolicy,
-    TrustPolicy,
     load_config,
-    load_policy,
 )
 
 
@@ -24,21 +18,47 @@ def document(tmp_path: Path, value: str) -> Path:
     return path
 
 
-def test_existing_config_and_defaults() -> None:
-    config = load_config(Path("haberdasher.yaml"))
-    assert config.sources == ("wimpysworld/tailor",)
-    assert not config.formats
-    apt = config.format_policy("apt")
-    assert (apt.suite, apt.component, apt.validity_seconds, apt.renewal_seconds) == (
-        "stable",
-        "main",
-        604800,
-        172800,
+def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
+    assert (
+        Path("haberdasher.yaml").read_text() == "sources: [wimpysworld/tailor, wimpysworld/sidra]\n"
     )
-    assert apt.architectures == ("amd64", "arm64")
-    assert not load_policy(None).approved_formats
-    with pytest.raises(ValueError):
-        load_policy(None).require_remote(("apt",))
+    config = load_config(Path("haberdasher.yaml"))
+    assert config == Config(("wimpysworld/tailor", "wimpysworld/sidra"))
+    assert config.format_policy("apt").architectures == ("amd64", "arm64")
+    for name in ("rpm", "arch", "apk", "flatpak"):
+        assert config.format_policy(name).architectures == ("x86_64", "aarch64")
+    assert PUBLIC == {
+        "apt": ("haberdasher-apt", "https://apt.wimpys.world"),
+        "rpm": ("haberdasher-rpm", "https://rpm.wimpys.world"),
+        "arch": ("haberdasher-pkg", "https://pkg.wimpys.world"),
+        "apk": ("haberdasher-apk", "https://apk.wimpys.world"),
+        "flatpak": ("haberdasher-flatpak", "https://flatpak.wimpys.world"),
+    }
+    StoragePolicy("r2", {name: bucket for name, (bucket, _) in PUBLIC.items()})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "sources:\n  - wimpysworld/tailor\n  - example/other\n",
+        "sources: [wimpysworld/tailor, example/other]\n",
+    ],
+)
+def test_sources_list_is_the_whole_configuration(tmp_path: Path, value: str) -> None:
+    config = load_config(document(tmp_path, value))
+    assert config.sources == ("wimpysworld/tailor", "example/other")
+
+
+@pytest.mark.parametrize("key", ["formats", "storage", "cosign", "trust"])
+def test_unknown_key_is_one_clear_line(tmp_path: Path, key: str) -> None:
+    with pytest.raises(ValueError) as error:
+        load_config(document(tmp_path, f"sources: [owner/repo]\n{key}: {{}}\n"))
+    message = str(error.value)
+    assert message == (
+        f"Unknown key '{key}' in input.yaml. Only 'sources' is allowed, "
+        "for example sources: [owner/repo]"
+    )
+    assert "\n" not in message
 
 
 @pytest.mark.parametrize(
@@ -65,15 +85,30 @@ def test_existing_config_and_defaults() -> None:
         "sources: [owner/repo]\nformats: {unknown: {}}",
         "sources: [owner/repo]\nformats: {apt: {unknown: true}}",
         "sources: [owner/repo]\nformats: {apt: {suite: true}}",
-        "sources: [owner/repo]\nformats: {apt: {validity_seconds: true}}",
-        "sources: [owner/repo]\nformats: {apt: {renewal_seconds: '123'}}",
-        "sources: [owner/repo]\nformats: {apt: {renewal_seconds: 604800}}",
+        "sources: [owner/repo]\nformats: {apt: {validity_seconds: 604800}}",
         "sources: [owner/repo]\nformats: {apt: {suite: '../escape'}}",
         "sources: [owner/repo]\nformats: {rpm: {suite: stable}}",
         "sources: [owner/repo]\nformats: {apt: {architectures: [amd64, amd64]}}",
-        "sources: [owner/repo]\nformats: {apt: {trust: {approved: true}}}",
         "{true: value}",
         "{? [complex, key]: value}",
+        "sources: [{repository: owner/repo, unknown: true}]",
+        "sources: [{cosign: {}}]",
+        "sources: [owner/repo, {repository: owner/repo}]",
+        "sources: [{repository: owner/repo, cosign: {issuer: 'https://issuer.invalid'}}]",
+        *(
+            "sources: [{repository: owner/repo, cosign: {" + cosign + "}}]"
+            for cosign in (
+                "bundle_suffix: .sigstore.json, issuer: 'https://i.invalid', identity: "
+                "'https://i.invalid/x@{tag}', extra: true",
+                "bundle_suffix: sigstore.json, issuer: 'https://i.invalid', identity: "
+                "'https://i.invalid/x@{tag}'",
+                "bundle_suffix: ./x, issuer: 'https://i.invalid', identity: 'https://i.invalid/x'",
+                "bundle_suffix: .sig, issuer: 'http://i.invalid', identity: 'https://i.invalid/x'",
+                "bundle_suffix: .sig, issuer: 'https://i.invalid', identity: 'i.invalid/x'",
+                "bundle_suffix: .sig, issuer: 'https://i.invalid', identity: "
+                "'https://i.invalid/x@{ref}'",
+            )
+        ),
     ],
 )
 def test_reject_configuration(tmp_path: Path, value: str) -> None:
@@ -103,207 +138,53 @@ def test_duplicate_nested_keys(tmp_path: Path) -> None:
         )
 
 
-def test_config_policy_merge(tmp_path: Path) -> None:
-    config = load_config(
-        document(
-            tmp_path,
-            "sources: [owner/repo]\nformats: {apt: {architectures: [amd64], suite: testing}}",
-        )
-    )
-    policy = Policy(clients={"apt": TrustPolicy(approved=True, approval_reference="local-test")})
-    apt = policy.format_policy(config, "apt")
-    assert apt.suite == "testing"
-    assert apt.trust.approved
-    assert not config.formats["apt"].trust.approved
-
-
 @pytest.mark.parametrize(
     "value",
     [
-        "unknown: true",
-        "storage: {backend: s3}",
-        "storage: {private: true}",
-        "storage: {backend: r2, private: same-bucket, public: {apt: same-bucket}}",
-        "storage: {backend: r2, private: 'https://example.invalid/bucket'}",
-        "storage: {private: /tmp/private, public: {apt: /tmp/private/public}}",
-        "storage: {private: relative}",
-        "approved_formats: [true]",
-        "approved_formats: [unknown]",
-        "approval_references: {unknown: reference}",
-        "approval_references: {signing: true}",
-        "expected_signing_fingerprint: 123",
+        "storage: {}",
+        "storage: {backend: r2, public: {apt: {bucket: apt-bucket, url: 'https://a.invalid'}}}",
+        "storage: {private: state, public: {apt: {bucket: apt-bucket, url: 'https://a.invalid'}}}",
+        "storage: {public: {}}",
+        "storage: {public: {apt: apt-bucket}}",
+        "storage: {public: {apt: {bucket: apt-bucket}}}",
+        "storage: {public: {apt: {url: 'https://a.invalid'}}}",
+        "storage: {public: {apt: {bucket: true, url: 'https://a.invalid'}}}",
+        "storage: {public: {apt: {bucket: apt-bucket, url: 'http://a.invalid'}}}",
+        "storage: {public: {apt: {bucket: apt-bucket, url: 'https://a.invalid/path'}}}",
+        "storage: {public: {apt: {bucket: apt-bucket, url: 'https://a.invalid', other: 1}}}",
+        "storage: {public: {unknown: {bucket: bucket, url: 'https://a.invalid'}}}",
+        "storage: {public: {apt: {bucket: shared, url: 'https://a.invalid'}, "
+        "rpm: {bucket: shared, url: 'https://b.invalid'}}}",
+        "storage: {public: {apt: {bucket: 'https://example.invalid/bucket', "
+        "url: 'https://a.invalid'}}}",
+        "formats: {rpm: {trust: {allow_signed_upstream: 'false'}}}",
+        "formats: {rpm: {trust: {unknown: true}}}",
+        "formats: {flatpak: {trust: {runtime: {unknown: true}}}}",
+        "expected_signing_fingerprint: '" + "A" * 40 + "'",
         "HD_SIGNING_KEY: forbidden",
-        "clients: {apt: {approved: 'true'}}",
-        "clients: {rpm: {allow_signed_upstream: 'false'}}",
-        "clients: {apt: {unknown: true}}",
-        "clients: {unknown: {}}",
-        "clients: {flatpak: {runtime: {unknown: true}}}",
     ],
 )
-def test_reject_policy(tmp_path: Path, value: str) -> None:
+def test_reject_storage_and_trust(tmp_path: Path, value: str) -> None:
     with pytest.raises(ValueError):
-        load_policy(document(tmp_path, value))
-
-
-def test_local_policy(tmp_path: Path) -> None:
-    value = f"""storage:
-  backend: local
-  private: {tmp_path}/private
-  public:
-    apt: {tmp_path}/apt
-approved_formats: [apt]
-expected_signing_fingerprint: '{"A" * 40}'
-clients:
-  apt:
-    approved: true
-    approval_reference: synthetic-local-test
-"""
-    policy = load_policy(document(tmp_path, value))
-    assert policy.expected_signing_fingerprint == "A" * 40
-    assert policy.clients["apt"].approved
-    with pytest.raises(ValueError):
-        policy.require_remote(("apt",))
-
-
-def test_remote_requires_every_gate() -> None:
-    references = {name: "reviewed-reference" for name in APPROVAL_GATES}
-    storage = StoragePolicy("r2", "private-state", {"apt": "public-apt"})
-    clients = {"apt": TrustPolicy(True, "apt-reference")}
-    policy = Policy(storage, ("apt",), references, PRODUCTION_FINGERPRINT, clients)
-    policy.require_remote(("apt",))
-    for name in APPROVAL_GATES - {"apk_v2", "flatpak_runtime"}:
-        missing = Policy(
-            storage,
-            ("apt",),
-            {key: value for key, value in references.items() if key != name},
-            PRODUCTION_FINGERPRINT,
-            clients,
-        )
-        with pytest.raises(ValueError):
-            missing.require_remote(("apt",))
-    with pytest.raises(ValueError):
-        policy.require_remote(())
-    with pytest.raises(ValueError):
-        policy.require_remote(("flatpak",))
-
-
-def approved_remote_policy(name: str) -> Policy:
-    trust = TrustPolicy(approved=True, approval_reference="synthetic-client-approval")
-    if name == "flatpak":
-        trust = replace(
-            trust,
-            source_owner="synthetic",
-            refs=("app/org.example.App/x86_64/stable",),
-            runtime=RuntimePolicy(
-                url="http://127.0.0.1:12345/runtime",
-                fingerprint="A" * 40,
-                collection="",
-                branch="stable",
-                architecture="x86_64",
-                remote="synthetic-runtime",
-                refs=("runtime/org.example.Platform/x86_64/stable",),
-            ),
-        )
-    return Policy(
-        storage=StoragePolicy("r2", "synthetic-private", {name: f"synthetic-{name}"}),
-        approved_formats=(name,),
-        approval_references={gate: "synthetic-approval" for gate in APPROVAL_GATES},
-        expected_signing_fingerprint=PRODUCTION_FINGERPRINT,
-        clients={name: trust},
-    )
-
-
-@pytest.mark.parametrize("name", ["apk", "flatpak"])
-def test_remote_accepts_approved_format(name: str) -> None:
-    approved_remote_policy(name).require_remote((name,))
+        load_config(document(tmp_path, f"sources: [owner/repo]\n{value}"))
 
 
 @pytest.mark.parametrize(
-    "name, field, value, message",
+    ("apt", "rpm"),
     [
-        ("apk", "apk_v2", None, "Remote publication is not approved"),
-        ("apk", "approved", False, "Format publication is not approved"),
-        ("apk", "approval_reference", None, "Format publication is not approved"),
-        ("flatpak", "flatpak_runtime", None, "Remote publication is not approved"),
-        ("flatpak", "approved", False, "Format publication is not approved"),
-        ("flatpak", "approval_reference", None, "Format publication is not approved"),
-        ("flatpak", "source_owner", None, "Flatpak source and runtime approval is incomplete"),
-        ("flatpak", "refs", (), "Flatpak source and runtime approval is incomplete"),
-        ("flatpak", "runtime", None, "Flatpak source and runtime approval is incomplete"),
-    ],
-    ids=[
-        "apk-v2-approval",
-        "apk-client-approved",
-        "apk-client-reference",
-        "flatpak-runtime-approval",
-        "flatpak-client-approved",
-        "flatpak-client-reference",
-        "flatpak-source-owner",
-        "flatpak-refs",
-        "flatpak-runtime",
+        ("/tmp/public", "/tmp/public"),
+        ("/tmp/public/rpm", "/tmp/public"),
+        ("/tmp/apt", "/tmp/apt/public"),
+        ("relative", "/tmp/public"),
     ],
 )
-def test_remote_rejects_individual_format_approval_omissions(
-    name: str, field: str, value: object, message: str
-) -> None:
-    policy = approved_remote_policy(name)
-    if field in APPROVAL_GATES:
-        policy = replace(
-            policy,
-            approval_references={
-                gate: reference
-                for gate, reference in policy.approval_references.items()
-                if gate != field
-            },
-        )
-    else:
-        policy = replace(policy, clients={name: replace(policy.clients[name], **{field: value})})
-    with pytest.raises(ValueError) as error:
-        policy.require_remote((name,))
-    assert str(error.value) == message
-
-
-@pytest.mark.parametrize("collection", ["", "world.example.Runtime", " "])
-def test_flatpak_runtime_policy(tmp_path: Path, collection: str) -> None:
-    value = f"""clients:
-  flatpak:
-    source_owner: example
-    refs: [app/org.example.App/x86_64/stable]
-    runtime:
-      url: http://127.0.0.1:12345/runtime
-      fingerprint: '{"A" * 40}'
-      collection: '{collection}'
-      branch: stable
-      architecture: x86_64
-      remote: test-runtime
-      refs: [runtime/org.example.Platform/x86_64/stable]
-      extensions: []
-"""
-    if collection:
-        with pytest.raises(ValueError, match="External runtime collection must be empty"):
-            load_policy(document(tmp_path, value))
-        return
-    policy = load_policy(document(tmp_path, value))
-    assert policy.clients["flatpak"].runtime is not None
-    assert policy.clients["flatpak"].runtime.collection == ""
-    assert load_policy(document(tmp_path, value.replace("      collection: ''\n", ""))) == policy
+def test_reject_local_storage(apt: str, rpm: str) -> None:
     with pytest.raises(ValueError):
-        load_policy(document(tmp_path, value.replace("127.0.0.1", "example.invalid")))
-
-
-@pytest.mark.parametrize("collection", ["", "world.example.Runtime", " "])
-def test_direct_runtime_collection_policy(collection: str) -> None:
-    runtime = approved_remote_policy("flatpak").clients["flatpak"].runtime
-    assert runtime is not None
-    if collection:
-        with pytest.raises(ValueError, match="External runtime collection must be empty"):
-            replace(runtime, collection=collection)
-    else:
-        assert replace(runtime, collection=collection).collection == ""
+        StoragePolicy("local", {"apt": apt, "rpm": rpm})
 
 
 def test_direct_policy_validation() -> None:
     with pytest.raises(ValueError):
-        FormatPolicy("apt", validity_seconds=True)
+        FormatPolicy("apt", architectures=("../escape",))
     with pytest.raises(ValueError):
         Config(("owner/repo", "OWNER/REPO"))

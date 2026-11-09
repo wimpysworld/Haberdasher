@@ -32,17 +32,6 @@ def admit(
     identity = inspected.identity
     if identity.format != policy.format:
         raise AdmissionFailure("Inspection and policy formats differ")
-    if inspected.upstream_signature in {"unknown", "invalid"}:
-        raise AdmissionFailure("Upstream signature is not trusted")
-    if identity.format in {"rpm", "apk"} and inspected.upstream_signature == "verified":
-        trust = policy.trust
-        if not (
-            trust.approved
-            and trust.approval_reference
-            and trust.allow_signed_upstream
-            and trust.upstream_fingerprints
-        ):
-            raise AdmissionFailure("Signed upstream packages require explicit trust approval")
     if identity.format == "flatpak" and identity.source_commit is None:
         raise AdmissionFailure("Flatpak admission requires an exact source commit")
     equivalent: AdmittedAsset | None = None
@@ -68,5 +57,7 @@ def admit(
     if backwards:
         raise AdmissionFailure("Flatpak head cannot move backwards")
     transformation = {"rpm": "rpm-sign", "flatpak": "flatpak-sign"}.get(identity.format, "preserve")
+    if identity.format == "apk" and inspected.upstream_signature == "signed":
+        transformation = "apk-unsign"
     history_key = hashlib.sha256(canonical_json(identity)).hexdigest()
     return AdmittedAsset(inspected, transformation, history_key)
