@@ -51,6 +51,19 @@ from tests.support.keys import DisposableKey, disposable_key
 from tests.support.native import NativeClient
 
 
+def printed_result(output: str) -> publish.RunResult:
+    """Rebuild the run result from the publish progress lines and summary."""
+    lines = output.splitlines()
+    assert lines and "{" not in output
+    objects = sum(
+        int(line.split()[2]) for line in lines if line.split()[1:2] == ["uploaded"]
+    ) + sum(1 for line in lines if line.endswith(f"wrote {state.INVENTORY_KEY}"))
+    pending = next((int(line.split()[1]) for line in lines if line.startswith("Skipped ")), 0)
+    changed = lines[-1].startswith("Published ")
+    assert changed or lines[-1].startswith("Nothing changed in ")
+    return publish.RunResult(changed, objects, pending)
+
+
 class RecordedGitHub:
     def __init__(self, assets: Sequence[VerifiedAsset]) -> None:
         self.assets = tuple(
@@ -262,7 +275,7 @@ os.execv({target!r},[{target!r},*sys.argv[1:]])
     for line in (shim / "native.jsonl").read_text().splitlines():
         event = json.loads(line)
         recorded.record_native(event["argv"], event["input"].encode() if event["input"] else None)
-    return publish.RunResult(**json.loads(result.stdout))
+    return printed_result(result.stdout.decode())
 
 
 class InterruptedStore(LocalStore):
@@ -616,7 +629,7 @@ def test_recorded_pipeline_and_full_rerun(
             monkeypatch.chdir(fixtures.root / "work")
             with patch.object(cli, "private_workspace", recorded_workspace):
                 assert cli.main(arguments) == 0
-            first = publish.RunResult(**json.loads(capsys.readouterr().out))
+            first = printed_result(capsys.readouterr().out)
         else:
             first = reconcile()
         assert first.changed and first.published_objects > 0

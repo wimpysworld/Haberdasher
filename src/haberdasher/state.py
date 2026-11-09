@@ -221,14 +221,33 @@ def release(store: Store, lock: Lock) -> None:
         raise StateError("A bucket lock changed or could not be released") from failures[0]
 
 
-def break_locks(store: Store, names: tuple[str, ...]) -> dict[str, str]:
+def _holder(data: bytes) -> str:
+    """Describe a lock body by its publisher and start time, with unprintable text replaced."""
+    try:
+        value = mapping(cast(JSONValue, json.loads(data)))
+    except ValueError, UnicodeError, RecursionError:
+        value = {}
+
+    def field(key: str, default: str) -> str:
+        item = value.get(key)
+        shown = item if isinstance(item, str) and item else default
+        return "".join(char if char.isprintable() else "?" for char in shown[:200])
+
+    return f"from {field('publisher', 'an unknown host')} started {field('started_at', 'unknown')}"
+
+
+def break_locks(
+    store: Store, names: tuple[str, ...], report: core.Report = core.quiet
+) -> dict[str, str]:
     broken: dict[str, str] = {}
     for name in sorted(names):
         current = store.read(name, LOCK_KEY, max_bytes=MAX_LOCK_BYTES)
         if current is None:
+            core.step(report, name, "no lock")
             continue
         store.delete(name, LOCK_KEY, expected_etag=current[1].etag)
         broken[name] = _shown(current[0])
+        core.step(report, name, f"removed lock {_holder(current[0])}")
     return broken
 
 
@@ -282,13 +301,21 @@ def _paths(
     return result
 
 
+def unpublished(name: str) -> Published:
+    return Published(name, None, None, (), RetainedFormat(name, None, (), (), {}, ()))
+
+
 def read(store: Store, name: str) -> Published:
     core.format_name(name)
     current = store.read(name, INVENTORY_KEY, max_bytes=MAX_INVENTORY_BYTES)
-    empty = RetainedFormat(name, None, (), (), {}, ())
     if current is None:
-        return Published(name, None, None, (), empty)
+        return unpublished(name)
     data, observed = current
+    return decode_published(name, data, observed.etag)
+
+
+def decode_published(name: str, data: bytes, etag: str | None) -> Published:
+    """Validate one format's haberdasher.json bytes."""
     try:
         value = parse(data)
         objects = tuple(decode_record(ObjectRef, item) for item in _items(value.get("objects")))
@@ -313,9 +340,7 @@ def read(store: Store, name: str) -> Published:
         raise StateError(f"The published {name} inventory is invalid: {error}") from error
     if any(ref.bucket_role != name for ref in objects):
         raise StateError(f"The published {name} inventory names another bucket")
-    return Published(
-        name, observed.etag, hashlib.sha256(data).hexdigest(), objects, retained, record
-    )
+    return Published(name, etag, hashlib.sha256(data).hexdigest(), objects, retained, record)
 
 
 def materialise(store: Store, published: Published, *, out: Path) -> RetainedFormat:

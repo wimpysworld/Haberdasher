@@ -277,10 +277,16 @@ class Config(Record):
 class StoragePolicy(Record):
     backend: str = "local"
     public: dict[str, str] = field(default_factory=dict)
+    urls: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.backend not in {"local", "r2"}:
             raise ValueError("Invalid storage backend")
+        if not self.urls.keys() <= self.public.keys():
+            raise ValueError("Each public URL needs a public destination")
+        for name, url in self.urls.items():
+            if urlsplit(_https_url(url, f"{name} public URL")).path not in ("", "/"):
+                raise ValueError(f"The {name} public URL must not have a path")
         locations: list[str] = []
         for name, location in self.public.items():
             format_name(name)
@@ -374,12 +380,14 @@ def load_config(path: Path) -> Config:
     storage = None
     if "storage" in data:
         values = _keys(data["storage"], {"public"})
+        public = {
+            name: _keys(value, {"bucket", "url"})
+            for name, value in _keys(values.get("public"), FORMATS).items()
+        }
         storage = StoragePolicy(
             "r2",
-            {
-                name: text(value, "public bucket")
-                for name, value in _keys(values.get("public"), FORMATS).items()
-            },
+            {name: text(value.get("bucket"), "public bucket") for name, value in public.items()},
+            {name: text(value.get("url"), "public URL") for name, value in public.items()},
         )
     return Config(tuple(sources), policies, cosign, storage)
 

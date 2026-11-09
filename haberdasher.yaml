@@ -15,8 +15,8 @@ formats:
     architectures: [x86_64, aarch64]
 storage:
   public:
-    apt: haberdasher-apt
-    rpm: haberdasher-rpm
-    apk: haberdasher-apk
-    arch: haberdasher-pkg
-    flatpak: haberdasher-flatpak
+    apt: {bucket: haberdasher-apt, url: https://apt.wimpys.world}
+    rpm: {bucket: haberdasher-rpm, url: https://rpm.wimpys.world}
+    apk: {bucket: haberdasher-apk, url: https://apk.wimpys.world}
+    arch: {bucket: haberdasher-pkg, url: https://pkg.wimpys.world}
+    flatpak: {bucket: haberdasher-flatpak, url: https://flatpak.wimpys.world}

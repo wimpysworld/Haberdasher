@@ -51,6 +51,13 @@ def test_existing_config_and_defaults() -> None:
             "arch": "haberdasher-pkg",
             "flatpak": "haberdasher-flatpak",
         },
+        {
+            "apt": "https://apt.wimpys.world",
+            "rpm": "https://rpm.wimpys.world",
+            "apk": "https://apk.wimpys.world",
+            "arch": "https://pkg.wimpys.world",
+            "flatpak": "https://flatpak.wimpys.world",
+        },
     )
     assert config.public_formats() == ("apk", "apt", "arch", "rpm")
     with pytest.raises(ValueError):
@@ -154,13 +161,21 @@ def test_config_format_trust(tmp_path: Path) -> None:
     "value",
     [
         "storage: {}",
-        "storage: {backend: r2, public: {apt: apt-bucket}}",
-        "storage: {private: state, public: {apt: apt-bucket}}",
+        "storage: {backend: r2, public: {apt: {bucket: apt-bucket, url: 'https://a.invalid'}}}",
+        "storage: {private: state, public: {apt: {bucket: apt-bucket, url: 'https://a.invalid'}}}",
         "storage: {public: {}}",
-        "storage: {public: {apt: true}}",
-        "storage: {public: {unknown: bucket}}",
-        "storage: {public: {apt: shared, rpm: shared}}",
-        "storage: {public: {apt: 'https://example.invalid/bucket'}}",
+        "storage: {public: {apt: apt-bucket}}",
+        "storage: {public: {apt: {bucket: apt-bucket}}}",
+        "storage: {public: {apt: {url: 'https://a.invalid'}}}",
+        "storage: {public: {apt: {bucket: true, url: 'https://a.invalid'}}}",
+        "storage: {public: {apt: {bucket: apt-bucket, url: 'http://a.invalid'}}}",
+        "storage: {public: {apt: {bucket: apt-bucket, url: 'https://a.invalid/path'}}}",
+        "storage: {public: {apt: {bucket: apt-bucket, url: 'https://a.invalid', other: 1}}}",
+        "storage: {public: {unknown: {bucket: bucket, url: 'https://a.invalid'}}}",
+        "storage: {public: {apt: {bucket: shared, url: 'https://a.invalid'}, "
+        "rpm: {bucket: shared, url: 'https://b.invalid'}}}",
+        "storage: {public: {apt: {bucket: 'https://example.invalid/bucket', "
+        "url: 'https://a.invalid'}}}",
         "formats: {rpm: {trust: {allow_signed_upstream: 'false'}}}",
         "formats: {rpm: {trust: {unknown: true}}}",
         "formats: {flatpak: {trust: {runtime: {unknown: true}}}}",
@@ -192,7 +207,8 @@ def test_public_formats_need_configured_format_and_bucket(tmp_path: Path) -> Non
         document(
             tmp_path,
             "sources: [owner/repo]\nformats: {apt: {}, rpm: {}}\n"
-            "storage: {public: {rpm: rpm-bucket, apk: apk-bucket}}",
+            "storage: {public: {rpm: {bucket: rpm-bucket, url: 'https://rpm.invalid'}, "
+            "apk: {bucket: apk-bucket, url: 'https://apk.invalid'}}}",
         )
     )
     assert config.public_formats() == ("rpm",)

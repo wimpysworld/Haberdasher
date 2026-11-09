@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -20,9 +20,13 @@ from haberdasher.core import (
     ObjectRef,
     OutputObject,
     PreparedFormat,
+    Report,
     RetainedFormat,
     VerifiedAsset,
+    plural,
+    quiet,
     sha256_file,
+    step,
     utc_now,
 )
 from haberdasher.runtime import Runtime
@@ -87,6 +91,8 @@ class RunResult:
     changed: bool
     published_objects: int
     pending_assets: int = 0
+    packages: int = 0
+    repositories: int = 0
 
 
 def _format(filename: str) -> str | None:
@@ -100,6 +106,22 @@ def _format(filename: str) -> str | None:
         if filename.endswith(suffix):
             return name
     return None
+
+
+def new_assets(
+    scan: discovery.CompleteScan, published: Mapping[str, Published]
+) -> dict[str, list[discovery.DiscoveredAsset]]:
+    """Group checksummed assets by format, without the bytes that each inventory already holds."""
+    result: dict[str, list[discovery.DiscoveredAsset]] = {name: [] for name in published}
+    for item in scan.changed:
+        name = _format(item.source.filename)
+        if name not in result or item.checksum is None:
+            continue
+        accepted = published[name].retained.accepted_history
+        if any(asset.inspected.verified.sha256 == item.checksum.sha256 for asset in accepted):
+            continue
+        result[name].append(item)
+    return result
 
 
 def prepare_bootstrap(
@@ -176,25 +198,39 @@ def reconcile(
     store: Store,
     runtime: Runtime,
     now: datetime,
+    report: Report = quiet,
 ) -> RunResult:
     now = utc_now(lambda: now)
     if not policy.storage.public:
         raise ValueError("Publication needs explicit public destinations")
     if policy.storage.backend == "r2":
         policy.require_remote()
+    names = sorted(policy.storage.public)
     lock = state.acquire(store, policy.storage.public, now=now)
+    for name in names:
+        step(report, name, "locked")
     try:
-        result = _reconcile(config, policy, store=store, runtime=runtime, now=now)
+        result = _reconcile(config, policy, store=store, runtime=runtime, now=now, report=report)
     except BaseException:
         with contextlib.suppress(Exception):
             state.release(store, lock)
+            for name in names:
+                step(report, name, "unlocked")
         raise
     state.release(store, lock)
+    for name in names:
+        step(report, name, "unlocked")
     return result
 
 
 def _reconcile(
-    config: Config, policy: Policy, *, store: Store, runtime: Runtime, now: datetime
+    config: Config,
+    policy: Policy,
+    *,
+    store: Store,
+    runtime: Runtime,
+    now: datetime,
+    report: Report,
 ) -> RunResult:
     names = tuple(sorted(policy.storage.public))
     fingerprint = policy.expected_signing_fingerprint
@@ -206,16 +242,10 @@ def _reconcile(
                 "Native signing fingerprint changes need a key rotation, which is not supported"
             )
     policies = {name: config.format_policy(name) for name in names}
-    scan = discovery.scan_releases(config, runtime=runtime, previous=discovery.DiscoveryState())
-    changed: dict[str, list[discovery.DiscoveredAsset]] = {name: [] for name in names}
-    for item in scan.changed:
-        name = _format(item.source.filename)
-        if name not in changed or item.checksum is None:
-            continue
-        accepted = published[name].retained.accepted_history
-        if any(asset.inspected.verified.sha256 == item.checksum.sha256 for asset in accepted):
-            continue
-        changed[name].append(item)
+    scan = discovery.scan_releases(
+        config, runtime=runtime, previous=discovery.DiscoveryState(), report=report
+    )
+    changed = new_assets(scan, published)
     renew: set[str] = set()
     if "apt" in published and published["apt"].retained.metadata:
         expiry = published["apt"].retained.metadata.get("expires_at")
@@ -232,6 +262,8 @@ def _reconcile(
     )
     needed = {name for name in names if changed[name]} | renew
     if not missing_bootstrap and not needed:
+        for name in names:
+            step(report, name, "unchanged")
         return RunResult(False, 0, len(scan.pending))
     if fingerprint is None:
         raise ValueError("Publication requires the expected signing fingerprint")
@@ -241,8 +273,20 @@ def _reconcile(
         with signing_session(runtime, expected_fingerprint=fingerprint) as signer:
             for name in names:
                 if name not in needed:
+                    step(
+                        report,
+                        name,
+                        "adding public keys" if name in missing_bootstrap else "unchanged",
+                    )
                     prepared.append(_unchanged(published[name]))
                     continue
+                step(
+                    report,
+                    name,
+                    f"preparing {plural(len(changed[name]), 'new package')}"
+                    if changed[name]
+                    else "renewing metadata",
+                )
                 prepared.append(
                     _prepare(
                         name,
@@ -256,6 +300,8 @@ def _reconcile(
                         out=root / name,
                     )
                 )
+                if prepared[-1].outputs:
+                    step(report, name, "signed metadata")
             bootstrap_outputs, bootstrap_objects = prepare_bootstrap(
                 prepared,
                 tuple(ref for item in published.values() for ref in item.bootstrap),
@@ -263,6 +309,8 @@ def _reconcile(
                 out=root / "bootstrap",
             )
         count = 0
+        packages = 0
+        repositories = 0
         for item in prepared:
             current = published[item.format]
             bootstrap = tuple(ref for ref in bootstrap_objects if ref.bucket_role == item.format)
@@ -282,9 +330,14 @@ def _reconcile(
                     raise StateError("APT metadata expired before publication; rerun")
                 _write(store, output)
                 count += 1
+            if outputs:
+                step(report, item.format, f"uploaded {plural(len(outputs), 'object')}")
             state.write_inventory(store, current, data)
+            step(report, item.format, f"wrote {state.INVENTORY_KEY}")
             count += 1
-        return RunResult(True, count, len(scan.pending))
+            repositories += 1
+            packages += len(item.retained.accepted_history) - len(current.retained.accepted_history)
+        return RunResult(True, count, len(scan.pending), packages, repositories)
 
 
 def _prepare(

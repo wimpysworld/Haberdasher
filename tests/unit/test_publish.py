@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import socket
+import urllib.request
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 
@@ -196,7 +200,12 @@ class Releases:
         self.assets.append((source, path))
 
     def scan(
-        self, config: Config, *, runtime: Runtime, previous: discovery.DiscoveryState
+        self,
+        config: Config,
+        *,
+        runtime: Runtime,
+        previous: discovery.DiscoveryState,
+        report: core.Report = core.quiet,
     ) -> discovery.CompleteScan:
         if self.fail:
             raise discovery.DiscoveryFailure("synthetic discovery failure")
@@ -266,12 +275,12 @@ class Fixture:
         monkeypatch.setattr(discovery, "scan_releases", self.releases.scan)
         monkeypatch.setattr(discovery, "verify_asset", self.releases.verify)
 
-    def run(self) -> publish.RunResult:
+    def run(self, report: core.Report = core.quiet) -> publish.RunResult:
         self.store.writes.clear()
         self.store.deletes.clear()
         self.store.downloads.clear()
         return publish.reconcile(
-            self.config, self.policy, store=self.store, runtime=self.runtime, now=NOW
+            self.config, self.policy, store=self.store, runtime=self.runtime, now=NOW, report=report
         )
 
     def path(self, name: str, key: str) -> Path:
@@ -455,8 +464,16 @@ def test_unlock_deletes_existing_locks_only_on_request(
     assert "is locked by another run" in error and "Use just unlock only after" in error
     assert (root / "public/arch" / state.LOCK_KEY).exists()
     assert cli.main(["unlock", "--local-root", str(root)]) == 0
-    output = json.loads(capsys.readouterr().out)
-    assert output["mode"] == "unlock" and set(output["broken"]) == {"arch"}
+    lines = capsys.readouterr().out.splitlines()
+    host = socket.gethostname()
+    assert lines == [
+        "apk   no lock",
+        "apt   no lock",
+        f"arch  removed lock from {host} started {NOW.isoformat()}",
+        "flatpak no lock",
+        "rpm   no lock",
+        "Removed 1 lock.",
+    ]
     assert not any((root / "public" / name / state.LOCK_KEY).exists() for name in core.FORMATS)
     assert not (root / "public/arch" / state.INVENTORY_KEY).exists()
 
@@ -486,3 +503,63 @@ def test_changed_published_entry_stops_preparation(
         fixture.run()
     assert fixture.path("arch", "x86_64/db").read_text() == "tampered\n"
     assert not fixture.path("arch", "x86_64/tool-2.pkg").exists()
+
+
+def test_publish_reports_each_step_and_an_unchanged_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    lines: list[str] = []
+    result = fixture.run(lines.append)
+    assert (result.packages, result.repositories) == (1, 1)
+    assert lines == [
+        "arch  locked",
+        "arch  preparing 1 new package",
+        "arch  signed metadata",
+        "arch  uploaded 4 objects",
+        "arch  wrote haberdasher.json",
+        "arch  unlocked",
+    ]
+    lines.clear()
+    assert not fixture.run(lines.append).changed
+    assert lines == ["arch  locked", "arch  unchanged", "arch  unlocked"]
+
+
+def test_plan_counts_published_and_new_packages_from_the_public_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    fixture.releases.add("tool", "2")
+    inventory = fixture.path("arch", state.INVENTORY_KEY).read_bytes()
+    config = Config(
+        ("test/project",),
+        {"arch": FormatPolicy("arch")},
+        storage=StoragePolicy(
+            "r2",
+            {"arch": "test-arch", "apt": "test-apt"},
+            {"arch": "https://pkg.example.invalid", "apt": "https://apt.example.invalid"},
+        ),
+    )
+    requested: list[str] = []
+
+    def answer(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        requested.append(request.full_url)
+        return io.BytesIO(inventory)
+
+    scan = fixture.releases.scan(
+        config, runtime=fixture.runtime, previous=discovery.DiscoveryState()
+    )
+    with patch.object(urllib.request, "urlopen", side_effect=answer):
+        cli.show_plan(config, scan)
+    assert requested == ["https://pkg.example.invalid/haberdasher.json"]
+    assert capsys.readouterr().out.splitlines() == [
+        "Reading published state from pkg.example.invalid",
+        "",
+        "Format  Repository           Published  New",
+        "arch    pkg.example.invalid          1    1",
+        "",
+        "1 new package. Nothing written. Run `just publish` to publish them.",
+    ]

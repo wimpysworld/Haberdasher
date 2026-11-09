@@ -19,6 +19,20 @@ SCHEMA_VERSION = 1
 FORMATS = frozenset({"apt", "rpm", "arch", "apk", "flatpak"})
 OBJECT_CLASSES = frozenset({"package", "dependency", "entry", "inventory", "lock"})
 type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+type Report = Callable[[str], None]
+
+
+def quiet(line: str) -> None:
+    """A Report that prints nothing."""
+
+
+def step(report: Report, name: str, text: str) -> None:
+    """Report one publication step for a format."""
+    report(f"{name:<5} {text}")
+
+
+def plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
 def text(value: object, label: str) -> str:

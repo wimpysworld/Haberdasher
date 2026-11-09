@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import sys
+import urllib.error
+import urllib.request
+from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,7 +59,9 @@ def test_plan_never_opens_store_or_signer(
     ):
         assert cli.main(["plan"]) == 0
         scan.assert_called_once()
-    assert '"mode":"plan"' in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert output.startswith("Reading haberdasher.yaml: 1 source, 5 formats")
+    assert output.endswith("Nothing written.\n") and "{" not in output
 
 
 @pytest.mark.parametrize(
@@ -86,7 +91,8 @@ def test_argparse_rejects_removed_options(arguments: list[str]) -> None:
     "config",
     [
         "sources: [synthetic/test]\n",
-        "sources: [synthetic/test]\nformats: {apt: {}}\nstorage: {public: {rpm: test-rpm}}\n",
+        "sources: [synthetic/test]\nformats: {apt: {}}\n"
+        "storage: {public: {rpm: {bucket: test-rpm, url: 'https://rpm.example.invalid'}}}\n",
     ],
     ids=["no-storage", "no-configured-bucket"],
 )
@@ -304,7 +310,9 @@ def test_omitted_format_bucket_is_preserved(
             {
                 "sources": ["synthetic/test"],
                 "formats": {"apt": {}},
-                "storage": {"public": {"apt": "test-apt"}},
+                "storage": {
+                    "public": {"apt": {"bucket": "test-apt", "url": "https://apt.example.invalid"}}
+                },
             }
         ),
     )
@@ -319,7 +327,12 @@ def test_omitted_format_bucket_is_preserved(
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
     ):
         result = cli.main(["publish", "--local-root", str(root)])
-    assert result == 0 and '"changed":false' in capsys.readouterr().out
+    assert result == 0
+    assert capsys.readouterr().out.splitlines()[-3:] == [
+        "apt   unchanged",
+        "apt   unlocked",
+        "Nothing changed in 1 repository.",
+    ]
     after = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
     assert after == before
     assert not list(root.rglob(state.LOCK_KEY))
@@ -411,6 +424,51 @@ def test_local_publish_without_key_or_assets_writes_nothing(
         patch.dict(os.environ, {"HD_SIGNING_KEY_FILE": ""}),
     ):
         assert cli.main(["publish", "--local-root", str(root)]) == 0
-    assert '"changed":false' in capsys.readouterr().out
+    assert capsys.readouterr().out.endswith("Nothing changed in 1 repository.\n")
     assert sorted(path.name for path in (root / "public").iterdir()) == ["apt"]
     assert not any((root / "public/apt").iterdir())
+
+
+def test_plan_treats_404_as_unpublished_and_continues_past_an_unreachable_domain(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = Config(
+        ("synthetic/test",),
+        {"apt": FormatPolicy("apt"), "rpm": FormatPolicy("rpm")},
+        storage=StoragePolicy(
+            "r2",
+            {"apt": "test-apt", "rpm": "test-rpm"},
+            {"apt": "https://apt.example.invalid", "rpm": "https://127.0.0.1:1"},
+        ),
+    )
+    real = urllib.request.urlopen
+
+    def answer(request: urllib.request.Request, timeout: float) -> object:
+        if request.full_url.startswith("https://apt."):
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
+        return real(request, timeout=timeout)
+
+    with patch.object(urllib.request, "urlopen", side_effect=answer):
+        cli.show_plan(config, empty_scan())
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "Reading published state from apt.example.invalid, 127.0.0.1"
+    assert lines[1].startswith("rpm   cannot reach 127.0.0.1: ")
+    assert lines[2:] == [
+        "",
+        "Format  Repository           Published  New",
+        "apt     apt.example.invalid          0    0",
+        "rpm     127.0.0.1                    ?    ?",
+        "",
+        "No new packages. Nothing written. Could not read rpm, so the plan is incomplete.",
+    ]
+
+
+def test_errors_print_one_line_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    work_config(tmp_path, monkeypatch, "sources: [synthetic/test]\n")
+    failure = discovery.DiscoveryFailure("synthetic/test v1, checksums.txt: Cosign failed")
+    with patch.object(discovery, "scan_releases", side_effect=failure):
+        assert cli.main(["plan"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == "Error: synthetic/test v1, checksums.txt: Cosign failed\n"

@@ -21,19 +21,19 @@ sources:
 
 Cosign gets the Sigstore trust root through its normal online update in the private workspace.
 
-The `storage` section names one public R2 bucket for each format:
+The `storage` section names one public R2 bucket and its public URL for each format:
 
 ```yaml
 storage:
   public:
-    apt: haberdasher-apt
-    rpm: haberdasher-rpm
-    apk: haberdasher-apk
-    arch: haberdasher-pkg
-    flatpak: haberdasher-flatpak
+    apt: {bucket: haberdasher-apt, url: https://apt.wimpys.world}
+    rpm: {bucket: haberdasher-rpm, url: https://rpm.wimpys.world}
+    apk: {bucket: haberdasher-apk, url: https://apk.wimpys.world}
+    arch: {bucket: haberdasher-pkg, url: https://pkg.wimpys.world}
+    flatpak: {bucket: haberdasher-flatpak, url: https://flatpak.wimpys.world}
 ```
 
-Each public bucket must be distinct. Bucket names must be valid R2 names. A format publishes only when it is under `formats` and has a public bucket. The committed configuration lists `apt`, `rpm`, `arch`, and `apk` under `formats`, so it publishes those four and not Flatpak.
+Each public bucket must be distinct. Bucket names must be valid R2 names. Each URL must use HTTPS and have no path. `just plan` reads `<url>/haberdasher.json` from it. A format publishes only when it is under `formats` and has a public bucket. The committed configuration lists `apt`, `rpm`, `arch`, and `apk` under `formats`, so it publishes those four and not Flatpak.
 
 Each format can have a `trust` mapping. RPM and APK use `allow_signed_upstream` and `upstream_fingerprints` to admit already-signed upstream packages. Flatpak needs `source_owner`, application `refs`, and a `runtime` with URL, full fingerprint, collection, branch, architecture, remote, refs, and optional extensions. The current Flatpak adapter requires an empty collection. It rejects arbitrary runtime repository selection and signed upstream bundles. It does not add a source automatically.
 
@@ -49,9 +49,50 @@ just publish
 just unlock
 ```
 
-`just plan` needs runtime `GH_TOKEN` or `GITHUB_TOKEN` and uses no storage or signing. GitHub subprocesses use an isolated configuration, not a stored personal login. Native subprocesses receive neither GitHub nor storage credentials.
+`just plan` needs runtime `GH_TOKEN` or `GITHUB_TOKEN` and uses no storage credentials or signing. GitHub subprocesses use an isolated configuration, not a stored personal login. Native subprocesses receive neither GitHub nor storage credentials.
 
 `just publish` publishes every configured format to its R2 bucket. `just unlock` deletes stale locks, as described in [Locks](#locks).
+
+Each command prints plain text lines to stdout as each step starts or ends, then a short summary. An error prints one `Error:` line to stderr and exits with status 1.
+
+`just plan` checks the checksums and cosign bundle of each release. Then it reads each configured format's public `haberdasher.json` over HTTPS without credentials. HTTP 404 means that nothing is published. A repository that cannot be read shows `?` and the plan continues:
+
+```text
+Reading haberdasher.yaml: 1 source, 4 formats (apt, rpm, arch, apk)
+wimpysworld/tailor: 9 releases
+  v0.6.0  checksums OK  cosign OK  8 packages
+  v0.5.0  checksums OK  cosign OK  8 packages
+  ...
+Reading published state from apt.wimpys.world, rpm.wimpys.world, pkg.wimpys.world, apk.wimpys.world
+
+Format  Repository        Published  New
+apt     apt.wimpys.world          0   18
+rpm     rpm.wimpys.world          0   18
+arch    pkg.wimpys.world          0   18
+apk     apk.wimpys.world          0   18
+
+72 new packages. Nothing written. Run `just publish` to publish them.
+```
+
+The plan matches packages to the published state by the SHA256 checksum of each release asset, the same test that `just publish` uses to skip a download. It does not download packages, so it cannot inspect their native identities.
+
+`just publish` prints the same discovery lines and one line for each format step:
+
+```text
+apk   locked
+apt   locked
+...
+apt   preparing 18 new packages
+apt   signed metadata
+...
+apt   uploaded 20 objects
+apt   wrote haberdasher.json
+...
+apt   unlocked
+Published 72 packages to 4 repositories.
+```
+
+When nothing is new, each format prints `unchanged` and the summary is `Nothing changed in 4 repositories.`
 
 ### Local test root
 
@@ -91,7 +132,12 @@ A run that stops without cleanup, for example after a killed process, leaves its
 just unlock
 ```
 
-`just unlock` deletes the existing locks in the configured buckets, prints what it deleted, and exits without publishing.
+`just unlock` deletes the existing locks in the configured buckets and exits without publishing. It prints one line for each bucket:
+
+```text
+apk   no lock
+apt   removed lock from builder started 2026-11-09T10:00:00+00:00
+```
 
 ## Recovery
 

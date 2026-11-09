@@ -53,9 +53,21 @@ just publish
 just unlock
 ```
 
-`just plan` shows a read-only plan without storage access or signing. `just publish` publishes every configured format to its R2 bucket. `just unlock` deletes stale locks after a stopped run.
+`just plan` checks each release, reads the published state from each public repository, and prints a table of published and new packages. It writes nothing and signs nothing. `just publish` publishes every configured format to its R2 bucket. `just unlock` deletes stale locks after a stopped run.
 
 Planning reads GitHub and checksum assets. Supply `GH_TOKEN` or `GITHUB_TOKEN` through the runtime environment. The isolated GitHub configuration does not use a stored personal `gh` login.
+
+Each command prints plain progress lines and a short summary, for example:
+
+```text
+Format  Repository        Published  New
+apt     apt.wimpys.world          0   18
+rpm     rpm.wimpys.world          0   18
+arch    pkg.wimpys.world          0   18
+apk     apk.wimpys.world          0   18
+
+72 new packages. Nothing written. Run `just publish` to publish them.
+```
 
 Read the [publisher guide](docs/publisher.md) before you run `just publish` or `just unlock`.
 

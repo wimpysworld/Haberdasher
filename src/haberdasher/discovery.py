@@ -17,11 +17,14 @@ from urllib.parse import quote
 from haberdasher.config import Config, CosignPolicy
 from haberdasher.core import (
     Record,
+    Report,
     SourceAsset,
     VerifiedAsset,
     canonical_json,
     digest,
     integer,
+    plural,
+    quiet,
     repository_name,
     safe_key,
     safe_path,
@@ -387,13 +390,26 @@ def _verify_bundle(
             ]
         )
     if result.returncode != 0:
-        raise DiscoveryFailure(f"Cosign bundle verification failed for {checksum.filename}")
+        raise DiscoveryFailure(
+            f"Cosign bundle verification failed for {checksum.filename}. "
+            "Check the cosign identity and issuer in haberdasher.yaml"
+        )
 
 
-def scan_releases(config: Config, *, runtime: Runtime, previous: DiscoveryState) -> CompleteScan:
+def _release_label(release: dict[str, object], release_id: int) -> str:
+    tag = release.get("tag_name")
+    try:
+        return text(tag, "release tag")
+    except ValueError:
+        return f"release {release_id}"
+
+
+def scan_releases(
+    config: Config, *, runtime: Runtime, previous: DiscoveryState, report: Report = quiet
+) -> CompleteScan:
     """Return a proposed complete scan. Any failed request raises without changing previous."""
     assets: dict[tuple[str, int], SourceAsset] = {}
-    groups: list[tuple[SourceAsset, ...]] = []
+    groups: list[tuple[str, str, tuple[SourceAsset, ...]]] = []
     for repository in config.sources:
         for release in _pages(f"repos/{repository}/releases", runtime):
             if not _eligible(release):
@@ -411,48 +427,73 @@ def scan_releases(config: Config, *, runtime: Runtime, previous: DiscoveryState)
                 release_assets.append(source)
                 if len(assets) > MAX_ITEMS:
                     raise DiscoveryFailure("Too many discovered assets")
-            groups.append(tuple(release_assets))
+            groups.append((repository, _release_label(release, release_id), tuple(release_assets)))
     old = {_asset_key(record.source): record for record in previous.records}
     records: list[DiscoveredAsset] = []
     changed: list[DiscoveredAsset] = []
     unchanged: list[DiscoveredAsset] = []
     pending: list[DiscoveredAsset] = []
-    for group in groups:
-        checksums: dict[str, ChecksumEntry] = {}
-        for source in sorted(group, key=lambda item: item.asset_id):
-            if not _is_checksum(source.filename):
-                continue
-            with _download(source, runtime, MAX_CHECKSUM_BYTES) as (path, tag):
-                signer = config.cosign.get(source.repository)
-                if signer is not None:
-                    _verify_bundle(source, group, signer, tag, path, runtime)
-                with path.open("rb") as stream:
-                    entries = parse_checksums(stream.read(MAX_CHECKSUM_BYTES + 1), source)
-            for entry in entries:
-                if entry.filename in checksums:
-                    raise DiscoveryFailure("Ambiguous checksum sources for an asset")
-                checksums[entry.filename] = entry
-        for source in sorted(group, key=lambda item: item.asset_id):
-            if not source.filename.endswith(PACKAGE_SUFFIXES):
-                continue
-            checksum = checksums.get(source.filename)
-            fingerprint = hashlib.sha256(
-                canonical_json((source, checksum.sha256 if checksum is not None else None))
-            ).hexdigest()
-            record = DiscoveredAsset(source, checksum, fingerprint)
-            records.append(record)
-            prior = old.get(_asset_key(source))
-            if checksum is None:
-                pending.append(record)
-            elif (
-                prior is not None
-                and prior.source == source
-                and prior.checksum is not None
-                and prior.checksum.sha256 == checksum.sha256
-            ):
-                unchanged.append(record)
-            else:
-                changed.append(record)
+    for repository in config.sources:
+        releases = [(label, group) for owner, label, group in groups if owner == repository]
+        report(f"{repository}: {plural(len(releases), 'release')}")
+        width = max((len(label) for label, _ in releases), default=0)
+        for label, group in releases:
+            checksums: dict[str, ChecksumEntry] = {}
+            signed = False
+            for source in sorted(group, key=lambda item: item.asset_id):
+                if not _is_checksum(source.filename):
+                    continue
+                try:
+                    with _download(source, runtime, MAX_CHECKSUM_BYTES) as (path, tag):
+                        signer = config.cosign.get(source.repository)
+                        if signer is not None:
+                            _verify_bundle(source, group, signer, tag, path, runtime)
+                            signed = True
+                        with path.open("rb") as stream:
+                            entries = parse_checksums(stream.read(MAX_CHECKSUM_BYTES + 1), source)
+                except DiscoveryFailure as error:
+                    raise DiscoveryFailure(
+                        f"{source.repository} {label}, {source.filename}: {error}"
+                    ) from error
+                for entry in entries:
+                    if entry.filename in checksums:
+                        raise DiscoveryFailure(
+                            f"Ambiguous checksum sources in {repository} {label}: more than one "
+                            f"checksum file lists {entry.filename}"
+                        )
+                    checksums[entry.filename] = entry
+            packages = 0
+            missing = 0
+            for source in sorted(group, key=lambda item: item.asset_id):
+                if not source.filename.endswith(PACKAGE_SUFFIXES):
+                    continue
+                packages += 1
+                checksum = checksums.get(source.filename)
+                fingerprint = hashlib.sha256(
+                    canonical_json((source, checksum.sha256 if checksum is not None else None))
+                ).hexdigest()
+                record = DiscoveredAsset(source, checksum, fingerprint)
+                records.append(record)
+                prior = old.get(_asset_key(source))
+                if checksum is None:
+                    missing += 1
+                    pending.append(record)
+                elif (
+                    prior is not None
+                    and prior.source == source
+                    and prior.checksum is not None
+                    and prior.checksum.sha256 == checksum.sha256
+                ):
+                    unchanged.append(record)
+                else:
+                    changed.append(record)
+            line = f"  {label:<{width}}  {'checksums OK' if checksums else 'no checksums'}"
+            if signed:
+                line += "  cosign OK"
+            line += f"  {plural(packages, 'package')}"
+            if missing:
+                line += f", {missing} without a checksum (skipped)"
+            report(line)
     state = DiscoveryState(tuple(records), tuple(assets.values()), config.sources)
     disappeared = tuple(asset for asset in previous.assets if _asset_key(asset) not in assets)
     return CompleteScan(state, tuple(changed), tuple(unchanged), tuple(pending), disappeared)
