@@ -1,6 +1,6 @@
 # Arch local proof
 
-The preserved WW-373 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance. Official Arch distribution compatibility and production delivery remain unqualified.
+The WW-373 shell proof and the Python adapter tests check that pacman verifies signed packages and signed databases from a local HTTP repository. They use a pinned Nix pacman, not an official Arch image.
 
 ## Run and environment
 
@@ -10,15 +10,14 @@ In the Linux Nix development shell, use an ordinary account:
 just proof arch
 ```
 
-This command now runs the preserved shell proof and `tests/native/test_arch.py`. The native tests also publish one x86_64 and one aarch64 package in a single generation. A pacman client with `Architecture = aarch64` installs the aarch64 package on the x86_64 host. No aarch64 host or emulation runs the installed files. The historical shell evidence below uses x86_64 Linux. Pacman, repo-add, and vercmp use version
+This command runs the shell proof and `tests/native/test_arch.py`. The native tests also publish one x86_64 and one aarch64 package in a single generation. A pacman client with `Architecture = aarch64` installs the aarch64 package on the x86_64 host. No aarch64 host or emulation runs the installed files. The shell evidence below uses x86_64 Linux. Pacman, repo-add, and vercmp use version
 7.1.0 from this exact Nix build:
 
 ```text
 /nix/store/02qab8gqfkg4r51dwwdiqwxfhx8z0y1n-pacman-7.1.0-unstable-2026-01-25
 ```
 
-Pacman reports libalpm 16.0.1. This Nix client is not an official Arch image.
-Official-client acceptance remains incomplete.
+Pacman reports libalpm 16.0.1.
 
 The [common helper](../../tests/proofs/common.sh) clears inherited credentials
 and creates disposable RSA4096 signing keys, private temporary state, and
@@ -70,15 +69,13 @@ and new data/old signature.
 Matching frozen bytes restore strict refresh.
 Interruptions after packages, `.db`, `.files`, and before inventory preserve the
 previous completion inventory.
-Exact frozen replay restores packages, signatures, both archives, and inventory
+An exact frozen retry restores packages, signatures, both archives, and inventory
 without re-signing or deletion.
 
-## Production adapter and remaining gates
+## Publisher adapter
 
 `src/haberdasher/formats/arch.py` implements admitted new packages, verified retained archives, and signature gates. `tests/native/test_arch.py` checks HTTP installation, update, file search, dependencies, and rejection under strict trust.
 
 `tests/native/test_pipeline.py` adds real CLI publication, served public keys, fresh/existing clients, no-op, late assets, and a full rerun after an interruption.
 
 The client `GPGDir` is global to the selected pacman invocation, not a per-repository signer allow-list. [Arch setup](../clients.md#arch) explains the dedicated configuration/root boundary.
-
-Official Arch images, other architectures, public HTTPS/cache behaviour, split-publication availability, and real R2 permissions remain unqualified. Use the [activation checks](../validation.md#remaining-activation-checks) before deployment.

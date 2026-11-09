@@ -1,6 +1,6 @@
 # RPM proof
 
-The preserved WW-372 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance on `x86_64-linux`. Production activation remains pending.
+The WW-372 shell proof and the Python adapter tests check that DNF5 verifies signed RPM packages and signed `repomd.xml` from a local HTTP repository. They run on `x86_64-linux`.
 
 ## Reproduce
 
@@ -10,7 +10,7 @@ In the project Nix development shell, use an ordinary account:
 just proof rpm
 ```
 
-This command now runs the preserved shell proof and `tests/native/test_rpm.py`. The shell evidence below remains distinct from production pipeline acceptance.
+This command runs the shell proof and `tests/native/test_rpm.py`. The shell evidence below is separate from the publisher pipeline tests.
 
 [The proof](../../tests/proofs/rpm.sh),
 [XML helper](../../tests/proofs/rpm/metadata.py), and
@@ -46,7 +46,7 @@ full historical package elements.
 
 Generation two uses `--update --recycle-pkglist --skip-stat`, an explicit
 new-package list, and `--read-pkgs-list`. Only the new RPM is parsed. Historical
-RPMs remain published, but are absent from publisher inputs. Dependencies,
+RPMs stay published but are absent from publisher inputs. Dependencies,
 files, and changelogs survive. Missing, corrupt, incomplete, or malformed XML
 rejects without changing completion or publication. Unchanged input performs no
 extraction, signing, or indexing.
@@ -73,20 +73,18 @@ signature both reject. Each failure retains installed version 1. Restoring
 matching frozen output permits ordinary `--refresh` upgrade without cache
 deletion or disabled checks.
 
-## Limits and next work
+## Limits
 
 Fakechroot/fakeroot emulates root for trusted script-free fixtures, not a
 security boundary. Cleanup removes temporary state and keys.
 
-This shell proof uses unsigned inputs only. The production adapter replaces
+This shell proof uses unsigned inputs only. The publisher adapter replaces
 upstream signatures, as the next section describes.
 
-## Production adapter and remaining gates
+## Publisher adapter
 
 `src/haberdasher/formats/rpm.py` removes any upstream signature with `rpmsign --delsign`, then signs packages before indexing. It also implements retained XML and output verification. The source digest stays the GitHub asset digest. The published digest is the digest of the package that Haberdasher signed.
 
 `tests/native/test_rpm.py` checks HTTP install/update, dependencies, retained metadata, and strict package/metadata rejection. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and a full rerun after an interruption.
 
 Package trust applies globally to the selected RPM database. Metadata trust uses a repository-specific keyring. The pinned librepo client needs pre-seeded metadata trust. See [RPM setup](../clients.md#rpm).
-
-Fedora, RHEL, and openSUSE images, public HTTPS/cache behaviour, real R2 reruns, production keys, and hosted permissions remain unqualified. Use the [activation checks](../validation.md#remaining-activation-checks) before external tests.

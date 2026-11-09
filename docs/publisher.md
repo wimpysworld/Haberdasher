@@ -49,7 +49,7 @@ A run adds the packages of each latest release to the published repositories. Ve
 
 Each release needs a checksum before import. Discovery reads combined checksum files (`SHA256SUMS`, `checksums.txt`, `*_checksums.txt`, `*.sha256sum`) and per-asset `<asset>.sha256` files. A per-asset file can hold a bare digest. When two checksum files list the same asset, their digests must agree.
 
-GitHub reports a `sha256:` digest for each release asset. Discovery checks each checksum file and listed asset against it. When a release has no checksum file entry for a package, the GitHub digest is the checksum. A package without any checksum stays pending, and the plan line counts it as skipped.
+GitHub reports a `sha256:` digest for each release asset. Discovery checks each checksum file and listed asset against it. When a release has no checksum file entry for a package, the GitHub digest is the checksum. A package without any checksum is skipped, and the plan line counts it.
 
 When a checksum file has a sibling `<checksum file>.sigstore.json`, discovery runs `cosign verify-blob --bundle` before it reads the file. The issuer must be `https://token.actions.githubusercontent.com`. The certificate identity must match `^https://github\.com/<owner>/<repo>/\.github/workflows/[^@]+@refs/tags/<tag>$`, for any workflow file. A failed bundle stops the run. A release without a bundle shows `no cosign bundle` instead of `cosign OK`.
 
@@ -131,7 +131,7 @@ Storage subprocesses receive only the three documented `HD_CLOUDFLARE_*` storage
 
 ## Publication and state
 
-`discovery.py` scans the latest release of each source and its assets, including assets added to that release later. Assets without a matching release checksum remain pending. Admission verifies source SHA256 before native import and rejects changed bytes under equivalent native identities.
+`discovery.py` scans the latest release of each source and its assets, including assets added to that release later. Assets without a matching release checksum are skipped. Admission verifies source SHA256 before native import and rejects changed bytes under equivalent native identities.
 
 Each bucket's public `haberdasher.json` is the publication state for its format. It holds the inventory allow-list (package identity, source, published digests, and referenced objects) and the accepted history and metadata keys that the native adapter needs. There is no private state bucket. A run reads each inventory first. An asset whose bytes are already in the inventory needs no download. When a format changes, the run downloads only the published metadata that the inventory references, not the package pool. Unchanged runs avoid package downloads, inspection, indexing, and signing, and write nothing except the locks. APT renews metadata within its renewal window. Flatpak restoration downloads only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. `flatpak build-update-repo` needs those AppStream paths to keep unchanged applications in the AppStream catalogue. Payload files and earlier commits stay published and are not downloaded again.
 
@@ -162,7 +162,7 @@ apt   removed lock from builder started 2026-11-09T10:00:00+00:00
 
 ## Recovery
 
-Recover from an interrupted run with a full rerun of `just publish`. The rerun reads the last complete `haberdasher.json`, prepares and signs again, overwrites leftover unreferenced objects, and publishes new metadata. There is no replay, write journal, or crash-recovery state.
+Recover from an interrupted run with a full rerun of `just publish`. The rerun reads the last complete `haberdasher.json`, prepares and signs again, overwrites leftover unreferenced objects, and publishes new metadata. There is no write journal or crash-recovery state.
 
 An unknown write outcome stops the run. Delete a stale lock with `just unlock` first when the run could not release it.
 

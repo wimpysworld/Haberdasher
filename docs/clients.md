@@ -1,18 +1,18 @@
 # Native client setup
 
-These are post-activation setup templates. The intended public domains are not yet qualified. Do not treat these examples as live installation instructions.
+Each client trusts the Haberdasher public key for one repository, with native signature checks enabled.
 
-Local acceptance uses pinned Nix clients on `x86_64-linux`, disposable roots, and loopback HTTP. Official distribution images, public HTTPS, host installation, and application execution remain unqualified.
+The native tests run pinned Nix clients on `x86_64-linux` against disposable roots and loopback HTTP. They do not cover official distribution images, public HTTPS, host installation, or the execution of an installed application.
 
 ## Authenticate public keys first
 
-Obtain the full primary fingerprint through an independent approved channel. A fingerprint fetched beside the key is not independent evidence.
+Obtain the full primary fingerprint through an independent trusted channel. A fingerprint fetched beside the key is not independent evidence.
 
-Every configured public role serves `keys/haberdasher.asc` and `keys/haberdasher.gpg`. Download from the same approved origin as the repository. For example, after APT activation:
+Every published repository serves `keys/haberdasher.asc` and `keys/haberdasher.gpg`. Download from the same origin as the repository. For example, for APT:
 
 ```sh
 set -eu
-: "${EXPECTED_FINGERPRINT:?Set the independently approved full primary fingerprint}"
+: "${EXPECTED_FINGERPRINT:?Set the independently verified full primary fingerprint}"
 : "${BOOTSTRAP_DIR:?Set a private temporary directory outside the checkout}"
 curl --fail --silent --show-error \
   https://apt.wimpys.world/keys/haberdasher.gpg \
@@ -43,9 +43,9 @@ Architectures: amd64
 Signed-By: /etc/apt/keyrings/haberdasher.gpg
 ```
 
-Match suite, component, and architecture to publisher configuration. The native fixture uses `stable/main/amd64`. The deb822 form expresses the same scoped Signed-By trust.
+The publisher uses suite `stable` and component `main`, and indexes `amd64` and `arm64`. Set `Architectures` to the client architecture. The native fixture uses `stable/main/amd64`. The deb822 form expresses the same scoped Signed-By trust.
 
-After approval, use ordinary `apt-get update`, `apt-get install PACKAGE`, and `apt-get install --only-upgrade PACKAGE`. Keep signature, date, and `Valid-Until` checks enabled. Do not use `apt-key`, global trust, or `trusted=yes`.
+Then use ordinary `apt-get update`, `apt-get install PACKAGE`, and `apt-get install --only-upgrade PACKAGE`. Keep signature, date, and `Valid-Until` checks enabled. Do not use `apt-key`, global trust, or `trusted=yes`.
 
 APT verifies signed repository metadata, not signatures on individual DEBs. Immutable pool and by-hash objects support delayed clients.
 
@@ -64,11 +64,11 @@ gpgkey=file:///etc/pki/rpm-gpg/haberdasher.asc
 skip_if_unavailable=0
 ```
 
-Both package and metadata verification are required. Import only the verified public key with `rpm --import /etc/pki/rpm-gpg/haberdasher.asc` after approval.
+Both package and metadata verification are required. Import only the verified public key with `rpm --import /etc/pki/rpm-gpg/haberdasher.asc`.
 
 RPM package trust is global to the selected RPM database, not a per-repository signer allow-list. A repository's `gpgkey` does not remove that wider trust. Use a separate installation root/database when that boundary is required.
 
-The pinned DNF5/librepo client requires a pre-seeded repository-specific metadata keyring. `tests/native/fixtures/rpm.py::DnfClient` defines the exact cache-keyring setup and private root. Do not assume another distribution needs the same workaround. After client qualification, ordinary `dnf5 --refresh install PACKAGE` and `dnf5 --refresh upgrade PACKAGE` must preserve both checks.
+The pinned DNF5/librepo client requires a pre-seeded repository-specific metadata keyring. `tests/native/fixtures/rpm.py::DnfClient` defines the exact cache-keyring setup and private root. Do not assume another distribution needs the same workaround. Ordinary `dnf5 --refresh install PACKAGE` and `dnf5 --refresh upgrade PACKAGE` keep both checks.
 
 The production adapter removes upstream RPM signatures with `rpmsign --delsign`, then signs with the Haberdasher key. Clients need only the Haberdasher key.
 
@@ -92,7 +92,7 @@ Server = https://pkg.wimpys.world/$arch
 
 `GPGDir` applies globally to that pacman invocation. It is not a per-repository allow-list. Use a dedicated configuration and installation root to keep this key separate from unrelated repositories.
 
-The native tests import the verified key and explicit owner trust, then run strict refresh, dependency installation, update, and file search. Preserve `Required TrustedOnly` for packages and databases. Do not use `TrustAll` or optional signatures.
+The native tests import the verified key and explicit owner trust, then run strict refresh, dependency installation, update, and file search. Keep `Required TrustedOnly` for packages and databases. Do not use `TrustAll` or optional signatures.
 
 ## Alpine APK
 
@@ -112,7 +112,7 @@ APK selects the architecture-specific index, `x86_64/APKINDEX.tar.gz` or `aarch6
 
 A strict client can install unchanged unsigned v2 packages through the trusted signed index. Standalone verification rejects those same unsigned packages. No client uses `--allow-untrusted`. The publisher uses that flag only for bounded unsigned-input inspection.
 
-RSA256 signs the index with SHA256. Native v2 `Q1` control identity still uses SHA1, while payload `datahash` and whole-file admission use SHA256. Production acceptance of this SHA1 boundary remains pending. Successful `apk update` or `apk fetch` exit status alone does not prove trust. Check actual installed records, payloads, and fetched files.
+RSA256 signs the index with SHA256. Native v2 `Q1` control identity uses SHA1, while payload `datahash` and whole-file admission use SHA256. Successful `apk update` or `apk fetch` exit status alone does not prove trust. Check actual installed records, payloads, and fetched files.
 
 ## Flatpak
 
@@ -134,6 +134,6 @@ flatpak --user install wimpysworld APP_ID
 
 Haberdasher signs every commit and the summary with its own key, and removes any upstream commit signature. Do not disable commit or summary verification. `tests/native/test_flatpak.py` adds the publisher from the published file, with a local runtime provider that has a separate key, and checks the remote configuration and deployed data. It also installs from a `.flatpakref` file whose `RuntimeRepo` names a loopback runtime repository, and checks that Flatpak adds that runtime remote with GPG verification. No installed application executes.
 
-## Qualification
+## Verification
 
-Use [the validation guide](validation.md) for safe reproduction. Obtain explicit approval before public-domain tests or host setup. Keep signature checks enabled throughout qualification.
+[The validation guide](validation.md) lists the local checks and the production checks. Keep signature checks enabled in every test.
