@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from haberdasher import admission, discovery, state
+from haberdasher import admission, discovery, site, state
 from haberdasher.config import Config, FormatPolicy, Policy
 from haberdasher.core import (
     AdmittedAsset,
@@ -28,6 +28,7 @@ from haberdasher.core import (
     plural,
     quiet,
     sha256_file,
+    size_text,
     stale_entries,
     step,
     utc_now,
@@ -96,6 +97,7 @@ class RunResult:
     pending_assets: int = 0
     packages: int = 0
     repositories: tuple[str, ...] = ()
+    pages: tuple[str, ...] = ()
 
 
 def _format(filename: str) -> str | None:
@@ -195,21 +197,15 @@ def _write(store: Store, output: OutputObject) -> None:
         store.replace(output.ref, output.local_path, expected_etag=observed.etag)
 
 
-def _size(size: int) -> str:
-    if size >= 1_000_000:
-        return f"{size / 1_000_000:.0f} MB"
-    return f"{size / 1_000:.0f} KB" if size >= 1_000 else f"{size} B"
-
-
 def _listing(name: str, refs: Sequence[ObjectRef]) -> list[str]:
     """Name each object and its size in key order, with Flatpak `objects/` as one line."""
     lines: dict[str, str] = {}
     objects = [ref for ref in refs if name == "flatpak" and ref.key.startswith("objects/")]
     for ref in refs:
         if ref not in objects:
-            lines[ref.key] = f"{ref.key} ({_size(ref.size)})"
+            lines[ref.key] = f"{ref.key} ({size_text(ref.size)})"
     if objects:
-        size = _size(sum(ref.size for ref in objects))
+        size = size_text(sum(ref.size for ref in objects))
         lines["objects/"] = f"objects/ {plural(len(objects), 'file')} ({size})"
     return [f"  {lines[key]}" for key in sorted(lines)]
 
@@ -217,6 +213,28 @@ def _listing(name: str, refs: Sequence[ObjectRef]) -> list[str]:
 def _duration(seconds: float) -> str:
     minutes, seconds = divmod(round(seconds), 60)
     return f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
+
+
+def write_page(
+    store: Store,
+    published: Published,
+    *,
+    fingerprint: str,
+    fallback: Mapping[str, str],
+    now: datetime,
+    report: Report = quiet,
+) -> bool:
+    """Write a format's index.html when it is missing or its content hash differs."""
+    data, digest = site.page(
+        published.format, published, fingerprint=fingerprint, fallback=fallback, now=now
+    )
+    current = store.read(published.format, site.PAGE_KEY, max_bytes=site.MAX_PAGE_BYTES)
+    if current is not None and site.content_hash(current[0]) == digest:
+        return False
+    expected = None if current is None else current[1].etag
+    state.write_object(store, site.ref(published.format, data), data, expected)
+    step(report, published.format, f"wrote {site.PAGE_KEY}")
+    return True
 
 
 def _unchanged(published: Published) -> PreparedFormat:
@@ -332,7 +350,24 @@ def _reconcile(
         if not missing_bootstrap and not any(inspected.values()):
             for name in names:
                 step(report, name, "unchanged")
-            return RunResult(False, 0, len(scan.pending))
+            if fingerprint is None:
+                return RunResult(False, 0, len(scan.pending))
+            fallback = site.descriptions(
+                item.retained.accepted_history for item in published.values()
+            )
+            pages = tuple(
+                name
+                for name in names
+                if write_page(
+                    store,
+                    published[name],
+                    fingerprint=fingerprint,
+                    fallback=fallback,
+                    now=now,
+                    report=report,
+                )
+            )
+            return RunResult(bool(pages), len(pages), len(scan.pending), pages=pages)
         if fingerprint is None:
             raise ValueError("Publication requires the expected signing fingerprint")
         prepared: list[PreparedFormat] = []
@@ -370,6 +405,8 @@ def _reconcile(
         count = 0
         packages = 0
         repositories: list[str] = []
+        written: list[str] = []
+        fallback = site.descriptions(item.retained.accepted_history for item in prepared)
         for item in prepared:
             current = published[item.format]
             bootstrap = tuple(ref for ref in bootstrap_objects if ref.bucket_role == item.format)
@@ -379,6 +416,16 @@ def _reconcile(
                 *item.outputs,
             )
             if not outputs and hashlib.sha256(data).hexdigest() == current.sha256:
+                if write_page(
+                    store,
+                    current,
+                    fingerprint=fingerprint,
+                    fallback=fallback,
+                    now=now,
+                    report=report,
+                ):
+                    written.append(item.format)
+                    count += 1
                 continue
             batch = [
                 output
@@ -388,7 +435,9 @@ def _reconcile(
             if batch:
                 size = sum(output.ref.size for output in batch)
                 step(
-                    report, item.format, f"uploading {plural(len(batch), 'object')} ({_size(size)})"
+                    report,
+                    item.format,
+                    f"uploading {plural(len(batch), 'object')} ({size_text(size)})",
                 )
                 for line in _listing(item.format, [output.ref for output in batch]):
                     step(report, item.format, line)
@@ -402,7 +451,7 @@ def _reconcile(
             for output in outputs:
                 if output in batch:
                     continue
-                step(report, item.format, f"  {output.ref.key} ({_size(output.ref.size)})")
+                step(report, item.format, f"  {output.ref.key} ({size_text(output.ref.size)})")
                 _write(store, output)
                 count += 1
             state.write_inventory(store, current, data)
@@ -410,7 +459,19 @@ def _reconcile(
             count += 1
             repositories.append(item.format)
             packages += len(item.retained.accepted_history) - len(current.retained.accepted_history)
-        return RunResult(True, count, len(scan.pending), packages, tuple(repositories))
+            if write_page(
+                store,
+                state.decode_published(item.format, data, None),
+                fingerprint=fingerprint,
+                fallback=fallback,
+                now=now,
+                report=report,
+            ):
+                written.append(item.format)
+                count += 1
+        return RunResult(
+            True, count, len(scan.pending), packages, tuple(repositories), tuple(written)
+        )
 
 
 def _prepare(

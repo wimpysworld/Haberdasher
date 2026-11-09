@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from subprocess import CompletedProcess
 
+from haberdasher import site
 from haberdasher.core import SourceAsset, VerifiedAsset, safe_path, sha256_file
 from haberdasher.runtime import Runtime
 from tests.support.keys import DisposableKey, run
@@ -166,6 +167,6 @@ def client(
         f"GPGDir = {home}\nHookDir = {private.path('hooks')}\n"
         f"Architecture = {architecture}\nSigLevel = Required TrustedOnly\n"
         "LocalFileSigLevel = Required TrustedOnly\nRemoteFileSigLevel = Required TrustedOnly\n"
-        f"[haberdasher]\nServer = {url}\n"
+        + site.pacman_repo(url)
     )
     return Pacman(private, config, home)

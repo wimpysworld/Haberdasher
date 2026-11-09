@@ -2,6 +2,8 @@
 
 Each client trusts the Haberdasher public key for one repository, with native signature checks enabled.
 
+For the setup and install commands, use the page of each repository: [APT](https://apt.wimpys.world/), [RPM](https://rpm.wimpys.world/), [Arch Linux](https://pkg.wimpys.world/), [Alpine Linux](https://apk.wimpys.world/), and [Flatpak](https://flatpak.wimpys.world/). Each page lists its packages and published files. This guide explains the trust model and the tested client configuration.
+
 The native tests run pinned Nix clients on `x86_64-linux` against disposable roots and loopback HTTP. They do not cover official distribution images, public HTTPS, host installation, or the execution of an installed application.
 
 ## Authenticate public keys first

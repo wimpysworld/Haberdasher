@@ -22,7 +22,7 @@ from urllib.request import urlopen
 
 import pytest
 
-from haberdasher import cli, publish, state
+from haberdasher import cli, publish, site, state
 from haberdasher.config import (
     Config,
     Policy,
@@ -65,7 +65,7 @@ def printed_result(output: str) -> publish.RunResult:
         elif words[1:2] == ["uploaded"]:
             uploading = False
             objects += int(words[2])
-        elif line.endswith(f"wrote {state.INVENTORY_KEY}"):
+        elif line.endswith((f"wrote {state.INVENTORY_KEY}", f"wrote {site.PAGE_KEY}")):
             uploading = False
             objects += 1
         elif not uploading and line.startswith(f"{words[0]:<5}   "):
@@ -518,6 +518,25 @@ def native_client(
             raise ValueError(name)
 
 
+def check_page(bucket: Path, name: str, fingerprint: str) -> str:
+    """Check the themed index.html beside the inventory, and return its content hash."""
+    data = (bucket / site.PAGE_KEY).read_bytes()
+    page = data.decode()
+    for path in site.THEMES[name].styles:
+        assert (
+            f'href="https://cdn.jsdelivr.net/npm/{path}" integrity="{site.STYLES[path]}" '
+            'crossorigin="anonymous"'
+        ) in page
+    assert fingerprint in page and f'href="{state.INVENTORY_KEY}"' in page
+    if name == "flatpak":
+        assert "<p>Local data only test</p>" in page and "objects/</span>" in page
+    inventory = json.loads((bucket / state.INVENTORY_KEY).read_bytes())
+    assert site.PAGE_KEY not in {item["key"] for item in inventory["objects"]}
+    digest = site.content_hash(data)
+    assert digest is not None
+    return digest
+
+
 def strings(value: object) -> Generator[str]:
     if isinstance(value, str):
         yield value
@@ -628,6 +647,7 @@ def test_recorded_pipeline_and_full_rerun(
             first = reconcile()
         assert first.changed and first.published_objects > 0
         assert not (bucket / state.LOCK_KEY).exists()
+        first_page = check_page(bucket, name, key.fingerprint)
         bootstrap_paths = sorted((bucket / "keys").iterdir())
         bootstrap_stats = {path: (path.read_bytes(), path.stat()) for path in bootstrap_paths}
         assert recorded.downloads == [
@@ -687,6 +707,7 @@ def test_recorded_pipeline_and_full_rerun(
         else:
             second = reconcile()
         assert second.changed and second.pending_assets == 0
+        assert check_page(bucket, name, key.fingerprint) != first_page
         assert recorded.downloads == ["SHA256SUMS", assets[-1].source.filename]
         assert {Path(path).name for path in recorded.inspected} == {f"{name}-0-asset"}
         assert not (bucket / state.LOCK_KEY).exists()

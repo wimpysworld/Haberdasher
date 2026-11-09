@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from haberdasher import discovery, publish, signing, state
+from haberdasher import discovery, publish, signing, site, state
 from haberdasher.config import (
     PRODUCTION_FINGERPRINT,
     PUBLIC,
@@ -129,6 +129,42 @@ def read_published(name: str, url: str) -> state.Published:
     return state.decode_published(name, data, None)
 
 
+def read_page(url: str) -> bytes | None:
+    """Read one bucket's public index.html without credentials. HTTP 404 is None."""
+    request = urllib.request.Request(
+        f"{url.rstrip('/')}/{site.PAGE_KEY}", headers={"User-Agent": "haberdasher"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+            data = response.read(site.MAX_PAGE_BYTES + 1)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise
+    if len(data) > site.MAX_PAGE_BYTES:
+        raise ValueError(f"{site.PAGE_KEY} exceeds its size limit")
+    return data
+
+
+def pending_pages(
+    published: Mapping[str, state.Published], urls: Mapping[str, str], fingerprint: str
+) -> list[str]:
+    """Formats whose published index.html is missing or differs from the page that publish writes."""
+    fallback = site.descriptions(item.retained.accepted_history for item in published.values())
+    pending: list[str] = []
+    for name, item in published.items():
+        _, digest = site.page(name, item, fingerprint=fingerprint, fallback=fallback, now=utc_now())
+        try:
+            current = read_page(urls[name])
+        except (OSError, ValueError) as error:
+            step(say, name, f"cannot read {site.PAGE_KEY}: {error}")
+            continue
+        if site.content_hash(current) != digest:
+            step(say, name, f"would write {site.PAGE_KEY}")
+            pending.append(name)
+    return pending
+
+
 def _urls() -> dict[str, str]:
     return {name: url for name, (_, url) in PUBLIC.items()}
 
@@ -138,6 +174,7 @@ def show_plan(
     config: Config,
     runtime: Runtime,
     urls: Mapping[str, str] | None = None,
+    fingerprint: str = PRODUCTION_FINGERPRINT,
 ) -> None:
     """Print published and new package counts for each format found or already published.
 
@@ -181,6 +218,15 @@ def show_plan(
             )
             for name, items in changed.items()
         }
+    pages = pending_pages(
+        {
+            name: published[name]
+            for name in names
+            if name in published and published[name].sha256 is not None
+        },
+        urls,
+        fingerprint,
+    )
     rows = [("Format", "Repository", "Published", "New")]
     for name in names:
         if name in published:
@@ -199,13 +245,13 @@ def show_plan(
     say("")
     total = sum(len(items) for items in new.values())
     missing = [name for name in names if name not in published]
-    if total:
-        summary = f"{plural(total, 'new package')}. Nothing written."
-    else:
-        summary = "No new packages. Nothing written."
+    summary = f"{plural(total, 'new package')}." if total else "No new packages."
+    if pages:
+        summary += f" {plural(len(pages), 'index page')} to write."
+    summary += " Nothing written."
     if missing:
         summary += f" Could not read {', '.join(missing)}, so the plan is incomplete."
-    elif total:
+    elif total or pages:
         summary += " Run `just publish` to publish them."
     say(summary)
 
@@ -263,8 +309,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"Published {plural(result.packages, 'package')} to "
                     f"{_repositories(len(result.repositories))}."
                 )
-            elif result.changed:
+            elif result.repositories:
                 say(f"Refreshed {_names(result.repositories)} metadata.")
+            elif result.pages:
+                say(f"Refreshed the {_names(result.pages)} index pages.")
             else:
                 say(f"Nothing changed in {_repositories(len(storage.public))}.")
         return 0

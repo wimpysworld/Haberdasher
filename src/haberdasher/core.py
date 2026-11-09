@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
 FORMATS = frozenset({"apt", "rpm", "arch", "apk", "flatpak"})
-OBJECT_CLASSES = frozenset({"package", "dependency", "entry", "inventory", "lock"})
+OBJECT_CLASSES = frozenset({"package", "dependency", "entry", "inventory", "lock", "page"})
 type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 type Report = Callable[[str], None]
 
@@ -37,6 +37,12 @@ def step(report: Report, name: str, text: str) -> None:
 
 def plural(count: int, noun: str) -> str:
     return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def size_text(size: int) -> str:
+    if size >= 1_000_000:
+        return f"{size / 1_000_000:.0f} MB"
+    return f"{size / 1_000:.0f} KB" if size >= 1_000 else f"{size} B"
 
 
 def text(value: object, label: str) -> str:
@@ -444,8 +450,8 @@ def public_inventory(
                 "published_sha256": asset.published_sha256,
             }
         )
-    if any(ref.object_class in {"inventory", "lock"} for ref in objects):
-        raise ValueError("Inventory and lock objects cannot appear in a public inventory")
+    if any(ref.object_class in {"inventory", "lock", "page"} for ref in objects):
+        raise ValueError("Inventory, lock, and page objects cannot appear in a public inventory")
     return {
         "schema_version": SCHEMA_VERSION,
         "assets": entries,

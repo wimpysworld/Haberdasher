@@ -201,14 +201,19 @@ def _component(path: Path, ref: str) -> ET.Element:
     return matches[0]
 
 
-def _title(path: Path, ref: str) -> str:
-    """The untranslated AppStream name on one line, or the app ID when there is none."""
-    names = [
+def _untranslated(path: Path, ref: str, tag: str) -> str:
+    """The untranslated AppStream text of one element on one line, or an empty string."""
+    values = [
         " ".join((node.text or "").split())
-        for node in _component(path, ref).findall("name")
+        for node in _component(path, ref).findall(tag)
         if "{http://www.w3.org/XML/1998/namespace}lang" not in node.attrib
     ]
-    return next((name for name in names if name), ref.split("/")[1])
+    return next((value for value in values if value), "")
+
+
+def _title(path: Path, ref: str) -> str:
+    """The untranslated AppStream name, or the app ID when there is none."""
+    return _untranslated(path, ref, "name") or ref.split("/")[1]
 
 
 def _version(path: Path, ref: str, runtime: Runtime) -> str:
@@ -340,13 +345,15 @@ def inspect(
         _checkout(runtime, repo, commit, tree)
         if safe_path(tree, "metadata").read_text() != bundle.get("metadata"):
             raise FlatpakFailure("Commit metadata and payload differ")
-        version = _appstream(safe_path(tree, _APP_PATHS[1].lstrip("/")), ref, runtime)
+        info = safe_path(tree, _APP_PATHS[1].lstrip("/"))
+        version = _appstream(info, ref, runtime)
+        summary = _untranslated(_catalogue(info), ref, "summary")
     # Preparation replaces any upstream signature with the publisher signature.
     signed = bool(data.pop("signatures", None))
     return InspectedAsset(
         asset,
         NativeIdentity("flatpak", ref, match[2], version, source_commit=commit),
-        {"bundle": bundle, "native": data},
+        {"bundle": bundle, "native": data, "summary": summary},
         {
             "runtime": runtime_ref,
             "runtime_repo": runtime_repo,
