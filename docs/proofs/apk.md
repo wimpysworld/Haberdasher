@@ -1,6 +1,6 @@
 # Alpine APK proof
 
-The preserved WW-374 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance. Production policy and distribution compatibility remain unapproved.
+The preserved WW-374 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance. Production configuration and distribution compatibility remain untested.
 
 ## Reproduce
 
@@ -10,7 +10,7 @@ In the Linux Nix development shell, run:
 just proof apk
 ```
 
-This command now runs [the preserved shell proof](../../tests/proofs/apk.sh) and `tests/native/test_apk.py`. The historical shell evidence follows. [The shared helper](../../tests/proofs/common.sh) isolates disposable state and keys.
+This command now runs [the preserved shell proof](../../tests/proofs/apk.sh) and `tests/native/test_apk.py`. The native tests also publish unsigned x86_64 and aarch64 packages with versions that have no `-rN` suffix. A client with `--arch aarch64` installs and fetches the aarch64 package on the x86_64 host. No aarch64 host or emulation runs the installed files. The historical shell evidence follows. [The shared helper](../../tests/proofs/common.sh) isolates disposable state and keys.
 
 The executed tools were apk-tools **3.0.5** (compiled for **x86_64**), abuild **3.17.0**, GnuPG/gpgsm **2.4.9**, and OpenSSL **3.5.9**. Client commands explicitly select `--arch x86_64`.
 
@@ -40,7 +40,7 @@ Missing/wrong keys and changed index/control/payload bytes cause installation fa
 
 ## Decision and limits
 
-**SHIP** the bounded local approach. **REJECT** v3 and invalid admission. **DEFER** production policy and compatibility approval.
+**SHIP** the bounded local approach. **REJECT** v3 and invalid admission. **DEFER** production configuration and compatibility checks.
 
 Native v2 `Q1` control identity uses SHA1. Compressed-payload `datahash` uses SHA256. Source admission uses whole-file SHA256. The SHA1 identity risk remains a production decision. Older Alpine clients are untested.
 
@@ -48,12 +48,12 @@ Same-key conversion proves one disposable RSA4096 primary, matching keygrips and
 
 ## Production adapter and remaining gates
 
-`src/haberdasher/formats/apk.py` implements v2 admission, retained records, RSA256 index signing, unchanged package bytes, and frozen output. The native key basename is `haberdasher.rsa.pub`, distinct from the historical shell fixture basename.
+`src/haberdasher/formats/apk.py` implements v2 admission, retained records, RSA256 index signing, and unchanged package bytes. The native key basename is `haberdasher.rsa.pub`, distinct from the historical shell fixture basename.
 
-`tests/native/test_apk.py` checks HTTP install/update and strict rejection. `tests/native/test_pipeline.py` fetches the public RSA key, binds its modulus to the independently verified OpenPGP primary, and checks fresh/existing clients after recovery.
+`tests/native/test_apk.py` checks HTTP install/update and strict rejection. `tests/native/test_pipeline.py` fetches the public RSA key, binds its modulus to the independently verified OpenPGP primary, and checks fresh/existing clients after a full rerun that follows an interruption.
 
-Strict installation of unsigned packages depends on the trusted index. Standalone unsigned-package verification still rejects. The client never disables trust. Native SHA1 control identity remains a separate production approval gate.
+Strict installation of unsigned packages depends on the trusted index. Standalone unsigned-package verification still rejects. The client never disables trust. Native SHA1 control identity remains a known production limitation.
 
 An empty configured APK role receives the two OpenPGP exports. It receives the native RSA public key only with its first index. See [APK setup](../clients.md#alpine-apk).
 
-Official Alpine clients, real-input policy, public HTTPS/cache behaviour, production permissions, and real R2 recovery remain unqualified. Use the [activation gates](../validation.md#remaining-activation-gates) before public use.
+Official Alpine clients, real-input policy, public HTTPS/cache behaviour, production permissions, and real R2 reruns remain unqualified. Use the [activation checks](../validation.md#remaining-activation-checks) before public use.

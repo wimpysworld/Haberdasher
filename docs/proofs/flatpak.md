@@ -1,6 +1,6 @@
 # Flatpak local proof
 
-The preserved WW-375 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance. Production source/runtime approval remains pending.
+The preserved WW-375 shell proof passed independent local validation. The production Python adapter also passes isolated HTTP acceptance. Production source/runtime configuration remains pending.
 
 ## Run and boundary
 
@@ -77,10 +77,10 @@ temporarily remove availability. No multi-object atomicity is proved.
 
 ## Production adapter and remaining gates
 
-`src/haberdasher/formats/flatpak.py` implements approved bundle admission, retained heads/payload, signed commit/summary output, and exact frozen replay. It rejects signed upstream bundles. It requires explicit source owner, application refs, runtime URL, fingerprint, branch, architecture, remote, refs, and extensions. The collection policy is empty.
+`src/haberdasher/formats/flatpak.py` implements approved bundle admission, retained heads/payload, and signed commit/summary output. It rejects signed upstream bundles. It requires explicit source owner, application refs, runtime URL, fingerprint, branch, architecture, remote, refs, and extensions. The collection policy is empty.
 
-`tests/native/test_flatpak.py` checks HTTP search, install/update, commit/summary trust, approved runtime and extension origins, exact deployed commits, and rejection cases. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and source-free/signer-free recovery.
+`tests/native/test_flatpak.py` checks HTTP search, install/update, commit/summary trust, approved runtime and extension origins, exact deployed commits, and rejection cases. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and a full rerun after an interruption.
 
 The runtime origin remains separate from the application origin. Arbitrary `RuntimeRepo` selection is not allowed. No production source is automatically added. See [Flatpak setup](../clients.md#flatpak).
 
-Production source/runtime approval, real upstream inputs, public HTTPS/cache behaviour, older clients, other architectures, sandbox execution, and production permissions remain pending. Use the [activation gates](../validation.md#remaining-activation-gates) before public use.
+Production source/runtime configuration, real upstream inputs, public HTTPS/cache behaviour, older clients, other architectures, sandbox execution, and production permissions remain pending. Use the [activation checks](../validation.md#remaining-activation-checks) before public use.

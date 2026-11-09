@@ -5,16 +5,23 @@ import hashlib
 import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from haberdasher import core
 from haberdasher.config import FormatPolicy
-from haberdasher.core import AdmittedAsset, NativeIdentity, RetainedFormat
+from haberdasher.core import AdmittedAsset, NativeIdentity, ObjectRef, RetainedFormat
 from haberdasher.formats import rpm
 from haberdasher.runtime import Runtime, private_workspace
-from tests.unit.test_state import NOW, object_ref
+
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def object_ref(path: Path, key: str, kind: str = "entry", name: str = "apt") -> ObjectRef:
+    sha, size = core.sha256_file(path)
+    return ObjectRef(name, key, kind, size, sha, "application/octet-stream", "no-cache")
 
 
 def test_compare_uses_native_evr(monkeypatch: pytest.MonkeyPatch) -> None:

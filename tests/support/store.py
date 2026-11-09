@@ -16,11 +16,11 @@ from haberdasher.core import ObjectRef
 
 
 def local_policy(root: Path) -> StoragePolicy:
-    return StoragePolicy(private=str(root / "private"), public={"apt": str(root / "public/apt")})
+    return StoragePolicy(public={"apt": str(root / "public/apt"), "rpm": str(root / "public/rpm")})
 
 
 def remote_policy() -> StoragePolicy:
-    return StoragePolicy("r2", "test-private", {"apt": "test-public"})
+    return StoragePolicy("r2", {"apt": "test-public", "rpm": "test-rpm"})
 
 
 def object_ref(
@@ -29,7 +29,7 @@ def object_ref(
     return ObjectRef(
         role,
         key,
-        "private" if role == "private" else "entry",
+        "entry",
         len(data),
         hashlib.sha256(data).hexdigest(),
         "application/octet-stream",
@@ -55,6 +55,7 @@ class StorageHTTP:
     put_error: int | None = None
     accept_then_error: bool = False
     truncate_get: bool = False
+    stale_delete: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -133,6 +134,20 @@ def storage_http() -> Generator[StorageHTTP]:
             self.send_response(200)
             self.send_header("ETag", etag)
             self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_DELETE(self) -> None:
+            with state.lock:
+                key = self._record()
+                current = state.objects.get(key)
+                if current is not None and state.stale_delete:
+                    current = current[0], current[1].removesuffix('"') + '-changed"'
+                    state.objects[key] = current
+                if current is None or self.headers.get("If-Match") != current[1]:
+                    self._error(412)
+                    return
+                del state.objects[key]
+            self.send_response(204)
             self.end_headers()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

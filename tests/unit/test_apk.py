@@ -1,7 +1,10 @@
 # pyright: reportPrivateUsage=false
 
 import gzip
+import hashlib
+import io
 import subprocess
+import tarfile
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -10,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from haberdasher.admission import admit
 from haberdasher.config import FormatPolicy
 from haberdasher.core import (
     AdmittedAsset,
@@ -268,7 +272,7 @@ def test_empty_state_is_distinct_from_missing_retained_state(tmp_path: Path) -> 
     assert runtime.calls == []
 
 
-@pytest.mark.parametrize("architectures", [("noarch",), ("aarch64",), ("x86_64", "noarch")])
+@pytest.mark.parametrize("architectures", [("noarch",), ("armv7",), ("x86_64", "noarch")])
 def test_unqualified_placements_reject(tmp_path: Path, architectures: tuple[str, ...]) -> None:
     with pytest.raises(apk.ApkFailure, match="qualified"):
         apk.validate_retained(
@@ -276,3 +280,193 @@ def test_unqualified_placements_reject(tmp_path: Path, architectures: tuple[str,
             policy=FormatPolicy("apk", architectures=architectures),
             runtime=FakeRuntime(tmp_path),
         )
+
+
+@pytest.mark.parametrize("architectures", [("x86_64",), ("aarch64",), ("x86_64", "aarch64")])
+def test_qualified_placements_accept(tmp_path: Path, architectures: tuple[str, ...]) -> None:
+    apk.validate_retained(
+        RetainedFormat("apk", None, (), (), {}, ()),
+        policy=FormatPolicy("apk", architectures=architectures),
+        runtime=FakeRuntime(tmp_path),
+    )
+
+
+APK_POLICY = FormatPolicy("apk", architectures=("x86_64", "aarch64"))
+
+
+def _tar(members: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def _read(path: Path) -> dict[str, bytes]:
+    members: dict[str, bytes] = {}
+    with tarfile.open(path, "r:gz") as archive:
+        for member in archive:
+            stream = archive.extractfile(member)
+            if stream is not None:
+                members[member.name] = stream.read()
+    return members
+
+
+class NativeApk(FakeRuntime):
+    """Emulate tar, apk index, and apk version for unsigned two-stream APK v2 inputs."""
+
+    def asset(self, name: str, version: str, arch: str) -> VerifiedAsset:
+        data = gzip.compress(_tar({"usr/bin/" + name: b"inert"}), mtime=0)
+        info = (
+            f"pkgname = {name}\npkgver = {version}\narch = {arch}\n"
+            f"datahash = {hashlib.sha256(data).hexdigest()}\n"
+        )
+        control = gzip.compress(_tar({".PKGINFO": info.encode()}), mtime=0)
+        path = self.root.parent / f"{name}_{version}_{arch}.apk"
+        path.write_bytes(control + data)
+        sha, size = sha256_file(path)
+        source = SourceAsset(
+            "wimpysworld/tailor",
+            1,
+            1,
+            path.name,
+            size,
+            "2026-01-01T00:00:00Z",
+            "https://example.invalid/" + path.name,
+        )
+        return VerifiedAsset(source, path, sha, size, 2, "1" * 64)
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        input: bytes | None = None,
+        timeout: float = 120,
+        env_kind: str = "native",
+    ) -> subprocess.CompletedProcess[bytes]:
+        argv = tuple(argv)
+        self.calls.append(argv)
+        stdout = b""
+        if argv[:2] == ("tar", "-tzf"):
+            stdout = "".join(name + "\n" for name in _read(Path(argv[2]))).encode()
+        elif argv[:2] == ("tar", "-xOzf"):
+            stdout = _read(Path(argv[2]))[argv[3]]
+        elif "-czf" in argv:
+            content = Path(argv[argv.index("-C") + 1])
+            names = argv[argv.index("-C") + 2 :]
+            target = Path(argv[argv.index("-czf") + 1])
+            target.write_bytes(gzip.compress(_tar({n: (content / n).read_bytes() for n in names})))
+        elif "index" in argv and "--merge" in argv:
+            seed = Path(argv[argv.index("--index") + 1])
+            Path(argv[argv.index("--output") + 1]).write_bytes(seed.read_bytes())
+        elif "index" in argv:
+            package = Path(argv[-1])
+            control = gzip.decompress(package.read_bytes())
+            with tarfile.open(fileobj=io.BytesIO(control)) as archive:
+                stream = archive.extractfile(".PKGINFO")
+                assert stream is not None
+                fields = dict(line.split(" = ", 1) for line in stream.read().decode().splitlines())
+            stanza = (
+                f"C:Q1{'A' * 27}=\nP:{fields['pkgname']}\nV:{fields['pkgver']}\n"
+                f"A:{fields['arch']}\nS:{package.stat().st_size}\nI:5\nT:Inert\nL:MIT\n\n"
+            )
+            Path(argv[argv.index("--output") + 1]).write_bytes(
+                gzip.compress(_tar({"APKINDEX": stanza.encode()}))
+            )
+        elif "version" in argv and "--test" in argv:
+            left, right = argv[-2:]
+            stdout = b"=" if left == right else (b">" if left > right else b"<")
+        return subprocess.CompletedProcess(argv, 0, stdout, b"")
+
+
+def _verify_synthetic(path: Path, key: Path, runtime: Runtime) -> dict[tuple[str, str, str], str]:
+    return apk._records(_read(path)["APKINDEX"].decode())
+
+
+@pytest.mark.parametrize("arch", ["x86_64", "aarch64"])
+def test_inspect_version_without_release(tmp_path: Path, arch: str) -> None:
+    runtime = NativeApk(tmp_path / "runtime")
+    asset = runtime.asset("tailor", "0.6.0", arch)
+    inspected = apk.inspect(asset, policy=APK_POLICY, runtime=runtime, out=tmp_path / "out")
+    assert inspected.identity == NativeIdentity("apk", "tailor", arch, "0.6.0")
+    assert apk._filename(inspected.identity) == f"{arch}/tailor-0.6.0.apk"
+    assert inspected.upstream_signature == "unsigned"
+    assert ("apk", "version", "--check", "0.6.0") in runtime.calls
+    assert apk._fields(apk._string(inspected.metadata.get("stanza")))["V"] == "0.6.0"
+
+
+@pytest.mark.parametrize("arch,architectures", [("aarch64", ("x86_64",)), ("x86_64", ("aarch64",))])
+def test_inspect_rejects_unconfigured_architecture(
+    tmp_path: Path, arch: str, architectures: tuple[str, ...]
+) -> None:
+    runtime = NativeApk(tmp_path / "runtime")
+    asset = runtime.asset("tailor", "0.6.0", arch)
+    with pytest.raises(apk.ApkFailure, match="Unqualified APK architecture"):
+        apk.inspect(
+            asset,
+            policy=FormatPolicy("apk", architectures=architectures),
+            runtime=runtime,
+            out=tmp_path / "out",
+        )
+
+
+def test_mixed_architecture_publication(tmp_path: Path) -> None:
+    runtime = NativeApk(tmp_path / "runtime")
+    private, public = tmp_path / "synthetic-private", tmp_path / apk.PUBLIC_KEY
+    private.write_bytes(b"inert private fixture")
+    public.write_bytes(b"inert public fixture")
+    signer = SigningSession(runtime, tmp_path / "gnupg", "A" * 40)
+    history: list[AdmittedAsset] = []
+    for arch in ("x86_64", "aarch64"):
+        inspected = apk.inspect(
+            runtime.asset("tailor", "0.6.0", arch),
+            policy=APK_POLICY,
+            runtime=runtime,
+            out=tmp_path / "inspect",
+        )
+        history.append(
+            admit(inspected, history, compare=apk.compare, policy=APK_POLICY, runtime=runtime)
+        )
+    with (
+        patch.object(signer, "alpine_key", return_value=(private, public)),
+        patch.object(apk, "_verify_index", side_effect=_verify_synthetic),
+    ):
+        prepared = apk.prepare(
+            history,
+            RetainedFormat("apk", None, (), (), {}, ()),
+            policy=APK_POLICY,
+            runtime=runtime,
+            signer=signer,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+            out=tmp_path / "generation",
+        )
+        with pytest.raises(apk.ApkFailure, match="Invalid retained APK policy"):
+            apk.validate_retained(
+                prepared.retained,
+                policy=FormatPolicy("apk", architectures=("x86_64",)),
+                runtime=runtime,
+            )
+    assert [output.ref.key for output in prepared.outputs] == [
+        "keys/" + apk.PUBLIC_KEY,
+        "x86_64/tailor-0.6.0.apk",
+        "aarch64/tailor-0.6.0.apk",
+        "aarch64/APKINDEX.tar.gz",
+        "x86_64/APKINDEX.tar.gz",
+    ]
+    for item in history:
+        output = next(
+            output
+            for output in prepared.outputs
+            if output.ref.key == apk._filename(item.inspected.identity)
+        )
+        assert output.local_path.read_bytes() == item.inspected.verified.local_path.read_bytes()
+    indexes = prepared.retained.metadata["indexes"]
+    assert isinstance(indexes, dict) and set(indexes) == {"x86_64", "aarch64"}
+    for arch in ("x86_64", "aarch64"):
+        records = _verify_synthetic(
+            tmp_path / f"generation/{arch}/APKINDEX.tar.gz", public, runtime
+        )
+        assert list(records) == [("tailor", "0.6.0", arch)]

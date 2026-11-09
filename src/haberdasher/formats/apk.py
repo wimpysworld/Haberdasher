@@ -32,6 +32,7 @@ from haberdasher.signing import ALPINE_SIGNATURE_MEMBER, SigningSession
 
 MAX_METADATA = 16 * 1024 * 1024
 PUBLIC_KEY = "haberdasher.rsa.pub"
+ARCHITECTURES = ("x86_64", "aarch64")
 
 
 class ApkFailure(ValueError):
@@ -61,8 +62,8 @@ def _apk(keys: Path, *args: str) -> list[str]:
 
 
 def _policy(policy: FormatPolicy) -> None:
-    if policy.format != "apk" or policy.architectures != ("x86_64",):
-        raise ApkFailure("Only qualified APK x86_64 placement is supported")
+    if policy.format != "apk" or not set(policy.architectures) <= set(ARCHITECTURES):
+        raise ApkFailure("Only qualified APK x86_64 and aarch64 placement is supported")
 
 
 def _check(path: Path, digest: str, size: int) -> None:
@@ -188,13 +189,8 @@ def _upstream_keys(
     policy: FormatPolicy, runtime: Runtime, out: Path, basename: str
 ) -> list[tuple[str, Path]]:
     trust = policy.trust
-    if not (
-        trust.approved
-        and trust.approval_reference
-        and trust.allow_signed_upstream
-        and trust.upstream_fingerprints
-    ):
-        raise ApkFailure("Signed APK input requires approved upstream trust")
+    if not (trust.allow_signed_upstream and trust.upstream_fingerprints):
+        raise ApkFailure("Signed APK input requires configured upstream trust")
     keys: list[tuple[str, Path]] = []
     for fingerprint in trust.upstream_fingerprints:
         listing = _run(
@@ -401,12 +397,10 @@ def _expected(
         if item.upstream_signature not in {"unsigned", "verified"}:
             raise ApkFailure("Untrusted retained APK")
         if item.upstream_signature == "verified" and not (
-            policy.trust.approved
-            and policy.trust.approval_reference
-            and policy.trust.allow_signed_upstream
+            policy.trust.allow_signed_upstream
             and item.evidence.get("upstream_fingerprint") in policy.trust.upstream_fingerprints
         ):
-            raise ApkFailure("Retained upstream APK trust is not approved")
+            raise ApkFailure("Retained upstream APK trust is not configured")
         stanza = _string(item.metadata.get("stanza"))
         parsed = _records(stanza)
         key = identity.name, identity.version, identity.architecture
@@ -585,7 +579,7 @@ def prepare(
     if retained.accepted_history and sha256_file(
         _file(retained.metadata.get("public_key"))
     ) != sha256_file(public):
-        raise ApkFailure("APK key rotation requires separate approval")
+        raise ApkFailure("APK key rotation is not supported")
     key = out / PUBLIC_KEY
     atomic_write(key, public.read_bytes())
     refs = {ref.key: ref for ref in retained.objects}
@@ -678,11 +672,11 @@ def validate_prepared(
         raise ApkFailure("Invalid prepared APK format")
     validate_retained(prepared.retained, policy=policy, runtime=runtime)
     if prepared.referenced_objects != prepared.retained.objects:
-        raise ApkFailure("Incomplete frozen APK references")
+        raise ApkFailure("Incomplete prepared APK references")
     entry_seen = False
     for output in prepared.outputs:
         if output.ref not in prepared.referenced_objects:
-            raise ApkFailure("Unreferenced frozen APK output")
+            raise ApkFailure("Unreferenced prepared APK output")
         _check(output.local_path, output.ref.sha256, output.ref.size)
         if output.ref.object_class == "entry":
             entry_seen = True

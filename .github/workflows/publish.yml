@@ -28,9 +28,8 @@ jobs:
           determinate: true
       - name: Set up the pinned Python environment
         run: nix develop --no-write-lock-file --command just setup
-      - name: Publish with explicit policy approval
+      - name: Publish
         env:
-          HD_PUBLISH_POLICY: ${{ secrets.HD_PUBLISH_POLICY }}
           GH_TOKEN: ${{ github.token }}
           HD_SIGNING_KEY: ${{ secrets.HD_SIGNING_KEY }}
           HD_CLOUDFLARE_S3_API_ENDPOINT: >-
@@ -42,17 +41,5 @@ jobs:
         shell: bash
         run: |
           set +x
-          if [ -z "$HD_PUBLISH_POLICY" ]; then
-            printf '%s\n' 'HD_PUBLISH_POLICY requires an approved policy.' >&2
-            exit 1
-          fi
-          umask 077
-          policy_file=$(mktemp /tmp/haberdasher-policy.XXXXXX)
-          trap 'rm -f -- "$policy_file"' EXIT
-          trap 'exit 129' HUP
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-          printf '%s' "$HD_PUBLISH_POLICY" > "$policy_file"
-          unset HD_PUBLISH_POLICY
           nix develop --no-write-lock-file --command \
-            just publish --apply --remote --policy-file "$policy_file"
+            just publish --apply --remote --format all

@@ -1,4 +1,4 @@
-"""Recorded GitHub transport, real adapters, durable storage and HTTP clients."""
+"""Recorded GitHub transport, real adapters, locked storage and HTTP clients."""
 
 from __future__ import annotations
 
@@ -9,18 +9,20 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Generator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import CompletedProcess
+from typing import cast
 from unittest.mock import patch
 from urllib.request import urlopen
 
 import pytest
 
-from haberdasher import cli, discovery, publish, state
+from haberdasher import cli, publish, state
 from haberdasher.config import (
     Config,
     FormatPolicy,
@@ -263,27 +265,40 @@ os.execv({target!r},[{target!r},*sys.argv[1:]])
 
 
 class InterruptedStore(LocalStore):
+    """Fail the first entry write, after the run uploaded its packages and dependencies."""
+
     interrupt = False
 
     def __init__(self, policy: StoragePolicy) -> None:
         super().__init__(policy)
         self.downloads: list[ObjectRef] = []
+        self.writes: list[ObjectRef] = []
 
     def download(self, ref: ObjectRef, destination: Path) -> ObjectStat:
         self.downloads.append(ref)
         return super().download(ref, destination)
 
-    def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
-        if self.interrupt and ref.bucket_role != "private":
+    def _check(self, ref: ObjectRef) -> None:
+        self.writes.append(ref)
+        if self.interrupt and ref.object_class == "entry":
             self.interrupt = False
-            raise RuntimeError("synthetic interruption before public write")
+            raise RuntimeError("synthetic interruption before entry metadata")
+
+    def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
+        self._check(ref)
         return super().create(ref, source)
 
     def replace(self, ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
-        if self.interrupt and ref.bucket_role != "private":
-            self.interrupt = False
-            raise RuntimeError("synthetic interruption before public write")
+        self._check(ref)
         return super().replace(ref, source, expected_etag=expected_etag)
+
+
+def snapshot(root: Path) -> dict[Path, tuple[bytes, int, int]]:
+    return {
+        path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
 
 
 def assets_for(name: str, runtime: Runtime) -> list[VerifiedAsset]:
@@ -464,24 +479,34 @@ def native_client(
             raise ValueError(name)
 
 
-def committed(store: LocalStore, runtime: Runtime) -> RetainedFormat:
-    owner = state.acquire(store, owner="test-read")
-    result = state.load_committed(store, owner, out=runtime.root / "restored")
-    state.release(store, owner)
-    assert len(result.formats) == 1
-    assert result.signing_fingerprint is not None
-    assert {ref.key for ref in result.bootstrap_objects} == {
-        "keys/haberdasher.asc",
-        "keys/haberdasher.gpg",
-    }
-    for ref in (*result.formats[0].objects, *result.bootstrap_objects):
+def strings(value: object) -> Generator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in cast(dict[str, object], value).values():
+            yield from strings(item)
+    elif isinstance(value, list):
+        for item in cast(list[object], value):
+            yield from strings(item)
+
+
+def committed(store: LocalStore, runtime: Runtime, name: str) -> RetainedFormat:
+    current = store.read(name, state.INVENTORY_KEY, max_bytes=state.MAX_INVENTORY_BYTES)
+    assert current is not None
+    roots = (tempfile.gettempdir(), "/tmp/")
+    assert not [item for item in strings(json.loads(current[0])) if any(r in item for r in roots)]
+    published = state.read(store, name)
+    assert {ref.key for ref in published.bootstrap} == set(state.BOOTSTRAP_KEYS)
+    assert all(ref.key != state.LOCK_KEY for ref in published.objects)
+    retained = state.materialise(store, published, out=runtime.root / "restored")
+    for ref in published.objects:
         store.download(ref, runtime.root / "checked-object")
-    return result.formats[0]
+    return retained
 
 
 @pytest.mark.parametrize("name", ["apt", "rpm", "arch", "apk", "flatpak"])
-@pytest.mark.parametrize("interrupted", [False, True], ids=["cli", "recovery"])
-def test_recorded_pipeline_and_frozen_recovery(
+@pytest.mark.parametrize("interrupted", [False, True], ids=["cli", "rerun"])
+def test_recorded_pipeline_and_full_rerun(
     name: str,
     interrupted: bool,
     monkeypatch: pytest.MonkeyPatch,
@@ -492,9 +517,8 @@ def test_recorded_pipeline_and_frozen_recovery(
         assets = assets_for(name, fixtures)
         recorded = RecordedGitHub(assets)
         local_root = fixtures.root / "store"
-        storage = StoragePolicy(
-            "local", str(local_root / "private"), {name: str(local_root / "public" / name)}
-        )
+        storage = StoragePolicy("local", {name: str(local_root / "public" / name)})
+        bucket = Path(storage.public[name])
         store = InterruptedStore(storage)
         (fixtures.root / "http").mkdir()
         runtime_commits = ("", "")
@@ -511,8 +535,6 @@ def test_recorded_pipeline_and_frozen_recovery(
             format_policy = replace(
                 format_policy,
                 trust=TrustPolicy(
-                    approved=True,
-                    approval_reference="synthetic-only",
                     source_owner="wimpysworld",
                     refs=(flatpak.REF,),
                     runtime=RuntimePolicy(
@@ -527,43 +549,32 @@ def test_recorded_pipeline_and_frozen_recovery(
                     ),
                 ),
             )
-        config = Config(
-            ("wimpysworld/fixture",), {name: replace(format_policy, trust=TrustPolicy())}
-        )
-        policy = Policy(
-            storage,
-            expected_signing_fingerprint=key.fingerprint,
-            clients={name: format_policy.trust},
-        )
+        config = Config(("wimpysworld/fixture",), {name: format_policy})
+        policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
         monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
-        config_file, policy_file = fixtures.root / "config.json", fixtures.root / "policy.json"
+        config_file = fixtures.root / "config.json"
         configured = {"architectures": json_value(format_policy.architectures)}
         if name == "apt":
             configured["suite"] = format_policy.suite
+        trust = {
+            key: value
+            for key, value in state.mapping(json_value(format_policy.trust)).items()
+            if value not in (None, False, [])
+        }
+        if trust:
+            configured["trust"] = trust
         config_file.write_bytes(
             canonical_json({"sources": config.sources, "formats": {name: configured}})
         )
-        client_policy = {
-            key: value
-            for key, value in state.mapping(json_value(format_policy.trust)).items()
-            if value is not None
-        }
-        policy_file.write_bytes(
-            canonical_json(
-                {
-                    "storage": storage,
-                    "expected_signing_fingerprint": key.fingerprint,
-                    "clients": {name: client_policy},
-                }
-            )
-        )
         arguments = [
+            "--config",
+            str(config_file),
             "--local-root",
             str(local_root),
             "--format",
             name,
-            "--policy-file",
-            str(policy_file),
+            "--signing-fingerprint",
+            key.fingerprint,
         ]
 
         @contextmanager
@@ -578,7 +589,7 @@ def test_recorded_pipeline_and_frozen_recovery(
                     recorded,
                     fixtures.root,
                     key,
-                    ["--apply", "--config", str(config_file), *arguments],
+                    ["--apply", *arguments],
                 )
             with private_workspace() as runtime:
                 recorded.bind(runtime)
@@ -586,19 +597,37 @@ def test_recorded_pipeline_and_frozen_recovery(
 
         def serve_generation(number: int) -> None:
             public = fixtures.root / "http" / name
-            shutil.copytree(Path(storage.public[name]), public, dirs_exist_ok=True)
+            shutil.copytree(bucket, public, dirs_exist_ok=True)
             http.set_generation_mtime(
                 [path for path in public.rglob("*") if path.is_file()], number
             )
 
+        def unchanged_rerun() -> None:
+            before = snapshot(bucket)
+            recorded.downloads.clear()
+            recorded.native.clear()
+            recorded.inspected.clear()
+            recorded.forbid_native = True
+            store.downloads.clear()
+            store.writes.clear()
+            result = reconcile()
+            assert not result.changed and result.published_objects == 0
+            assert recorded.downloads == ["SHA256SUMS"] and not recorded.native
+            assert not store.downloads
+            if interrupted:
+                assert [ref.key for ref in store.writes] == [state.LOCK_KEY]
+            assert snapshot(bucket) == before
+            recorded.forbid_native = False
+
         if interrupted:
             with patch.object(cli, "private_workspace", recorded_workspace):
-                assert cli.main(["--apply", "--config", str(config_file), *arguments]) == 0
+                assert cli.main(["--apply", *arguments]) == 0
             first = publish.RunResult(**json.loads(capsys.readouterr().out))
         else:
             first = reconcile()
         assert first.changed and first.published_objects > 0
-        bootstrap_paths = sorted((Path(storage.public[name]) / "keys").iterdir())
+        assert not (bucket / state.LOCK_KEY).exists()
+        bootstrap_paths = sorted((bucket / "keys").iterdir())
         bootstrap_stats = {path: (path.read_bytes(), path.stat()) for path in bootstrap_paths}
         assert recorded.downloads == [
             "SHA256SUMS",
@@ -609,7 +638,7 @@ def test_recorded_pipeline_and_frozen_recovery(
             asset.local_path.unlink()
         serve_generation(1)
         with private_workspace() as runtime:
-            retained = committed(store, runtime)
+            retained = committed(store, runtime, name)
         check = native_client(
             name,
             fixtures,
@@ -620,150 +649,41 @@ def test_recorded_pipeline_and_frozen_recovery(
             runtime_commits,
         )
         check(retained, 1)
-        recorded.downloads.clear()
-        recorded.native.clear()
-        recorded.inspected.clear()
-        recorded.forbid_native = True
-        store.downloads.clear()
-        unchanged = reconcile()
-        assert not unchanged.changed and unchanged.published_objects == 0
-        assert recorded.downloads == ["SHA256SUMS"] and not recorded.native
-        package_hashes = {ref.sha256 for ref in retained.objects if ref.object_class == "package"}
-        assert not any(ref.sha256 in package_hashes for ref in store.downloads)
-        recorded.forbid_native = False
+        unchanged_rerun()
         recorded.visible += 1
         recorded.downloads.clear()
         pending = reconcile()
-        assert pending.pending_assets == 1
+        assert pending.pending_assets == 1 and not pending.changed
         assert recorded.downloads == ["SHA256SUMS"] and not recorded.inspected
         recorded.checksummed += 1
         recorded.downloads.clear()
         recorded.native.clear()
-        prior = state.read_control(store, "completed.json")
         if interrupted:
+            inventory = (bucket / state.INVENTORY_KEY).read_bytes()
             store.interrupt = True
             with pytest.raises(RuntimeError, match="synthetic interruption"):
                 reconcile()
-            assert state.read_control(store, "completed.json") == prior
-        else:
-            second = reconcile()
-            assert second.changed and second.pending_assets == 0
-        assert recorded.downloads == ["SHA256SUMS", assets[-1].source.filename]
-        assert len(recorded.inspected) == 1
-        assert {Path(path).name for path in recorded.inspected} == {f"{name}-0-asset"}
-        if not interrupted:
-            with private_workspace() as runtime:
-                restored = committed(store, runtime)
-            assert restored.accepted_history[:-1] == retained.accepted_history
-            assert all(
-                not asset.inspected.verified.local_path.exists()
-                for asset in restored.accepted_history
-            )
-            for path, (data, stat) in bootstrap_stats.items():
-                assert (path.read_bytes(), path.stat()) == (data, stat)
-            serve_generation(2)
-            check(restored, 2)
-            fresh = native_client(
-                name,
-                fixtures,
-                "fresh",
-                http.url(name),
-                key,
-                http.url("runtime-repo"),
-                runtime_commits,
-            )
-            fresh(restored, 2)
+            assert (bucket / state.INVENTORY_KEY).read_bytes() == inventory
+            assert not (bucket / state.LOCK_KEY).exists()
+            leftovers = {
+                ref.key for ref in store.writes if ref.object_class in {"package", "dependency"}
+            }
+            assert leftovers and all((bucket / key).exists() for key in leftovers)
+            assert recorded.downloads == ["SHA256SUMS", assets[-1].source.filename]
             recorded.downloads.clear()
-            recorded.native.clear()
             recorded.inspected.clear()
-            recorded.forbid_native = True
-            unchanged = reconcile()
-            assert not unchanged.changed and unchanged.published_objects == 0
-            assert recorded.downloads == ["SHA256SUMS"] and not recorded.native
-            for ref in restored.objects:
-                assert sha256_file(Path(storage.public[name]) / ref.key) == (ref.sha256, ref.size)
-            return
-        frozen = state.pending_generation(store)
-        assert frozen is not None
-        raw_manifest = store.read_private(
-            f"generations/{frozen.id}/manifest.json", max_bytes=state.MAX_CONTROL_BYTES
+        second = reconcile()
+        assert second.changed and second.pending_assets == 0
+        assert recorded.downloads == ["SHA256SUMS", assets[-1].source.filename]
+        assert {Path(path).name for path in recorded.inspected} == {f"{name}-0-asset"}
+        assert not (bucket / state.LOCK_KEY).exists()
+        with private_workspace() as runtime:
+            restored = committed(store, runtime, name)
+        assert len(restored.accepted_history) == len(assets)
+        assert restored.accepted_history[:-1] == retained.accepted_history
+        assert all(
+            not asset.inspected.verified.local_path.exists() for asset in restored.accepted_history
         )
-        assert raw_manifest is not None
-        journal, _ = state.read_journal(store, frozen)
-        outstanding = [
-            int(index)
-            for index, value in state.mapping(journal["writes"]).items()
-            if state.mapping(value)["status"] == "intent"
-        ]
-        assert len(outstanding) == 1
-        current = state.read_control(store, "ownership.json")
-        assert current is not None
-        nonce = str(current[0]["nonce"])
-        for asset in assets:
-            asset.local_path.unlink(missing_ok=True)
-        monkeypatch.delenv("HD_SIGNING_KEY_FILE")
-        with private_workspace() as runtime, ExitStack() as disabled:
-
-            def forbidden(*args: object, **kwargs: object) -> None:
-                raise AssertionError(
-                    "Frozen replay called discovery, inspection, preparation or signing"
-                )
-
-            disabled.enter_context(patch.object(discovery, "scan_releases", forbidden))
-            disabled.enter_context(patch.object(publish, "signing_session", forbidden))
-            for operation in ("inspect", "prepare"):
-                disabled.enter_context(patch(f"haberdasher.formats.{name}.{operation}", forbidden))
-            store = InterruptedStore(storage)
-            evidence = fixtures.root / "recovery.json"
-            evidence.write_bytes(
-                canonical_json(
-                    {
-                        "schema_version": 1,
-                        **state.mapping(
-                            json_value(
-                                state.RecoveryEvidence(
-                                    True,
-                                    True,
-                                    "test process stopped and public request was not sent",
-                                    "fresh-test-runtime",
-                                    tuple(
-                                        state.WriteResolution(index, "not-written")
-                                        for index in outstanding
-                                    ),
-                                )
-                            )
-                        ),
-                    }
-                )
-            )
-            assert (
-                cli.main(
-                    [
-                        "--replay",
-                        frozen.id,
-                        "--recover-owner",
-                        nonce,
-                        "--recovery-evidence",
-                        str(evidence),
-                        *arguments,
-                    ]
-                )
-                == 0
-            )
-            assert json.loads(capsys.readouterr().out)["generation_id"] == frozen.id
-            assert (
-                store.read_private(
-                    f"generations/{frozen.id}/manifest.json", max_bytes=state.MAX_CONTROL_BYTES
-                )
-                == raw_manifest
-            )
-            restored = committed(store, runtime)
-            assert len(restored.accepted_history) == len(assets)
-            assert restored.accepted_history[:-1] == retained.accepted_history
-            assert all(
-                not asset.inspected.verified.local_path.exists()
-                for asset in restored.accepted_history
-            )
         for path, (data, stat) in bootstrap_stats.items():
             assert (path.read_bytes(), path.stat()) == (data, stat)
         serve_generation(2)
@@ -772,39 +692,36 @@ def test_recorded_pipeline_and_frozen_recovery(
             name, fixtures, "fresh", http.url(name), key, http.url("runtime-repo"), runtime_commits
         )
         fresh(restored, 2)
+        assets[-1].local_path.unlink()
+        unchanged_rerun()
+        for ref in restored.objects:
+            assert sha256_file(bucket / ref.key) == (ref.sha256, ref.size)
         requests = http.requests()
         assert any(
             request.status == 200 and request.path.startswith(f"/{name}/") for request in requests
         )
-        for ref in restored.objects:
-            assert sha256_file(Path(storage.public[name]) / ref.key) == (ref.sha256, ref.size)
-        assert not any(
-            "private" in request.path or "generations" in request.path for request in requests
-        )
+        assert not any(state.LOCK_KEY in request.path for request in requests)
 
 
 @pytest.mark.parametrize("after", [False, True], ids=["before-key-write", "after-key-write"])
-def test_public_bootstrap_interruption_replays_without_source_or_signer(
-    after: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_public_bootstrap_interruption_converges_with_a_full_rerun(
+    after: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with private_workspace() as fixtures, disposable_key() as key:
         assets = assets_for("apt", fixtures)
         recorded = RecordedGitHub(assets)
-        local_root = fixtures.root / "store"
-        storage = StoragePolicy(
-            "local", str(local_root / "private"), {"apt": str(local_root / "public/apt")}
-        )
+        storage = StoragePolicy("local", {"apt": str(fixtures.root / "store/public/apt")})
+        bucket = Path(storage.public["apt"])
         target = "keys/haberdasher.gpg" if after else "keys/haberdasher.asc"
 
         class KeyFailure(LocalStore):
             def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
-                if ref.bucket_role == "apt" and ref.key == target:
+                if ref.key == target:
                     if after:
                         super().create(ref, source)
                     raise RuntimeError("synthetic bootstrap interruption")
                 return super().create(ref, source)
 
-        store = KeyFailure(storage)
         config = Config(("wimpysworld/fixture",), {"apt": apt.policy()})
         policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
         monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
@@ -812,87 +729,25 @@ def test_public_bootstrap_interruption_replays_without_source_or_signer(
             recorded.bind(runtime)
             with pytest.raises(RuntimeError, match="bootstrap interruption"):
                 publish.reconcile(
-                    config, policy, store=store, runtime=runtime, now=datetime.now(UTC)
+                    config,
+                    policy,
+                    store=KeyFailure(storage),
+                    runtime=runtime,
+                    now=datetime.now(UTC),
                 )
-        frozen = state.pending_generation(store)
-        current = state.read_control(store, "ownership.json")
-        assert frozen is not None and current is not None
-        assert state.read_control(store, "completed.json") is None
-        assert not (Path(storage.public["apt"]) / "dists").exists()
-        manifest = store.read_private(
-            f"generations/{frozen.id}/manifest.json", max_bytes=state.MAX_CONTROL_BYTES
-        )
-        assert manifest is not None
-        assert hashlib.sha256(manifest[0]).hexdigest() == frozen.manifest_hash
-        for forbidden_path in (str(key.key_file), str(key.runtime.root), "private-keys-v1.d"):
-            assert forbidden_path.encode() not in manifest[0]
-        with private_workspace() as runtime:
-            generation, _ = state.load_frozen(store, frozen, out=runtime.root / "frozen")
-            ordinal = 1 if after else 0
-            output = generation.bootstrap_outputs[ordinal]
-            assert output.ref.key == target
-            observed = store.stat(output.ref)
-            resolution = (
-                state.WriteResolution(ordinal, "written", observed.etag)
-                if after and observed
-                else state.WriteResolution(ordinal, "not-written")
-            )
-        for asset in assets:
-            asset.local_path.unlink()
-        key.key_file.unlink()
-        monkeypatch.delenv("HD_SIGNING_KEY_FILE")
-
-        def forbidden(*args: object, **kwargs: object) -> None:
-            raise AssertionError("Bootstrap replay attempted discovery or signing")
-
-        monkeypatch.setattr(discovery, "scan_releases", forbidden)
-        monkeypatch.setattr(publish, "signing_session", forbidden)
-        evidence = fixtures.root / "recovery.json"
-        evidence.write_bytes(
-            canonical_json(
-                {
-                    "schema_version": 1,
-                    **state.mapping(
-                        json_value(
-                            state.RecoveryEvidence(
-                                True,
-                                True,
-                                "synthetic request resolved",
-                                "fresh-runtime",
-                                (resolution,),
-                            )
-                        )
-                    ),
-                }
-            )
-        )
-        assert (
-            cli.main(
-                [
-                    "--replay",
-                    frozen.id,
-                    "--recover-owner",
-                    str(current[0]["nonce"]),
-                    "--recovery-evidence",
-                    str(evidence),
-                    "--local-root",
-                    str(local_root),
-                    "--format",
-                    "apt",
-                ]
-            )
-            == 0
-        )
-        assert json.loads(capsys.readouterr().out)["generation_id"] == frozen.id
+        assert not (bucket / "dists").exists()
+        assert not (bucket / state.INVENTORY_KEY).exists()
+        assert not (bucket / state.LOCK_KEY).exists()
+        assert (bucket / "keys/haberdasher.asc").exists() == after
         store = LocalStore(storage)
-        assert (
-            store.read_private(
-                f"generations/{frozen.id}/manifest.json", max_bytes=state.MAX_CONTROL_BYTES
-            )
-            == manifest
-        )
         with private_workspace() as runtime:
-            retained = committed(store, runtime)
-        with serve(local_root / "public") as http:
-            client = native_client("apt", fixtures, "recovered", http.url("apt"), key, "", ("", ""))
+            recorded.bind(runtime)
+            result = publish.reconcile(
+                config, policy, store=store, runtime=runtime, now=datetime.now(UTC)
+            )
+        assert result.changed
+        with private_workspace() as runtime:
+            retained = committed(store, runtime, "apt")
+        with serve(fixtures.root / "store/public") as http:
+            client = native_client("apt", fixtures, "rerun", http.url("apt"), key, "", ("", ""))
             client(retained, 1)

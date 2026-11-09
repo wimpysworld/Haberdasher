@@ -201,8 +201,6 @@ def test_native_publication_cold_restore_and_clients() -> None:
                 policy = FormatPolicy(
                     "flatpak",
                     trust=TrustPolicy(
-                        approved=True,
-                        approval_reference="synthetic-only",
                         source_owner="wimpysworld",
                         refs=(REF,),
                         runtime=RuntimePolicy(

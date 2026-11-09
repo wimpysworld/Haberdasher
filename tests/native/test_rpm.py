@@ -323,7 +323,7 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
                 rpm._verify_package(package.local_path, wrong.public_file, runtime)
         second_package = next(item for item in second.outputs if item.ref.object_class == "package")
         second_package.local_path.write_bytes(b"changed frozen bytes")
-        with pytest.raises(rpm.RpmFailure, match="Frozen"):
+        with pytest.raises(rpm.RpmFailure, match="Prepared"):
             rpm.validate_prepared(second, policy=POLICY, runtime=runtime, now=NOW)
 
 

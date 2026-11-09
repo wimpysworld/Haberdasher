@@ -99,6 +99,17 @@ class CommandRuntime(Runtime):
             return subprocess.CompletedProcess(
                 command, 0, json.dumps({"ETag": etag, "ContentLength": len(data)}).encode(), b""
             )
+        if command[2] == "delete-object":
+            current = self.objects.get(key)
+            if current is None or current[1] != parameters["IfMatch"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    b"",
+                    b"An error occurred (PreconditionFailed) when calling the DeleteObject operation",
+                )
+            del self.objects[key]
+            return subprocess.CompletedProcess(command, 0, b"{}", b"")
         assert command[2] == "put-object"
         current = self.objects.get(key)
         if (parameters.get("IfNoneMatch") == "*" and current is not None) or (
@@ -162,7 +173,7 @@ def fail_write_cleanup(monkeypatch: pytest.MonkeyPatch) -> PermissionError:
 
 @pytest.mark.parametrize("remote", [False, True])
 @pytest.mark.parametrize("replacement", [False, True])
-@pytest.mark.parametrize("role", ["apt", "private"])
+@pytest.mark.parametrize("role", ["apt", "rpm"])
 def test_committed_cleanup_failure_retains_receipt_and_blocks_writes(
     tmp_path: Path,
     command_runtime: CommandRuntime,
@@ -193,7 +204,7 @@ def test_committed_cleanup_failure_retains_receipt_and_blocks_writes(
     if remote:
         assert command_runtime.objects[ref.key] == (data, current.etag)
     else:
-        root = Path(cast(str, policy.private) if role == "private" else policy.public[role])
+        root = Path(policy.public[role])
         assert (root / ref.key).read_bytes() == data
     calls = len(command_runtime.calls)
     next_ref = object_ref(data, key="next-object", role=role)
@@ -338,10 +349,7 @@ def test_local_download_write_bypass(tmp_path: Path) -> None:
 
 
 def _contender(root: str, ready: Queue[str], start: Event, expected: str | None) -> None:
-    policy = replace(
-        local_policy(Path(root) / "store"), private=str(Path(root) / f"private-{os.getpid()}")
-    )
-    store = LocalStore(policy)
+    store = LocalStore(local_policy(Path(root) / "store"))
     ready.put("ready")
     if not start.wait(10):
         raise RuntimeError("Contention test did not start")
@@ -610,7 +618,7 @@ def test_storage_environment_has_no_inherited_authority(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("remote", [False, True])
 @pytest.mark.parametrize("data", [b"", b"fixture", b"not JSON\x00\xff"])
-def test_private_read_roundtrip(
+def test_bounded_read_roundtrip(
     tmp_path: Path, command_runtime: CommandRuntime, remote: bool, data: bytes
 ) -> None:
     store = (
@@ -618,16 +626,16 @@ def test_private_read_roundtrip(
         if remote
         else LocalStore(local_policy(tmp_path / "store"))
     )
-    ref = object_ref(data, role="private")
-    assert store.read_private(ref.key, max_bytes=100) is None
+    ref = object_ref(data, role="rpm")
+    assert store.read("rpm", ref.key, max_bytes=100) is None
     receipt = store.create(ref, source_file(tmp_path, data))
     command_runtime.calls.clear()
     expected = ObjectStat(receipt.etag, len(data))
-    assert store.read_private(ref.key, max_bytes=max(1, len(data))) == (data, expected)
+    assert store.read("rpm", ref.key, max_bytes=max(1, len(data))) == (data, expected)
     assert all(
-        "--bucket=test-private" in call
+        "--bucket=test-rpm" in call
         if call[2] == "get-object"
-        else json.loads(call[call.index("--cli-input-json") + 1])["Bucket"] == "test-private"
+        else json.loads(call[call.index("--cli-input-json") + 1])["Bucket"] == "test-rpm"
         for call in command_runtime.calls
     )
     assert store.stat(ref) == expected
@@ -638,7 +646,7 @@ def test_private_read_roundtrip(
 
 @pytest.mark.parametrize("remote", [False, True])
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5, "1", MAX_OBJECT_SIZE])
-def test_private_read_invalid_limit(
+def test_bounded_read_invalid_limit(
     tmp_path: Path, command_runtime: CommandRuntime, remote: bool, limit: object
 ) -> None:
     store = (
@@ -647,13 +655,13 @@ def test_private_read_invalid_limit(
         else LocalStore(local_policy(tmp_path / "store"))
     )
     with pytest.raises(ValueError):
-        store.read_private("control", max_bytes=cast(int, limit))
+        store.read("rpm", "control", max_bytes=cast(int, limit))
     assert not command_runtime.calls
 
 
 @pytest.mark.parametrize("remote", [False, True])
 @pytest.mark.parametrize("key", ["", "../escape", "/absolute", "a//b", "a/./b", r"a\b", "a\nb"])
-def test_private_read_invalid_key(
+def test_bounded_read_invalid_key(
     tmp_path: Path, command_runtime: CommandRuntime, remote: bool, key: str
 ) -> None:
     store = (
@@ -662,12 +670,12 @@ def test_private_read_invalid_key(
         else LocalStore(local_policy(tmp_path / "store"))
     )
     with pytest.raises(ValueError):
-        store.read_private(key, max_bytes=100)
+        store.read("rpm", key, max_bytes=100)
     assert not command_runtime.calls
 
 
 @pytest.mark.parametrize("remote", [False, True])
-def test_private_read_oversize_before_download(
+def test_bounded_read_oversize_before_download(
     tmp_path: Path, command_runtime: CommandRuntime, remote: bool
 ) -> None:
     store = (
@@ -675,24 +683,24 @@ def test_private_read_oversize_before_download(
         if remote
         else LocalStore(local_policy(tmp_path / "store"))
     )
-    store.create(object_ref(role="private"), source_file(tmp_path))
+    store.create(object_ref(role="rpm"), source_file(tmp_path))
     command_runtime.calls.clear()
     with pytest.raises(StorageError, match="read limit"):
-        store.read_private("nested/object", max_bytes=1)
+        store.read("rpm", "nested/object", max_bytes=1)
     assert all(call[2] == "head-object" for call in command_runtime.calls)
 
 
-def test_private_read_no_public_fallback(tmp_path: Path) -> None:
+def test_bounded_read_no_public_fallback(tmp_path: Path) -> None:
     store = LocalStore(local_policy(tmp_path / "store"))
     store.create(object_ref(), source_file(tmp_path))
-    assert store.read_private("nested/object", max_bytes=100) is None
+    assert store.read("rpm", "nested/object", max_bytes=100) is None
 
 
 @pytest.mark.parametrize("kind", ["file", "parent", "directory", "fifo"])
-def test_local_private_read_unsafe_path(tmp_path: Path, kind: str) -> None:
+def test_local_bounded_read_unsafe_path(tmp_path: Path, kind: str) -> None:
     policy = local_policy(tmp_path / "store")
     store = LocalStore(policy)
-    root = Path(cast(str, policy.private))
+    root = Path(policy.public["rpm"])
     outside = source_file(tmp_path)
     if kind == "file":
         (root / "control").symlink_to(outside)
@@ -704,19 +712,19 @@ def test_local_private_read_unsafe_path(tmp_path: Path, kind: str) -> None:
         os.mkfifo(root / "control")
     key = "control/source" if kind == "parent" else "control"
     with pytest.raises((ValueError, OSError, StorageError)):
-        store.read_private(key, max_bytes=100)
+        store.read("rpm", key, max_bytes=100)
 
 
 @pytest.mark.parametrize("change", ["truncate", "grow", "overwrite", "replace", "remove"])
-def test_local_private_read_race(
+def test_local_bounded_read_race(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
     policy = local_policy(tmp_path / "store")
     store = LocalStore(policy)
-    ref = object_ref(role="private")
+    ref = object_ref(role="rpm")
     source = source_file(tmp_path)
     store.create(ref, source)
-    path = Path(cast(str, policy.private)) / ref.key
+    path = Path(policy.public["rpm"]) / ref.key
     original = os.fstat
     changed = False
 
@@ -737,21 +745,21 @@ def test_local_private_read_race(
 
     monkeypatch.setattr(os, "fstat", fstat)
     with pytest.raises(StorageError, match="changed"):
-        store.read_private(ref.key, max_bytes=ref.size)
+        store.read("rpm", ref.key, max_bytes=ref.size)
 
 
 @pytest.mark.parametrize("changed", [False, True])
-def test_remote_private_read_bad_download(command_runtime: CommandRuntime, changed: bool) -> None:
+def test_remote_bounded_read_bad_download(command_runtime: CommandRuntime, changed: bool) -> None:
     command_runtime.objects["control"] = b"fixture", '"original"'
     command_runtime.bad_download = not changed
     command_runtime.change_on_download = changed
     with pytest.raises(StorageError, match="changed"):
-        R2Store(remote_policy(), runtime=command_runtime).read_private("control", max_bytes=7)
+        R2Store(remote_policy(), runtime=command_runtime).read("rpm", "control", max_bytes=7)
     assert not list((command_runtime.root / "tmp").glob(".hd-store-*"))
 
 
 @pytest.mark.parametrize("failure", ["replace", "remove", "access", "etag", "size", "oversize"])
-def test_remote_private_read_failures_are_not_absence(
+def test_remote_bounded_read_failures_are_not_absence(
     command_runtime: CommandRuntime, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     command_runtime.objects["control"] = b"fixture", '"original"'
@@ -778,14 +786,14 @@ def test_remote_private_read_failures_are_not_absence(
 
     monkeypatch.setattr(command_runtime, "run", run)
     with pytest.raises(StorageError):
-        R2Store(remote_policy(), runtime=command_runtime).read_private("control", max_bytes=7)
+        R2Store(remote_policy(), runtime=command_runtime).read("rpm", "control", max_bytes=7)
     assert not list((command_runtime.root / "tmp").glob(".hd-store-*"))
 
 
-def test_remote_private_read_denied_head(command_runtime: CommandRuntime) -> None:
+def test_remote_bounded_read_denied_head(command_runtime: CommandRuntime) -> None:
     command_runtime.head_error = True
     with pytest.raises(StorageError):
-        R2Store(remote_policy(), runtime=command_runtime).read_private("control", max_bytes=100)
+        R2Store(remote_policy(), runtime=command_runtime).read("rpm", "control", max_bytes=100)
 
 
 @pytest.mark.parametrize("etag", ["*", '"one","two"', "bad\nvalue", ""])
@@ -801,3 +809,28 @@ def test_wildcard_or_unsafe_replacement_rejects(
         with pytest.raises(ValueError):
             store.replace(object_ref(), source, expected_etag=etag)
     assert not command_runtime.calls
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_conditional_delete(tmp_path: Path, command_runtime: CommandRuntime, remote: bool) -> None:
+    store = (
+        R2Store(remote_policy(), runtime=command_runtime)
+        if remote
+        else LocalStore(local_policy(tmp_path / "store"))
+    )
+    ref = object_ref(role="rpm", key="haberdasher.lock")
+    first = store.create(ref, source_file(tmp_path))
+    with pytest.raises(PreconditionFailed):
+        store.delete("rpm", ref.key, expected_etag='"another-revision"')
+    assert store.stat(ref) == ObjectStat(first.etag, ref.size)
+    with pytest.raises(ValueError):
+        store.delete("rpm", ref.key, expected_etag="*")
+    store.delete("rpm", ref.key, expected_etag=first.etag)
+    assert store.stat(ref) is None
+    with pytest.raises(PreconditionFailed):
+        store.delete("rpm", ref.key, expected_etag=first.etag)
+    if remote:
+        deletes = [call for call in command_runtime.calls if call[2] == "delete-object"]
+        assert [json.loads(call[call.index("--cli-input-json") + 1]) for call in deletes] == [
+            {"Bucket": "test-rpm", "Key": "haberdasher.lock", "IfMatch": first.etag}
+        ]

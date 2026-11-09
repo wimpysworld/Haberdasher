@@ -1,7 +1,0 @@
-storage:
-  backend: r2
-  private: synthetic-private
-  public:
-    apt: synthetic-apt
-approved_formats: []
-approval_references: {}

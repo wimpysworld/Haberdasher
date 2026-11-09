@@ -23,9 +23,9 @@ Native runtime qualification is `x86_64-linux` only. ARM Linux and Darwin pass e
 | --- | --- | --- |
 | Preserved shell proofs | `tests/proofs/{apt,rpm,arch,apk,flatpak}.sh` | Independent format experiments, local inventories and frozen directories, format-specific trust boundaries |
 | Production adapters | `src/haberdasher/formats/`, `tests/native/test_*.py` | Shared typed records, verified retained state, native signatures, isolated HTTP clients |
-| Complete local pipeline | `tests/native/test_pipeline.py` | Recorded GitHub discovery, real CLI, durable local publication, served public trust, no-op, late assets, signer-free recovery |
+| Complete local pipeline | `tests/native/test_pipeline.py` | Recorded GitHub discovery, real CLI, locked local publication, served public trust, no-op, late assets, full rerun after an interruption |
 
-Shell proof ledgers are not the publisher's durable schema. Their local inventories are not public `haberdasher.json`. Their original results do not establish production transport or permissions.
+Shell proof ledgers and their frozen-directory recovery experiments are not the publisher's state or recovery model. Their local inventories are not public `haberdasher.json`. Their original results do not establish production transport or permissions.
 
 The production pipeline fetches both public OpenPGP exports over HTTP and compares full fingerprints with an independently supplied disposable identity. It checks public-only packets and uses the fetched keys for native client trust. APK also checks the served RSA key against that primary. Fresh clients and existing clients check installed records and payloads.
 
@@ -39,16 +39,16 @@ The production pipeline fetches both public OpenPGP exports over HTTP and compar
 
 ## Current production implementation
 
-The earlier discovery, admission, state, writer exclusion, storage, recovery, native adapter, and public-key follow-ons are implemented. The coordinator is minimal Python with native repository tools, not a shell-only publisher or plugin framework.
+The earlier discovery, admission, storage, native adapter, and public-key follow-ons are implemented. Bucket locks replace the earlier private state store. The coordinator is minimal Python with native repository tools, not a shell-only publisher or plugin framework.
 
-`src/haberdasher/core.py` defines records. `discovery.py` and `admission.py` reconcile and verify assets. `state.py`, `storage.py`, and `publish.py` freeze, conditionally publish, and recover generations. All configured public formats share one publication. Multiple configured formats require `--format all`.
+`src/haberdasher/core.py` defines records. `discovery.py` and `admission.py` reconcile and verify assets. `state.py` reads each bucket's public `haberdasher.json` and manages the bucket locks. `storage.py` and `publish.py` conditionally publish. All configured public formats share one publication. Multiple configured formats require `--format all`.
 
-Exact public-key bytes freeze before public writes. Bootstrap keys precede native entries, inventories follow their format outputs, and private completion follows all acknowledgements. Ownership has no automatic expiry. Unknown writes require stopped-owner evidence, not a timed takeover.
+Bootstrap keys and packages precede native entries, and inventories follow their format outputs. Locks have no automatic expiry. Only an explicit `--break-lock` deletes a stale lock. A full rerun recovers an interrupted run.
 
 These controls do not provide multi-object atomicity. Older referenced objects remain available. No deletion or retention change is authorised.
 
 ## Remaining work
 
-Use [publisher operations](../publisher.md) for the real CLI and policy schema. [Client setup](../clients.md) is the setup document, not a separate implemented website.
+Use [publisher operations](../publisher.md) for the real CLI and configuration schema. [Client setup](../clients.md) is the setup document, not a separate implemented website.
 
-Production permission tests, private bucket approval, production key use, protected CI secrets, public HTTPS/cache qualification, and official distribution clients remain approval-dependent. APK SHA1 acceptance and Flatpak source/runtime approval remain pending. See [validation and activation](../validation.md) before any external action.
+Production permission tests, production key use, protected CI secrets, public HTTPS/cache qualification, and official distribution clients remain to do. APK SHA1 acceptance and Flatpak source/runtime configuration remain pending. See [validation and activation](../validation.md) before any external action.

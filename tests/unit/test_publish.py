@@ -1,42 +1,48 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
+import json
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from haberdasher import core, discovery, publish, state
-from haberdasher.config import Config, FormatPolicy, Policy
+from haberdasher import cli, core, discovery, publish, state
+from haberdasher.admission import AdmissionFailure
+from haberdasher.config import Config, FormatPolicy, Policy, StoragePolicy
 from haberdasher.core import (
     AdmittedAsset,
     InspectedAsset,
     NativeIdentity,
     ObjectRef,
     ObjectStat,
+    OutputObject,
     PreparedFormat,
     RetainedFormat,
+    SourceAsset,
     VerifiedAsset,
     WriteReceipt,
 )
-from haberdasher.formats import rpm
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
-from haberdasher.storage import LocalStore, PreconditionFailed
-from tests.unit.test_rpm import mock_rpm_commands, retained_rpm
-from tests.unit.test_state import NOW, generation, local_store, next_generation
+from haberdasher.storage import LocalStore
+
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
+FINGERPRINT = "A" * 40
+EXPORT = b"synthetic public export"
 
 
 class AdapterDouble:
+    """Arch-shaped native metadata, with package bytes that change on every signing run."""
+
     def __init__(self) -> None:
         self.validations = 0
-        self.native_calls = 0
-        self.prepared: PreparedFormat | None = None
+        self.prepares = 0
+        self.inspections = 0
 
     def select(self, name: str) -> AdapterDouble:
         return self
@@ -44,27 +50,29 @@ class AdapterDouble:
     def inspect(
         self, asset: VerifiedAsset, *, policy: FormatPolicy, runtime: Runtime, out: Path
     ) -> InspectedAsset:
-        self.native_calls += 1
+        self.inspections += 1
+        name, version = asset.source.filename.removesuffix(".pkg.tar.zst").rsplit("-", 1)
         return InspectedAsset(
-            asset, NativeIdentity(policy.format, "test", "amd64", "1"), {}, {}, "unsigned"
+            asset, NativeIdentity("arch", name, "x86_64", version), {}, {}, "unsigned"
         )
 
     def compare(
         self, left: NativeIdentity, right: NativeIdentity, *, runtime: Runtime
     ) -> int | None:
-        self.native_calls += 1
-        return 0 if left == right else None
+        if (left.name, left.architecture) != (right.name, right.architecture):
+            return None
+        return (left.version > right.version) - (left.version < right.version)
 
     def validate_retained(
         self, retained: RetainedFormat, *, policy: FormatPolicy, runtime: Runtime
     ) -> None:
         self.validations += 1
-        if retained.metadata:
-            refs = {ref.key: ref for ref in retained.objects}
-            for key, value in state.mapping(retained.metadata["files"]).items():
-                ref = refs[key]
-                assert core.sha256_file(Path(str(value))) == (ref.sha256, ref.size)
-            assert Path(str(retained.metadata["keyring"])).read_bytes() == b"trust"
+        if not retained.metadata:
+            return
+        refs = {ref.key: ref for ref in retained.objects}
+        for key, value in state.mapping(retained.metadata["paths"]).items():
+            assert core.sha256_file(Path(str(value))) == (refs[key].sha256, refs[key].size)
+        assert Path(str(retained.metadata["public_key"])).read_bytes() == EXPORT
 
     def prepare(
         self,
@@ -77,9 +85,52 @@ class AdapterDouble:
         now: datetime,
         out: Path,
     ) -> PreparedFormat:
-        self.native_calls += 1
-        assert new and self.prepared is not None
-        return self.prepared
+        self.prepares += 1
+        out.mkdir(mode=0o700, parents=True)
+        history = (*retained.accepted_history, *new)
+        refs = {ref.key: ref for ref in retained.objects}
+        etags = state.mapping(retained.metadata.get("etags", {}))
+        outputs: list[OutputObject] = []
+
+        def output(key: str, data: bytes, kind: str) -> Path:
+            path = core.safe_path(out, key)
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.write_bytes(data)
+            sha, size = core.sha256_file(path)
+            ref = ObjectRef("arch", key, kind, size, sha, "application/octet-stream", "no-cache")
+            prior = refs.get(key)
+            etag = str(etags[key]) if prior else None
+            outputs.append(
+                OutputObject(ref, path, "replace" if prior else "create", etag, len(outputs))
+            )
+            refs[key] = ref
+            return path
+
+        for asset in new:
+            identity = asset.inspected.identity
+            signature = f"\nsignature-{self.prepares}".encode()
+            data = asset.inspected.verified.local_path.read_bytes() + signature
+            output(f"x86_64/{identity.name}-{identity.version}.pkg", data, "package")
+        names = sorted(
+            f"{item.inspected.identity.name}-{item.inspected.identity.version}\n"
+            for item in history
+        )
+        database = output("x86_64/db", "".join(names).encode(), "entry")
+        public = out / "public.gpg"
+        public.write_bytes(EXPORT)
+        result = RetainedFormat(
+            "arch",
+            None,
+            history,
+            tuple(item.inspected.identity for item in history),
+            {
+                "paths": {"x86_64/db": str(database)},
+                "public_key": str(public),
+                "fingerprint": FINGERPRINT,
+            },
+            tuple(refs.values()),
+        )
+        return PreparedFormat("arch", result, tuple(outputs), result.objects)
 
     def validate_prepared(
         self, prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
@@ -90,740 +141,347 @@ class AdapterDouble:
 
 
 class CountingStore(LocalStore):
-    def __init__(self, root: Path) -> None:
-        from haberdasher.config import StoragePolicy
+    interrupt = False
 
-        super().__init__(StoragePolicy("local", str(root / "private"), {"apt": str(root / "apt")}))
-        self.writes: list[ObjectRef] = []
-        self.downloads: list[ObjectRef] = []
+    def __init__(self, storage: StoragePolicy) -> None:
+        super().__init__(storage)
+        self.writes: list[str] = []
+        self.deletes: list[str] = []
+        self.downloads: list[str] = []
 
     def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
-        self.writes.append(ref)
+        self._check(ref)
+        self.writes.append(f"{ref.bucket_role}/{ref.key}")
         return super().create(ref, source)
 
     def replace(self, ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
-        self.writes.append(ref)
+        self._check(ref)
+        self.writes.append(f"{ref.bucket_role}/{ref.key}")
         return super().replace(ref, source, expected_etag=expected_etag)
 
+    def delete(self, role: str, key: str, *, expected_etag: str) -> None:
+        self.deletes.append(f"{role}/{key}")
+        super().delete(role, key, expected_etag=expected_etag)
+
     def download(self, ref: ObjectRef, destination: Path) -> ObjectStat:
-        self.downloads.append(ref)
+        self.downloads.append(f"{ref.bucket_role}/{ref.key}")
         return super().download(ref, destination)
 
-
-def test_replay_restores_lost_local_state_without_signers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = CountingStore(tmp_path / "store")
-    owner = state.acquire(store, owner="local")
-    original = generation(tmp_path / "input", owner)
-    frozen = state.freeze(store, owner, original)
-    shutil.rmtree(tmp_path / "input")
-    store = CountingStore(tmp_path / "store")
-    owner = state.recover_owner(
-        store,
-        expected_nonce=owner.owner_nonce,
-        evidence=state.RecoveryEvidence(
-            True, True, "original process stopped before publication", "CI"
-        ),
-    )
-    persisted = state.pending_generation(store)
-    assert persisted == frozen
-    adapter = AdapterDouble()
-    monkeypatch.setattr(publish, "_adapter", adapter.select)
-
-    def forbidden(*args: object, **kwargs: object) -> None:
-        raise AssertionError("Replay attempted discovery or signing")
-
-    monkeypatch.setattr(publish, "signing_session", forbidden)
-    monkeypatch.setattr(discovery, "scan_releases", forbidden)
-    runtime = Runtime(tmp_path / "runtime", environ={"HD_SIGNING_KEY": "synthetic sentinel"})
-    assert "HD_SIGNING_KEY" not in runtime.environment
-    result = publish.replay(
-        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
-    )
-    assert result.published_objects == 4
-    public = [ref for ref in store.writes if ref.bucket_role != "private"]
-    assert [ref.object_class for ref in public] == ["package", "dependency", "entry", "inventory"]
-    assert adapter.native_calls == 0
-    next_owner = state.acquire(store, owner="CI")
-    committed = state.load_committed(store, next_owner, out=tmp_path / "loaded")
-    assert committed.generation_id == frozen.id
-    assert committed.formats[0].metadata["etags"]
-    assert committed.inventory_etags["apt"]
-    state.release(store, next_owner)
+    def _check(self, ref: ObjectRef) -> None:
+        if self.interrupt and ref.object_class == "entry":
+            self.interrupt = False
+            raise RuntimeError("synthetic interruption after package upload")
 
 
-def test_committed_public_reference_tampering_stops_restoration(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = CountingStore(tmp_path / "store")
-    owner = state.acquire(store, owner="local")
-    original = generation(tmp_path / "input", owner)
-    frozen = state.freeze(store, owner, original)
-    monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
-    publish.replay(
-        frozen,
-        store=store,
-        ownership=owner,
-        runtime=Runtime(tmp_path / "runtime", environ={}),
-        now=NOW,
-        clock=lambda: NOW,
-    )
-    entry = original.formats[0].outputs[-1]
-    observed = store.stat(entry.ref)
-    assert observed is not None
-    store.replace(entry.ref, entry.local_path, expected_etag=observed.etag)
-    owner = state.acquire(store, owner="CI")
-    with pytest.raises(state.StateError, match="public reference"):
-        state.load_committed(store, owner, out=tmp_path / "restore")
+class Releases:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        root.mkdir()
+        self.assets: list[tuple[SourceAsset, Path]] = []
+        self.fail = False
 
-
-def test_expired_replay_does_not_publish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    store = CountingStore(tmp_path / "store")
-    owner = state.acquire(store, owner="local")
-    frozen = state.freeze(store, owner, generation(tmp_path / "input", owner))
-    monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
-    with pytest.raises(state.StateError, match="expired"):
-        publish.replay(
-            frozen,
-            store=store,
-            ownership=owner,
-            runtime=Runtime(tmp_path / "runtime", environ={}),
-            now=NOW + timedelta(days=8),
-            clock=lambda: NOW + timedelta(days=8),
+    def add(self, name: str, version: str, data: bytes | None = None) -> None:
+        filename = f"{name}-{version}.pkg.tar.zst"
+        path = self.root / f"{len(self.assets)}-{filename}"
+        path.write_bytes(data or f"{name} {version}".encode())
+        source = SourceAsset(
+            "test/project",
+            1,
+            len(self.assets) + 1,
+            filename,
+            path.stat().st_size,
+            "2026-01-01T00:00:00Z",
+            f"https://example.invalid/{filename}",
         )
-    assert not any(ref.bucket_role != "private" for ref in store.writes)
-    assert state.read_control(store, "completed.json") is None
-
-
-@pytest.mark.parametrize(
-    "boundary", ["admission", "dependency", "entry-intent", "entry", "completion"]
-)
-@pytest.mark.parametrize("overrun", [timedelta(0), timedelta(microseconds=1)])
-def test_replay_checks_live_expiry_at_publication_boundaries(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    boundary: str,
-    overrun: timedelta,
-) -> None:
-    current = NOW
-    monkeypatch.setattr(core, "utc_now", lambda: current)
-    adapter = AdapterDouble()
-    monkeypatch.setattr(publish, "_adapter", adapter.select)
-    store = CountingStore(tmp_path / "store")
-    runtime = Runtime(tmp_path / "runtime", environ={})
-    owner = state.acquire(store, owner="seed")
-    first = generation(tmp_path / "input", owner)
-    frozen = state.freeze(store, owner, first)
-    publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
-    previous_completion = state.read_control(store, "completed.json")
-    owner = state.acquire(store, owner="next")
-    committed = state.load_committed(store, owner, out=tmp_path / "committed")
-    original = next_generation(tmp_path / "next", owner, committed)
-    prepared = original.formats[0]
-    entry = prepared.outputs[0]
-    dependency = replace(
-        first.formats[0].outputs[1],
-        ref=replace(first.formats[0].outputs[1].ref, key="metadata/new-dependency"),
-    )
-    last_entry = replace(
-        entry, ref=replace(entry.ref, key="metadata/last-entry"), mode="create", expected_etag=None
-    )
-    refs = (*prepared.referenced_objects, dependency.ref, last_entry.ref)
-    prepared = replace(
-        prepared,
-        retained=replace(prepared.retained, objects=refs),
-        referenced_objects=refs,
-        outputs=tuple(
-            replace(output, ordinal=index)
-            for index, output in enumerate((dependency, entry, last_entry))
-        ),
-    )
-    original = replace(
-        original,
-        formats=(prepared,),
-        public_inventories={"apt": core.public_inventory(prepared.retained.accepted_history, refs)},
-    )
-    frozen = state.freeze(store, owner, original)
-    frozen_root = tmp_path / "store/private/generations" / frozen.id
-    frozen_hashes = {
-        path: core.sha256_file(path)
-        for path in frozen_root.rglob("*")
-        if path.is_file() and path.name != "journal.json"
-    }
-    assert prepared.expires_at is not None
-    expiry = datetime.fromisoformat(prepared.expires_at)
-    current = expiry + overrun if boundary == "admission" else expiry - timedelta(seconds=1)
-    download, replace_object, stat = store.download, store.replace, store.stat
-
-    def timed_download(ref: ObjectRef, destination: Path) -> ObjectStat:
-        nonlocal current
-        observed = download(ref, destination)
-        if boundary == "dependency" and ref == dependency.ref:
-            current = expiry + overrun
-        if boundary == "entry-intent" and ref.key == f"generations/{frozen.id}/journal.json":
-            writes = state.mapping(state.parse(destination.read_bytes())["writes"])
-            if state.mapping(writes.get("1", {})).get("status") == "intent":
-                current = expiry + overrun
-        return observed
-
-    def timed_replace(ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
-        nonlocal current
-        receipt = replace_object(ref, source, expected_etag=expected_etag)
-        if boundary == "entry" and ref == entry.ref:
-            current = expiry + overrun
-        return receipt
-
-    def timed_stat(ref: ObjectRef) -> ObjectStat | None:
-        nonlocal current
-        observed = stat(ref)
-        if boundary == "completion" and ref.object_class == "inventory":
-            current = expiry + overrun
-        return observed
-
-    monkeypatch.setattr(store, "download", timed_download)
-    monkeypatch.setattr(store, "replace", timed_replace)
-    monkeypatch.setattr(store, "stat", timed_stat)
-    store.writes.clear()
-    with pytest.raises(state.StateError, match="expired"):
-        publish.replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW)
-    assert current >= expiry
-    public = [ref for ref in store.writes if ref.bucket_role != "private"]
-    expected = {
-        "admission": [],
-        "dependency": ["dependency"],
-        "entry-intent": ["dependency"],
-        "entry": ["dependency", "entry"],
-        "completion": ["dependency", "entry", "entry", "inventory"],
-    }
-    assert [ref.object_class for ref in public] == expected[boundary]
-    assert state.read_control(store, "completed.json") == previous_completion
-    assert state.pending_generation(store) == frozen
-    assert {path: core.sha256_file(path) for path in frozen_hashes} == frozen_hashes
-    assert state.check_owner(store, owner)["status"] == "active"
-    assert adapter.native_calls == 0
-    with pytest.raises(state.StateError, match="already holds"):
-        state.acquire(store, owner="competitor")
-    with pytest.raises(state.StateError, match="pending"):
-        state.release(store, owner)
-    if boundary in {"dependency", "entry-intent", "entry"}:
-        with pytest.raises(state.StateError, match="explicit resolution"):
-            state.recover_owner(
-                store,
-                expected_nonce=owner.owner_nonce,
-                evidence=state.RecoveryEvidence(True, True, "synthetic stopped process", "CI"),
-            )
-    assert state.check_owner(store, owner)["status"] == "active"
-
-
-def test_completion_requires_every_acknowledgement(tmp_path: Path) -> None:
-    store = local_store(tmp_path / "store")
-    owner = state.acquire(store, owner="local")
-    original = generation(tmp_path / "input", owner)
-    frozen = state.freeze(store, owner, original)
-    with pytest.raises(state.StateError, match="every public write"):
-        state.complete(store, owner, frozen, original)
-    assert state.read_control(store, "completed.json") is None
-
-
-def test_stale_etag_never_refreshes_to_overwrite(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = CountingStore(tmp_path / "store")
-    owner = state.acquire(store, owner="local")
-    original = generation(tmp_path / "input", owner)
-    prepared = original.formats[0]
-    entry = prepared.outputs[-1]
-    old = store.create(entry.ref, entry.local_path)
-    changed = replace(entry, mode="replace", expected_etag=old.etag)
-    original = replace(
-        original, formats=(replace(prepared, outputs=(*prepared.outputs[:-1], changed)),)
-    )
-    frozen = state.freeze(store, owner, original)
-    newer = store.replace(entry.ref, entry.local_path, expected_etag=old.etag)
-    monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
-    with pytest.raises(PreconditionFailed):
-        publish.replay(
-            frozen,
-            store=store,
-            ownership=owner,
-            runtime=Runtime(tmp_path / "runtime", environ={}),
-            now=NOW,
-            clock=lambda: NOW,
-        )
-    assert store.stat(entry.ref) == ObjectStat(newer.etag, entry.ref.size)
-    assert state.read_control(store, "completed.json") is None
-    with pytest.raises(state.StateError, match="Unresolved"):
-        publish.replay(
-            frozen,
-            store=store,
-            ownership=owner,
-            runtime=Runtime(tmp_path / "runtime-2", environ={}),
-            now=NOW,
-            clock=lambda: NOW,
-        )
-
-
-@pytest.mark.parametrize("fail_inventory", [False, True])
-def test_reconcile_commits_scan_only_after_publish_and_fresh_noop_is_cheap(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fail_inventory: bool,
-) -> None:
-    from haberdasher.config import StoragePolicy
-
-    storage = StoragePolicy(
-        "local", str(tmp_path / "store/private"), {"apt": str(tmp_path / "store/apt")}
-    )
-    policy = Policy(storage, expected_signing_fingerprint="A" * 40)
-    config = Config(("test/project",))
-
-    class InventoryFailure(CountingStore):
-        blocked = fail_inventory
-
-        def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
-            if self.blocked and ref.object_class == "inventory":
-                raise RuntimeError("Injected inventory failure")
-            return super().create(ref, source)
-
-    store = InventoryFailure(tmp_path / "store")
-    fake_owner = core.Ownership("test", "etag", "local", NOW.isoformat())
-    template = generation(tmp_path / "input", fake_owner)
-    adapter = AdapterDouble()
-    adapter.prepared = template.formats[0]
-    monkeypatch.setattr(publish, "_adapter", adapter.select)
-    verified = adapter.prepared.retained.accepted_history[0].inspected.verified
-    checksum_source = replace(verified.source, asset_id=2, filename="checksums.txt")
-    checksum = discovery.ChecksumEntry(
-        checksum_source, verified.source.filename, verified.sha256, verified.checksum_sha256
-    )
-    record = discovery.DiscoveredAsset(verified.source, checksum, "e" * 64)
-    scan_state = discovery.DiscoveryState(
-        (record,), (verified.source, checksum_source), config.sources
-    )
-    previous_states: list[discovery.DiscoveryState] = []
+        self.assets.append((source, path))
 
     def scan(
-        config: Config, *, runtime: Runtime, previous: discovery.DiscoveryState
+        self, config: Config, *, runtime: Runtime, previous: discovery.DiscoveryState
     ) -> discovery.CompleteScan:
-        previous_states.append(previous)
-        unchanged = any(
-            prior.source == record.source
-            and prior.checksum is not None
-            and record.checksum is not None
-            and prior.checksum.sha256 == record.checksum.sha256
-            for prior in previous.records
+        if self.fail:
+            raise discovery.DiscoveryFailure("synthetic discovery failure")
+        sums = SourceAsset(
+            "test/project",
+            1,
+            999,
+            "SHA256SUMS",
+            1,
+            "2026-01-01T00:00:00Z",
+            "https://example.invalid/s",
         )
-        return discovery.CompleteScan(
-            scan_state,
-            () if unchanged else (record,),
-            (record,) if unchanged else (),
-            (),
-            (),
+        records = tuple(
+            discovery.DiscoveredAsset(
+                source,
+                discovery.ChecksumEntry(sums, source.filename, core.sha256_file(path)[0], "c" * 64),
+                "f" * 64,
+            )
+            for source, path in self.assets
         )
+        scanned = discovery.DiscoveryState(
+            records, (*(source for source, _ in self.assets), sums), config.sources
+        )
+        return discovery.CompleteScan(scanned, records, (), (), ())
 
     def verify(
-        source: core.SourceAsset, checksum: discovery.ChecksumEntry, *, runtime: Runtime, out: Path
+        self,
+        source: SourceAsset,
+        checksum: discovery.ChecksumEntry,
+        *,
+        runtime: Runtime,
+        out: Path,
     ) -> VerifiedAsset:
-        return verified
+        path = next(path for item, path in self.assets if item == source)
+        sha, size = core.sha256_file(path)
+        return VerifiedAsset(source, path, sha, size, 999, checksum.checksum_sha256)
 
-    class SignerDouble:
-        fingerprint = "A" * 40
 
-        def public_exports(self, out: Path) -> tuple[Path, Path, Path]:
-            paths = tuple(
-                out / name for name in ("haberdasher.asc", "haberdasher.gpg", "haberdasher.rsa.pub")
-            )
-            for path in paths:
-                core.atomic_write(path, b"synthetic public export")
-            return paths[0], paths[1], paths[2]
+class SignerDouble:
+    fingerprint = FINGERPRINT
 
-    @contextmanager
-    def signing(runtime: Runtime, *, expected_fingerprint: str) -> Generator[SigningSession]:
-        yield cast(SigningSession, SignerDouble())
-
-    monkeypatch.setattr(discovery, "scan_releases", scan)
-    monkeypatch.setattr(discovery, "verify_asset", verify)
-    monkeypatch.setattr(publish, "signing_session", signing)
-    runtime = Runtime(tmp_path / "runtime", environ={})
-    if fail_inventory:
-        with pytest.raises(RuntimeError, match="Injected inventory"):
-            publish.reconcile(
-                config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
-            )
-        assert state.read_control(store, "completed.json") is None
-        current = state.read_control(store, "ownership.json")
-        assert current is not None
-        frozen = state.pending_generation(store)
-        assert frozen is not None
-        owner = state.recover_owner(
-            store,
-            expected_nonce=str(current[0]["nonce"]),
-            evidence=state.RecoveryEvidence(
-                True,
-                True,
-                "failed request confirmed",
-                "CI",
-                (state.WriteResolution(5, "not-written"),),
-            ),
+    def public_exports(self, out: Path) -> tuple[Path, Path, Path]:
+        paths = tuple(
+            out / name for name in ("haberdasher.asc", "haberdasher.gpg", "haberdasher.rsa.pub")
         )
-        store.blocked = False
-        first = publish.replay(
-            frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
+        for path in paths:
+            core.atomic_write(path, EXPORT)
+        return paths[0], paths[1], paths[2]
+
+
+@contextmanager
+def signing(runtime: Runtime, *, expected_fingerprint: str) -> Generator[SigningSession]:
+    yield cast(SigningSession, SignerDouble())
+
+
+class Fixture:
+    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch, names: tuple[str, ...]) -> None:
+        self.storage = StoragePolicy("local", {name: str(root / "store" / name) for name in names})
+        self.store = CountingStore(self.storage)
+        self.policy = Policy(self.storage, FINGERPRINT)
+        self.config = Config(("test/project",))
+        self.runtime = Runtime(root / "runtime", environ={})
+        self.adapter = AdapterDouble()
+        self.releases = Releases(root / "releases")
+        monkeypatch.setattr(publish, "_adapter", self.adapter.select)
+        monkeypatch.setattr(publish, "signing_session", signing)
+        monkeypatch.setattr(discovery, "scan_releases", self.releases.scan)
+        monkeypatch.setattr(discovery, "verify_asset", self.releases.verify)
+
+    def run(self) -> publish.RunResult:
+        self.store.writes.clear()
+        self.store.deletes.clear()
+        self.store.downloads.clear()
+        return publish.reconcile(
+            self.config, self.policy, store=self.store, runtime=self.runtime, now=NOW
         )
-    else:
-        first = publish.reconcile(
-            config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
-        )
-    assert first.changed and previous_states == [discovery.DiscoveryState()]
-    native = (adapter.validations, adapter.native_calls)
-    store.downloads.clear()
-    second = publish.reconcile(
-        config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
-    )
-    assert not second.changed and second.published_objects == 0
-    assert previous_states[-1] == scan_state
-    assert native == (adapter.validations, adapter.native_calls)
-    assert not any(
-        ref.object_class == "package" or "/outputs/" in ref.key for ref in store.downloads
-    )
 
-    previous_scan = scan_state
-    checksum_source = replace(checksum_source, asset_id=3)
-    checksum = replace(checksum, source=checksum_source, checksum_sha256="b" * 64)
-    record = replace(record, checksum=checksum)
-    scan_state = replace(scan_state, records=(record,), assets=(verified.source, checksum_source))
-    previous_completion = state.read_control(store, "completed.json")
-    replay = publish.replay
+    def path(self, name: str, key: str) -> Path:
+        return Path(self.storage.public[name]) / key
 
-    def interrupted(*args: object, **kwargs: object) -> publish.RunResult:
-        raise RuntimeError("Interrupted provenance publication")
+    def inventory(self, name: str = "arch") -> dict[str, object]:
+        return json.loads(self.path(name, state.INVENTORY_KEY).read_bytes())
 
-    def forbidden(*args: object, **kwargs: object) -> None:
-        raise AssertionError("Provenance update repeated verification or signing")
-
-    monkeypatch.setattr(publish, "replay", interrupted)
-    monkeypatch.setattr(publish, "signing_session", forbidden)
-    monkeypatch.setattr(discovery, "verify_asset", forbidden)
-    with pytest.raises(RuntimeError, match="Interrupted provenance"):
-        publish.reconcile(config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW)
-    assert state.read_control(store, "completed.json") == previous_completion
-    assert previous_states[-1] == previous_scan
-    assert adapter.native_calls == native[1]
-    current = state.read_control(store, "ownership.json")
-    frozen = state.pending_generation(store)
-    assert current is not None and frozen is not None
-    owner = state.recover_owner(
-        store,
-        expected_nonce=str(current[0]["nonce"]),
-        evidence=state.RecoveryEvidence(True, True, "stopped before replay", "CI"),
-    )
-    monkeypatch.setattr(publish, "replay", replay)
-    replay(frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW)
-    owner = state.acquire(store, owner="read-provenance")
-    restored = state.load_committed(store, owner, out=tmp_path / "provenance")
-    state.release(store, owner)
-    assert restored.discovery == scan_state
-    accepted = restored.formats[0].accepted_history[0]
-    assert accepted.inspected.verified.checksum_asset_id == 2
-    assert accepted.inspected.verified.checksum_sha256 == "a" * 64
-    assert not accepted.inspected.verified.local_path.exists()
-    assert adapter.native_calls == native[1]
-
-    verified = replace(
-        verified, source=replace(verified.source, updated_at=(NOW + timedelta(hours=1)).isoformat())
-    )
-    record = replace(record, source=verified.source)
-    scan_state = replace(scan_state, records=(record,), assets=(verified.source, checksum_source))
-    monkeypatch.setattr(discovery, "verify_asset", verify)
-    monkeypatch.setattr(publish, "signing_session", signing)
-    duplicate = publish.reconcile(
-        config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
-    )
-    assert duplicate.changed and adapter.native_calls == native[1] + 2
-    owner = state.acquire(store, owner="read-canonical")
-    restored = state.load_committed(store, owner, out=tmp_path / "canonical")
-    state.release(store, owner)
-    canonical = restored.formats[0].accepted_history[0]
-    assert canonical == accepted
-    assert not canonical.inspected.verified.local_path.exists()
-
-    verified = replace(verified, sha256="c" * 64)
-    checksum = replace(checksum, sha256=verified.sha256)
-    record = replace(record, checksum=checksum)
-    scan_state = replace(scan_state, records=(record,))
-    previous_completion = state.read_control(store, "completed.json")
-    with pytest.raises(ValueError, match="Changed bytes for an accepted native identity"):
-        publish.reconcile(config, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW)
-    assert state.read_control(store, "completed.json") == previous_completion
+    def locks(self) -> list[str]:
+        return [name for name in self.storage.public if self.path(name, state.LOCK_KEY).exists()]
 
 
-@pytest.mark.parametrize("damage", ["bytes", "missing", "etag"])
-def test_committed_bootstrap_changes_fail_before_discovery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+def assert_published(fixture: Fixture, name: str = "arch") -> None:
+    inventory = fixture.inventory(name)
+    objects = cast(list[dict[str, object]], inventory["objects"])
+    assert state.LOCK_KEY not in {item["key"] for item in objects}
+    for item in objects:
+        data = fixture.path(name, str(item["key"])).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == item["sha256"]
+
+
+def test_unchanged_rerun_writes_only_its_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from haberdasher.config import StoragePolicy
-    from haberdasher.storage import StorageError
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    first = fixture.run()
+    assert first.changed and first.published_objects == 5
+    assert fixture.store.writes == [
+        "arch/haberdasher.lock",
+        "arch/keys/haberdasher.asc",
+        "arch/keys/haberdasher.gpg",
+        "arch/x86_64/tool-1.pkg",
+        "arch/x86_64/db",
+        "arch/haberdasher.json",
+    ]
+    assert fixture.store.deletes == ["arch/haberdasher.lock"] and not fixture.locks()
+    assert_published(fixture)
+    counts = (fixture.adapter.inspections, fixture.adapter.prepares)
+    second = fixture.run()
+    assert second == publish.RunResult(False, 0, 0)
+    assert fixture.store.writes == ["arch/haberdasher.lock"]
+    assert fixture.store.deletes == ["arch/haberdasher.lock"]
+    assert not fixture.store.downloads
+    assert (fixture.adapter.inspections, fixture.adapter.prepares) == counts
 
-    store = CountingStore(tmp_path / "store")
-    runtime = Runtime(tmp_path / "runtime", environ={})
-    owner = state.acquire(store, owner="local")
-    original = generation(tmp_path / "input", owner, bootstrap=True)
-    frozen = state.freeze(store, owner, original)
-    monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
-    publish.replay(
-        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
-    )
-    output = original.bootstrap_outputs[0]
-    path = tmp_path / "store/apt" / output.ref.key
-    if damage == "bytes":
-        path.write_bytes(b"wrong")
-    elif damage == "missing":
-        path.unlink()
-    else:
-        observed = store.stat(output.ref)
-        assert observed is not None
-        store.replace(output.ref, output.local_path, expected_etag=observed.etag)
 
-    def forbidden(*args: object, **kwargs: object) -> None:
-        raise AssertionError("Damaged bootstrap reached discovery or signing")
+def test_asset_added_to_existing_release_publishes_only_the_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    package = fixture.path("arch", "x86_64/tool-1.pkg").read_bytes()
+    fixture.releases.add("helper", "1")
+    result = fixture.run()
+    assert result.changed and result.published_objects == 3
+    assert fixture.store.writes == [
+        "arch/haberdasher.lock",
+        "arch/x86_64/helper-1.pkg",
+        "arch/x86_64/db",
+        "arch/haberdasher.json",
+    ]
+    assert fixture.adapter.inspections == 2
+    assert "arch/x86_64/tool-1.pkg" not in fixture.store.downloads
+    assert fixture.path("arch", "x86_64/tool-1.pkg").read_bytes() == package
+    assert fixture.path("arch", "x86_64/db").read_text() == "helper-1\ntool-1\n"
+    assets = cast(list[dict[str, object]], fixture.inventory()["assets"])
+    assert len(assets) == 2
+    assert_published(fixture)
 
-    monkeypatch.setattr(discovery, "scan_releases", forbidden)
-    monkeypatch.setattr(publish, "signing_session", forbidden)
-    policy = Policy(
-        StoragePolicy(
-            "local", str(tmp_path / "store/private"), {"apt": str(tmp_path / "store/apt")}
-        ),
-        expected_signing_fingerprint="A" * 40,
-    )
-    with pytest.raises((state.StateError, StorageError, FileNotFoundError)):
-        publish.reconcile(
-            Config(("test/project",)),
-            policy,
-            store=store,
-            runtime=runtime,
-            now=NOW,
-            clock=lambda: NOW,
-        )
+
+def test_interrupted_run_converges_with_a_full_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    before = fixture.path("arch", state.INVENTORY_KEY).read_bytes()
+    fixture.releases.add("tool", "2")
+    fixture.store.interrupt = True
+    with pytest.raises(RuntimeError, match="synthetic interruption"):
+        fixture.run()
+    leftover = fixture.path("arch", "x86_64/tool-2.pkg").read_bytes()
+    assert fixture.path("arch", state.INVENTORY_KEY).read_bytes() == before
+    assert fixture.path("arch", "x86_64/db").read_text() == "tool-1\n"
+    assert not fixture.locks()
+    result = fixture.run()
+    assert result.changed
+    assert fixture.path("arch", "x86_64/tool-2.pkg").read_bytes() != leftover
+    assert fixture.path("arch", "x86_64/db").read_text() == "tool-1\ntool-2\n"
+    assert_published(fixture)
+    assert fixture.run() == publish.RunResult(False, 0, 0)
+
+
+def test_changed_bytes_for_a_published_identity_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    before = fixture.path("arch", state.INVENTORY_KEY).read_bytes()
+    fixture.releases.add("tool", "1", b"different bytes")
+    with pytest.raises(AdmissionFailure, match="Changed bytes"):
+        fixture.run()
+    assert fixture.path("arch", state.INVENTORY_KEY).read_bytes() == before
+    assert not fixture.locks()
+
+
+def test_second_publisher_fails_and_leaves_the_first_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch", "rpm"))
+    fixture.releases.add("tool", "1")
+    first = state.acquire(fixture.store, {"rpm": fixture.storage.public["rpm"]}, now=NOW)
+    held = fixture.path("rpm", state.LOCK_KEY).read_bytes()
+    with pytest.raises(state.StateError, match="is locked by another run") as error:
+        fixture.run()
+    assert fixture.storage.public["rpm"] in str(error.value)
+    assert first.run_id in str(error.value)
+    assert fixture.store.writes == ["arch/haberdasher.lock", "rpm/haberdasher.lock"]
+    assert fixture.store.deletes == ["arch/haberdasher.lock"]
+    assert fixture.locks() == ["rpm"]
+    assert fixture.path("rpm", state.LOCK_KEY).read_bytes() == held
+    assert not fixture.path("arch", state.INVENTORY_KEY).exists()
+    state.release(fixture.store, first)
+    assert fixture.run().changed
+
+
+def test_handled_failure_releases_the_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch", "rpm"))
+    fixture.releases.fail = True
+    with pytest.raises(discovery.DiscoveryFailure):
+        fixture.run()
+    assert fixture.store.deletes == ["rpm/haberdasher.lock", "arch/haberdasher.lock"]
+    assert not fixture.locks()
+
+
+def test_lock_records_only_run_publisher_and_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_NAME", "runner-1")
+    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "wimpysworld/Haberdasher")
+    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+    monkeypatch.setenv("HD_SIGNING_KEY", "secret-sentinel")
+    lock = state.acquire(fixture.store, fixture.storage.public, now=NOW)
+    content = json.loads(fixture.path("arch", state.LOCK_KEY).read_bytes())
+    assert content == {
+        "publisher": "github-actions:runner-1",
+        "run_id": lock.run_id,
+        "run_url": "https://github.com/wimpysworld/Haberdasher/actions/runs/42",
+        "started_at": NOW.isoformat(),
+    }
+    other = state.Lock("other", (("arch", "stale-etag"),))
+    with pytest.raises(state.StateError, match="lock changed"):
+        state.release(fixture.store, other)
+    assert fixture.locks() == ["arch"]
+    state.release(fixture.store, lock)
+    assert not fixture.locks()
+
+
+def test_break_lock_deletes_existing_locks_only_on_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "local"
+    config = tmp_path / "config.yaml"
+    config.write_text("sources: [test/project]\n")
+    storage = StoragePolicy("local", {name: str(root / "public" / name) for name in core.FORMATS})
+    store = LocalStore(storage)
+    state.acquire(store, {"arch": storage.public["arch"]}, now=NOW)
+    base = ["--config", str(config), "--format", "all"]
+    assert cli.main(["--break-lock", *base]) == 1
+    assert "exactly one of --local-root or --remote" in capsys.readouterr().err
+    assert cli.main(["--apply", "--local-root", str(root), *base]) == 1
+    assert "is locked by another run" in capsys.readouterr().err
+    assert (root / "public/arch" / state.LOCK_KEY).exists()
+    assert cli.main(["--break-lock", "--local-root", str(root), *base]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["mode"] == "break-lock" and set(output["broken"]) == {"arch"}
+    assert not any((root / "public" / name / state.LOCK_KEY).exists() for name in core.FORMATS)
+    assert not (root / "public/arch" / state.INVENTORY_KEY).exists()
 
 
 def test_signing_fingerprint_change_fails_before_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from haberdasher.config import StoragePolicy
-
-    store = CountingStore(tmp_path / "store")
-    runtime = Runtime(tmp_path / "runtime", environ={})
-    owner = state.acquire(store, owner="local")
-    frozen = state.freeze(store, owner, generation(tmp_path / "input", owner, bootstrap=True))
-    monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
-    publish.replay(
-        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
-    )
-
-    def forbidden(*args: object, **kwargs: object) -> None:
-        raise AssertionError("Fingerprint change reached discovery or signing")
-
-    monkeypatch.setattr(discovery, "scan_releases", forbidden)
-    monkeypatch.setattr(publish, "signing_session", forbidden)
-    policy = Policy(
-        StoragePolicy(
-            "local", str(tmp_path / "store/private"), {"apt": str(tmp_path / "store/apt")}
-        ),
-        expected_signing_fingerprint="B" * 40,
-    )
-    with pytest.raises(state.StateError, match="rotation"):
-        publish.reconcile(
-            Config(("test/project",)),
-            policy,
-            store=store,
-            runtime=runtime,
-            now=NOW,
-            clock=lambda: NOW,
-        )
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    fixture.policy = replace(fixture.policy, expected_signing_fingerprint="B" * 40)
+    fixture.releases.fail = True
+    with pytest.raises(state.StateError, match="key rotation"):
+        fixture.run()
+    assert not fixture.locks()
 
 
-@pytest.mark.parametrize("architecture", ["x86_64", "noarch"])
-def test_rpm_policy_change_validates_unchanged_history_before_freeze(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, architecture: str
-) -> None:
-    from haberdasher.config import StoragePolicy
-
-    storage = StoragePolicy(
-        "local", str(tmp_path / "store/private"), {"rpm": str(tmp_path / "store/rpm")}
-    )
-    store = LocalStore(storage)
-    policy = Policy(storage, expected_signing_fingerprint="A" * 40)
-    config = Config(("test/project",), {"rpm": FormatPolicy("rpm")})
-    runtime = Runtime(tmp_path / "runtime", environ={})
-    mock_rpm_commands(monkeypatch)
-    retained = retained_rpm(tmp_path / "rpm", (architecture,))
-    outputs = tuple(
-        core.OutputObject(ref, tmp_path / "rpm" / ref.key, "create", None, index)
-        for index, ref in enumerate(retained.objects)
-    )
-    prepared = PreparedFormat("rpm", retained, outputs, retained.objects)
-    source = retained.accepted_history[0].inspected.verified.source
-    scan_state = discovery.DiscoveryState((), (source,), config.sources)
-
-    def scan(
-        config: Config, *, runtime: Runtime, previous: discovery.DiscoveryState
-    ) -> discovery.CompleteScan:
-        assert previous == scan_state
-        return discovery.CompleteScan(scan_state, (), (), (), ())
-
-    owner = state.acquire(store, owner="seed")
-    template = generation(tmp_path / "input", owner, name="rpm", bootstrap=True)
-    original = replace(
-        template,
-        config_digest=hashlib.sha256(core.canonical_json(config)).hexdigest(),
-        policy_digest=hashlib.sha256(core.canonical_json(policy)).hexdigest(),
-        formats=(prepared,),
-        scan={
-            "state": core.json_value(scan_state),
-            "policies": {"rpm": core.json_value(config.format_policy("rpm"))},
-        },
-        public_inventories={
-            "rpm": core.public_inventory(
-                retained.accepted_history, (*retained.objects, *template.bootstrap_objects)
-            )
-        },
-    )
-    frozen = state.freeze(store, owner, original)
-    publish.replay(
-        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
-    )
-    completion = state.read_control(store, "completed.json")
-    public_before = {
-        path.relative_to(tmp_path / "store/rpm"): path.read_bytes()
-        for path in (tmp_path / "store/rpm").rglob("*")
-        if path.is_file()
-    }
-    owner = state.acquire(store, owner="before")
-    before = state.load_committed(store, owner, out=tmp_path / "before")
-    state.release(store, owner)
-    monkeypatch.setattr(discovery, "scan_releases", scan)
-
-    def forbidden(*args: object, **kwargs: object) -> None:
-        raise AssertionError("Policy-only change reached signing, rebuilding, or freeze")
-
-    monkeypatch.setattr(publish, "signing_session", forbidden)
-    monkeypatch.setattr(rpm, "prepare", forbidden)
-    changed = replace(config, formats={"rpm": FormatPolicy("rpm", architectures=("aarch64",))})
-    if architecture == "x86_64":
-        monkeypatch.setattr(state, "freeze", forbidden)
-        with pytest.raises(rpm.RpmFailure, match="architecture is not approved"):
-            publish.reconcile(
-                changed, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
-            )
-        assert state.read_control(store, "completed.json") == completion
-        assert state.pending_generation(store) == frozen
-        held = state.read_control(store, "ownership.json")
-        assert held is not None
-        owner = core.Ownership(
-            str(held[0]["nonce"]),
-            held[1].etag,
-            str(held[0]["runner"]),
-            str(held[0]["acquired_at"]),
-        )
-    else:
-        result = publish.reconcile(
-            changed, policy, store=store, runtime=runtime, now=NOW, clock=lambda: NOW
-        )
-        assert result.changed
-        owner = state.acquire(store, owner="after")
-    after = state.load_committed(store, owner, out=tmp_path / "after")
-    assert after.config_digest == (
-        before.config_digest
-        if architecture == "x86_64"
-        else hashlib.sha256(core.canonical_json(changed)).hexdigest()
-    )
-    assert after.policy_digest == before.policy_digest
-    assert after.formats[0].accepted_history == before.formats[0].accepted_history
-    assert after.formats[0].objects == before.formats[0].objects
-    assert {
-        path.relative_to(tmp_path / "store/rpm"): path.read_bytes()
-        for path in (tmp_path / "store/rpm").rglob("*")
-        if path.is_file()
-    } == public_before
-
-
-def test_adding_selected_format_retains_previous_bootstrap(
+def test_changed_published_entry_stops_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class SignerDouble:
-        fingerprint = "A" * 40
-
-        def public_exports(self, out: Path) -> tuple[Path, Path, Path]:
-            paths = tuple(
-                out / name for name in ("haberdasher.asc", "haberdasher.gpg", "haberdasher.rsa.pub")
-            )
-            for path in paths:
-                path.write_bytes(b"synthetic public export")
-            return paths[0], paths[1], paths[2]
-
-    signer = cast(SigningSession, SignerDouble())
-    store = local_store(tmp_path / "store")
-    runtime = Runtime(tmp_path / "runtime", environ={})
-    owner = state.acquire(store, owner="local")
-    empty = state.load_committed(store, owner, out=tmp_path / "empty")
-    first = generation(tmp_path / "input", owner)
-    outputs, refs = publish.prepare_bootstrap(
-        first.formats, empty, signer, out=tmp_path / "exports-one"
-    )
-    first = replace(
-        first,
-        bootstrap_outputs=outputs,
-        bootstrap_objects=refs,
-        signing_fingerprint=signer.fingerprint,
-        public_inventories={
-            "apt": core.public_inventory(
-                first.formats[0].retained.accepted_history,
-                (*first.formats[0].referenced_objects, *refs),
-            )
-        },
-    )
-    monkeypatch.setattr(publish, "_adapter", AdapterDouble().select)
-    frozen = state.freeze(store, owner, first)
-    publish.replay(
-        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
-    )
-    owner = state.acquire(store, owner="next")
-    prior = state.load_committed(store, owner, out=tmp_path / "prior")
-    second = next_generation(tmp_path / "next", owner, prior)
-    rpm = PreparedFormat("rpm", RetainedFormat("rpm", None, (), (), {}, ()), (), ())
-    formats = (*second.formats, rpm)
-    outputs, refs = publish.prepare_bootstrap(formats, prior, signer, out=tmp_path / "exports-two")
-    assert len(outputs) == 2 and all(output.ref.bucket_role == "rpm" for output in outputs)
-    assert set(prior.bootstrap_objects).issubset(refs)
-    second = replace(
-        second,
-        formats=formats,
-        bootstrap_outputs=outputs,
-        bootstrap_objects=refs,
-        scan={
-            **second.scan,
-            "policies": core.json_value({"apt": FormatPolicy("apt"), "rpm": FormatPolicy("rpm")}),
-        },
-        public_inventories={
-            item.format: core.public_inventory(
-                item.retained.accepted_history,
-                (
-                    *item.referenced_objects,
-                    *(ref for ref in refs if ref.bucket_role == item.format),
-                ),
-            )
-            for item in formats
-        },
-    )
-    frozen = state.freeze(store, owner, second)
-    publish.replay(
-        frozen, store=store, ownership=owner, runtime=runtime, now=NOW, clock=lambda: NOW
-    )
-    owner = state.acquire(store, owner="verify")
-    restored = state.load_committed(store, owner, out=tmp_path / "final")
-    assert restored.bootstrap_objects == refs
-    for key, etag in prior.bootstrap_etags.items():
-        assert restored.bootstrap_etags[key] == etag
-    state.release(store, owner)
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    fixture.path("arch", "x86_64/db").write_text("tampered\n")
+    fixture.releases.add("tool", "2")
+    with pytest.raises(RuntimeError, match="differ|changed"):
+        fixture.run()
+    assert fixture.path("arch", "x86_64/db").read_text() == "tampered\n"
+    assert not fixture.path("arch", "x86_64/tool-2.pkg").exists()

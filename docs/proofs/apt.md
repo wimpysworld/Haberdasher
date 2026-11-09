@@ -86,8 +86,8 @@ cache behaviour, remote recovery, or crash durability.
 
 `src/haberdasher/formats/apt.py` uses admitted new inputs and retained package records. It signs both Release forms and publishes immutable by-hash dependencies before entries. Default validity is seven days, with renewal within two days, configurable through `haberdasher.yaml`.
 
-`tests/native/test_apt.py` covers HTTP install/update, strict rejection, delayed by-hash clients, retained records, and expiry. `tests/native/test_pipeline.py` adds real CLI publication, served-key trust, late assets, no-op, and exact recovery without sources or signing access.
+`tests/native/test_apt.py` covers HTTP install/update, strict rejection, delayed by-hash clients, retained records, and expiry. `tests/native/test_pipeline.py` adds real CLI publication, served-key trust, late assets, no-op, and a full rerun after an interruption.
 
-Expired frozen APT output rejects replay. A new preparation requires an explicit operator decision, not a silent re-sign. Public HTTPS/cache behaviour, official distribution clients, production permissions, and arm64 runtime remain unqualified.
+A run renews APT metadata inside the configured renewal window and rejects expired metadata before it writes entries. Public HTTPS/cache behaviour, official distribution clients, production permissions, and arm64 runtime remain unqualified.
 
-Use [client setup](../clients.md#apt) and [activation gates](../validation.md#remaining-activation-gates) before public use.
+Use [client setup](../clients.md#apt) and [activation checks](../validation.md#remaining-activation-checks) before public use.

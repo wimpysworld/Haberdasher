@@ -8,7 +8,7 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 
-from haberdasher.config import FormatPolicy, TrustPolicy
+from haberdasher.config import FormatPolicy
 from haberdasher.core import (
     JSONValue,
     PreparedFormat,
@@ -23,12 +23,7 @@ from tests.support.native import NativeClient
 
 
 def policy() -> FormatPolicy:
-    return FormatPolicy(
-        "apt",
-        architectures=("amd64", "arm64"),
-        suite="proof",
-        trust=TrustPolicy(approved=True, approval_reference="synthetic-local-test"),
-    )
+    return FormatPolicy("apt", architectures=("amd64", "arm64"), suite="proof")
 
 
 def build(

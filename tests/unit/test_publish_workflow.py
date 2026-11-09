@@ -1,6 +1,5 @@
 import json
 import shutil
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -10,7 +9,6 @@ import pytest
 import yaml
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/publish.yml"
-POLICY = "# synthetic policy: %s \\n $() `ignored`\napprovals: {}\nnote: 'café'\n\n"
 
 
 @pytest.fixture
@@ -37,7 +35,6 @@ def test_publish_gates_and_step_inputs(workflow: dict[str, Any]) -> None:
     assert all("env" not in step for step in steps[:-1])
     assert steps[-1]["shell"] == "bash"
     assert steps[-1]["env"] == {
-        "HD_PUBLISH_POLICY": "${{ secrets.HD_PUBLISH_POLICY }}",
         "GH_TOKEN": "${{ github.token }}",
         "HD_SIGNING_KEY": "${{ secrets.HD_SIGNING_KEY }}",
         "HD_CLOUDFLARE_S3_API_ENDPOINT": "${{ secrets.HD_CLOUDFLARE_S3_API_ENDPOINT }}",
@@ -46,93 +43,41 @@ def test_publish_gates_and_step_inputs(workflow: dict[str, Any]) -> None:
     }
 
 
-@pytest.mark.parametrize(
-    ("policy", "exit_code", "sig"),
-    [
-        (POLICY, 0, 0),
-        (POLICY.rstrip("\n"), 0, 0),
-        (POLICY, 7, 0),
-        ("", 0, 0),
-        (None, 0, 0),
-        (POLICY, 0, signal.SIGHUP),
-        (POLICY, 0, signal.SIGINT),
-        (POLICY, 0, signal.SIGTERM),
-    ],
-)
-def test_publish_policy_lifecycle(
-    tmp_path: Path,
-    workflow: dict[str, Any],
-    policy: str | None,
-    exit_code: int,
-    sig: int,
-) -> None:
-    checkout = tmp_path / "checkout with spaces"
-    checkout.mkdir()
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_publish_command(tmp_path: Path, workflow: dict[str, Any], exit_code: int) -> None:
     tools = tmp_path / "bin"
     tools.mkdir()
-    for name in ("bash", "mktemp", "rm"):
-        executable = shutil.which(name)
-        assert executable is not None
-        (tools / name).symlink_to(executable)
+    bash = shutil.which("bash")
+    assert bash is not None
+    (tools / "bash").symlink_to(bash)
     record = tmp_path / "record.json"
     nix = tools / "nix"
     nix.write_text(
         f"#!{sys.executable}\n"
-        "import os, sys\n"
-        "assert sys.argv[1:4] == ['develop', '--no-write-lock-file', '--command']\n"
-        "assert sys.argv[4] == 'just'\n"
-        f"os.execv({str(tools / 'just')!r}, sys.argv[4:])\n"
-    )
-    nix.chmod(0o700)
-    just = tools / "just"
-    just.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, stat, sys\n"
+        "import json, sys\n"
         "from pathlib import Path\n"
-        "assert sys.argv[1:5] == ['publish', '--apply', '--remote', '--policy-file']\n"
-        "assert len(sys.argv) == 6\n"
-        "policy = Path(sys.argv[5])\n"
-        "record = {\n"
-        "    'path': str(policy.resolve()),\n"
-        "    'bytes': policy.read_bytes().hex(),\n"
-        "    'mode': stat.S_IMODE(policy.stat().st_mode),\n"
-        "    'umask': os.umask(0o077),\n"
-        "    'policy_in_env': 'HD_PUBLISH_POLICY' in os.environ,\n"
-        "}\n"
-        f"Path({str(record)!r}).write_text(json.dumps(record))\n"
-        f"if {int(sig)}: os.kill(os.getppid(), {int(sig)})\n"
+        f"Path({str(record)!r}).write_text(json.dumps(sys.argv[1:]))\n"
         f"sys.exit({exit_code})\n"
     )
-    just.chmod(0o700)
-    env = {"PATH": str(tools), "TMPDIR": str(checkout), "HOME": str(tmp_path)}
-    if policy is not None:
-        env["HD_PUBLISH_POLICY"] = policy
+    nix.chmod(0o700)
     body = cast(str, workflow["jobs"]["publish"]["steps"][-1]["run"])
     result = subprocess.run(
         [str(tools / "bash"), "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", body],
-        cwd=checkout,
-        env=env,
+        cwd=tmp_path,
+        env={"PATH": str(tools), "HOME": str(tmp_path)},
         capture_output=True,
         timeout=10,
     )
     assert result.stdout == b""
-    if not policy:
-        assert result.returncode != 0
-        assert result.stderr == b"HD_PUBLISH_POLICY requires an approved policy.\n"
-        assert not record.exists()
-    else:
-        assert result.returncode == (128 + sig if sig else exit_code), result.stderr.decode()
-        assert result.stderr == b""
-        observed = json.loads(record.read_text())
-        path = Path(observed["path"])
-        assert path.is_absolute()
-        assert path.parent == Path("/tmp")
-        assert not path.is_relative_to(checkout)
-        assert not path.is_relative_to(WORKFLOW.parents[2])
-        assert not path.is_relative_to("/nix/store")
-        assert observed["bytes"] == policy.encode().hex()
-        assert observed["mode"] == 0o600
-        assert observed["umask"] == 0o077
-        assert observed["policy_in_env"] is False
-        assert not path.exists()
-    assert list(checkout.iterdir()) == []
+    assert result.returncode == exit_code
+    assert json.loads(record.read_text()) == [
+        "develop",
+        "--no-write-lock-file",
+        "--command",
+        "just",
+        "publish",
+        "--apply",
+        "--remote",
+        "--format",
+        "all",
+    ]

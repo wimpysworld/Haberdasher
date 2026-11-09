@@ -24,27 +24,27 @@ Haberdasher is a personal-use publisher for prebuilt GitHub release assets from 
 ## Publishing invariants
 
 - Keep `just publish` a read-only plan by default, without storage changes or signing.
-- Require an explicit write mode and destination for publication or recovery.
-- Require explicit policy approvals for remote publication.
-  Cover private storage, signing, repository policy, live R2, hosted publication, and public delivery.
-  Require approval for each format and its client trust, plus applicable Alpine v2 and Flatpak source/runtime approvals.
+- Require an explicit write mode and destination for publication.
+- Keep all publisher configuration, including storage buckets, in `haberdasher.yaml`.
+  Do not add a separate policy file or approval gates.
 - Publish all configured public formats as one global publication.
   Use `--format all` for multiple configured formats.
-  Preserve private global state and previously committed formats.
+  Preserve previously published formats.
 - Verify release checksums before importing packages.
 - Derive package identity from package metadata under each ecosystem's rules, not filenames or release tags alone.
 - Reject changed bytes for an existing package identity.
   Require a new package version or release identity under that ecosystem's rules.
-- Maintain a durable per-asset manifest and per-format metadata state.
+- Keep publication state in each bucket's public `haberdasher.json` inventory and published metadata.
+  Do not add a private state bucket.
 - Reconcile configured releases and assets beyond a latest-tag map.
-- Reuse stored metadata instead of downloading the entire historical package pool on each run.
-- Serialise publishers across local runs and CI.
-  GitHub Actions workflow concurrency alone is insufficient.
-- Freeze public-key bytes, signed artefacts, and replay state in private storage before public writes.
-  Never include private signing keys in frozen state.
+- Reuse published metadata instead of downloading the entire historical package pool on each run.
+- Serialise publishers with a `haberdasher.lock` object in each bucket that a run writes.
+  Create each lock with a conditional write, in a fixed bucket order, and delete the locks when the run ends.
+  Release a stale lock only on an explicit operator request.
 - Publish immutable packages and dependency metadata before each format's entry metadata.
 - Publish each format's allow-listed inventory after its entry metadata.
-- Record completion only after successful publication.
+- Recover from an interrupted run with a full rerun.
+  Do not add replay, write journals, or crash-recovery state.
 - Do not claim atomicity across multiple objects.
 - Retain older objects that published metadata still references.
 - Obtain approval before changing deletion or retention behaviour.
@@ -64,7 +64,7 @@ Haberdasher is a personal-use publisher for prebuilt GitHub release assets from 
 - Use loopback `miniserve` for native HTTP tests with normal conditional and range request semantics.
   Do not bypass client caching or signature checks to make tests pass.
 - Prove incremental handling, including unchanged releases and assets added to existing releases.
-- Test checksum failures, identity conflicts, interrupted publication, recovery, and competing local and CI publishers.
+- Test checksum failures, identity conflicts, an interrupted run followed by a full rerun, and competing publishers.
 - Verify native client installation and signature checks before claiming repository support.
   Treat signature compatibility tests as separate from end-to-end publication and installation tests.
 - For Alpine, verify indexes and packages with native `apk verify`, then check actual resolver and fetched-package outputs.
@@ -96,9 +96,10 @@ Treat the five package buckets as public:
   Import that certificate, then export the same key with `--armor --export-secret-key-p8`.
   Do not generate another key or require an external certificate authority or certificate service.
 - Configure scoped public-key trust for each native client. Do not require personal keys, keyservers, or the public web of trust.
-- Permit one public, non-secret `haberdasher.json` package inventory per bucket for package identity, source, published digests, and referenced objects.
-  Enforce the explicit public inventory allow-list.
-- Keep secrets, credentials, private provenance, locks, pending journals, and other private control state out of these buckets.
+- Permit one public, non-secret `haberdasher.json` package inventory per bucket for package identity, source, published digests, referenced objects, and the publication state that the adapters need.
+  Enforce the explicit public inventory allow-list. Never include secrets or local paths.
+- Permit a temporary `haberdasher.lock` per bucket that holds only a run identifier, the publisher host or CI run URL, and the start time.
+- Keep secrets, credentials, and private provenance out of these buckets.
 - Read publisher credentials only from the runtime environment:
   `HD_CLOUDFLARE_S3_API_ENDPOINT`, `HD_CLOUDFLARE_ACCESS_KEY_ID`, and `HD_CLOUDFLARE_SECRET_ACCESS_KEY`.
   Local credentials use SOPS in `~/Zero/nix-config`. GitHub Secrets use the same variable names.

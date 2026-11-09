@@ -11,7 +11,7 @@ from urllib.parse import unquote
 import pytest
 
 from haberdasher import discovery
-from haberdasher.config import Config
+from haberdasher.config import Config, CosignPolicy
 from haberdasher.core import SourceAsset, canonical_json
 from haberdasher.discovery import (
     ChecksumEntry,
@@ -556,3 +556,89 @@ def test_state_validation(github: RecordedGitHub) -> None:
         replace(state, sources=())
     with pytest.raises(ValueError):
         replace(state, assets=tuple(asset for asset in state.assets if asset.asset_id != 202))
+
+
+SIGNER = CosignPolicy(
+    ".sigstore.json",
+    "https://token.actions.githubusercontent.com",
+    "https://github.com/example/tool/.github/workflows/release.yml@refs/tags/{tag}",
+)
+SIGNED = Config(("example/tool",), cosign={"example/tool": SIGNER})
+
+
+class CosignGitHub(RecordedGitHub):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.cosign: list[tuple[tuple[str, ...], bytes, bytes]] = []
+        self.cosign_status = 0
+        for release, checksum, identifier in ((20, "checksums.txt", 204), (10, "SHA256SUMS", 103)):
+            tag = "v2" if release == 20 else "v1"
+            row = copy.deepcopy(next(self.rows(202)))
+            name = checksum + ".sigstore.json"
+            body = f'{{"bundle":"{tag}"}}'.encode()
+            row.update(id=identifier, name=name, size=len(body))
+            self.pages[f"{RELEASES}/{release}/assets?per_page=100&page=1"].append(row)
+            self.bodies[f"{tag}/{name}"] = body
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        input: bytes | None = None,
+        timeout: float = 120,
+        env_kind: str = "native",
+    ) -> subprocess.CompletedProcess[bytes]:
+        if argv[0] != "cosign":
+            return super().run(argv, cwd=cwd, input=input, timeout=timeout, env_kind=env_kind)
+        assert env_kind == "native" and cwd is None and input is None
+        bundle = Path(argv[argv.index("--bundle") + 1])
+        self.cosign.append((tuple(argv), bundle.read_bytes(), Path(argv[-1]).read_bytes()))
+        return subprocess.CompletedProcess(argv, self.cosign_status, b"", b"")
+
+
+@pytest.fixture
+def signed(tmp_path: Path) -> Iterator[CosignGitHub]:
+    runtime = CosignGitHub(tmp_path / "runtime")
+    try:
+        yield runtime
+    finally:
+        runtime.close()
+
+
+def test_cosign_verifies_each_checksum_with_its_release_identity(signed: CosignGitHub) -> None:
+    result = scan_releases(SIGNED, runtime=signed, previous=DiscoveryState())
+    assert {item.source.asset_id for item in result.changed} == {101, 201}
+    verified = {
+        argv[argv.index("--certificate-identity") + 1]: (argv, bundle, blob)
+        for argv, bundle, blob in signed.cosign
+    }
+    prefix = "https://github.com/example/tool/.github/workflows/release.yml@refs/tags/"
+    assert set(verified) == {prefix + "v1", prefix + "v2"}
+    argv, bundle, blob = verified[prefix + "v2"]
+    assert argv[:2] == ("cosign", "verify-blob")
+    assert argv[argv.index("--certificate-oidc-issuer") + 1] == SIGNER.issuer
+    assert bundle == b'{"bundle":"v2"}'
+    assert blob == signed.bodies["v2/checksums.txt"]
+    assert not list((signed.root / "downloads").iterdir())
+
+
+def test_missing_cosign_bundle_fails_before_import(signed: CosignGitHub) -> None:
+    for page in signed.pages.values():
+        page[:] = [row for row in page if row["id"] != 103]
+    with pytest.raises(DiscoveryFailure, match=r"Missing cosign bundle SHA256SUMS\.sigstore\.json"):
+        scan_releases(SIGNED, runtime=signed, previous=DiscoveryState())
+
+
+def test_failed_cosign_verification_fails_before_import(signed: CosignGitHub) -> None:
+    signed.cosign_status = 1
+    with pytest.raises(DiscoveryFailure, match="Cosign bundle verification failed"):
+        scan_releases(SIGNED, runtime=signed, previous=DiscoveryState())
+    assert len(signed.cosign) == 1
+    assert not list((signed.root / "downloads").iterdir())
+
+
+def test_unconfigured_source_ignores_bundles(signed: CosignGitHub) -> None:
+    result = scan(signed)
+    assert {item.source.asset_id for item in result.changed} == {101, 201}
+    assert not signed.cosign

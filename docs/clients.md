@@ -76,7 +76,7 @@ Already-signed upstream RPMs reject in the production adapter. Replacement or pr
 
 Verify the public export from `https://pkg.wimpys.world/keys/haberdasher.gpg`. Initialise a dedicated GnuPG directory and import only that key. Set owner trust only after independent fingerprint verification.
 
-Use these settings in the selected pacman configuration:
+Use these settings in the selected pacman configuration. Set `Architecture` to `x86_64` or `aarch64`. Each architecture has its own signed `haberdasher` database under `$arch`.
 
 ```ini
 [options]
@@ -108,11 +108,11 @@ The repository entry is the base URL:
 https://apk.wimpys.world
 ```
 
-APK selects the architecture-specific index. The test client uses `--arch x86_64`, explicit `--keys-dir` and `--repositories-file`, and a private `--root`.
+APK selects the architecture-specific index, `x86_64/APKINDEX.tar.gz` or `aarch64/APKINDEX.tar.gz`. The test clients use `--arch x86_64` or `--arch aarch64`, explicit `--keys-dir` and `--repositories-file`, and a private `--root`.
 
 A strict client can install unchanged unsigned v2 packages through the trusted signed index. Standalone verification rejects those same unsigned packages. No client uses `--allow-untrusted`. The publisher uses that flag only for bounded unsigned-input inspection.
 
-RSA256 signs the index with SHA256. Native v2 `Q1` control identity still uses SHA1, while payload `datahash` and whole-file admission use SHA256. Production approval of this SHA1 boundary remains pending. Successful `apk update` or `apk fetch` exit status alone does not prove trust. Check actual installed records, payloads, and fetched files.
+RSA256 signs the index with SHA256. Native v2 `Q1` control identity still uses SHA1, while payload `datahash` and whole-file admission use SHA256. Production acceptance of this SHA1 boundary remains pending. Successful `apk update` or `apk fetch` exit status alone does not prove trust. Check actual installed records, payloads, and fetched files.
 
 ## Flatpak
 

@@ -61,11 +61,11 @@ Publication requires `--apply` and either `--local-root` or `--remote`. Read the
 
 ## Architecture
 
-A small Python coordinator handles discovery, admission, private state, conditional storage, and recovery. Native tools inspect, index, sign, and verify packages. There is no plugin framework or Go migration.
+A small Python coordinator handles discovery, admission, bucket locks, and conditional storage. Native tools inspect, index, sign, and verify packages. There is no plugin framework or Go migration.
 
 Haberdasher reconciles releases and late assets, verifies release SHA256 checksums, and derives identity from native metadata. It rejects changed bytes under an accepted identity. Retained native state avoids routine downloads of the historical package pool.
 
-The publisher freezes signed output before public writes. Public keys precede native entries. Each format's inventory follows its entries. Private completion follows all acknowledged writes. Publication is not atomic across objects. Older referenced objects remain available, without deletion or retention changes.
+Each bucket's public `haberdasher.json` holds the publication state. A run locks each bucket that it writes. Public keys and packages precede native entries. Each format's inventory follows its entries. A full rerun recovers an interrupted run. Publication is not atomic across objects. Older referenced objects remain available, without deletion or retention changes.
 
 ## Repositories and setup
 
@@ -91,7 +91,7 @@ The storage interface remains:
 
 Local SOPS configuration supplies credentials at runtime. GitHub Secrets use the same names. Local signing uses `HD_SIGNING_KEY_FILE`. CI signing uses `HD_SIGNING_KEY`. Do not commit credentials or private keys. Haberdasher does not decrypt credential files or use `HD_CLOUDFLARE_TOKEN_VALUE`.
 
-The manual publish workflow remains disabled unless `HD_PUBLISH_ENABLED` is `true`. It also requires the default branch and the `publisher` environment. There is no schedule. [Validation and activation gates](docs/validation.md) separate local evidence from approval-dependent work.
+The manual publish workflow remains disabled unless `HD_PUBLISH_ENABLED` is `true`. It also requires the default branch and the `publisher` environment. There is no schedule. [Validation and activation](docs/validation.md) separates local evidence from remaining production checks.
 
 ## Contributing
 

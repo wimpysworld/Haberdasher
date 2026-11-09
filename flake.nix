@@ -54,6 +54,7 @@
           "basedpyright"
           "awscli2"
           "miniserve"
+          "cosign"
         ];
         {
           tools =

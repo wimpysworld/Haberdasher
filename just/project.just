@@ -6,7 +6,7 @@ check-tools:
 proof format="all":
     @bash just/project/proof.sh {{quote(format)}}
 
-# Plan by default, or explicitly publish into an approved destination
+# Plan by default, or explicitly publish into a named destination
 [positional-arguments]
 publish *args:
     @.venv/bin/python -m haberdasher "$@"

@@ -1,10 +1,10 @@
-"""Bounded configuration and fail-closed operational policy."""
+"""Bounded publisher configuration."""
 
 from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -35,18 +35,6 @@ MAX_BYTES = 1024 * 1024
 MAX_DEPTH = 32
 MAX_NODES = 10_000
 PRODUCTION_FINGERPRINT = "B39939A127C7A8D338F53A3AE132098A87DB88E0"
-APPROVAL_GATES = frozenset(
-    {
-        "private_storage",
-        "signing",
-        "repository_policy",
-        "live_r2",
-        "hosted_publication",
-        "public_delivery",
-        "apk_v2",
-        "flatpak_runtime",
-    }
-)
 
 if not getattr(yaml, "__with_libyaml__", False) or not hasattr(yaml, "CSafeLoader"):
     raise RuntimeError("Haberdasher requires PyYAML CSafeLoader and LibYAML")
@@ -173,8 +161,6 @@ class RuntimePolicy(Record):
 
 @dataclass(frozen=True)
 class TrustPolicy(Record):
-    approved: bool = False
-    approval_reference: str | None = None
     allow_signed_upstream: bool = False
     upstream_fingerprints: tuple[str, ...] = ()
     source_owner: str | None = None
@@ -182,10 +168,7 @@ class TrustPolicy(Record):
     runtime: RuntimePolicy | None = None
 
     def __post_init__(self) -> None:
-        _bool(self.approved)
         _bool(self.allow_signed_upstream)
-        if self.approval_reference is not None:
-            text(self.approval_reference, "approval reference")
         for fingerprint in self.upstream_fingerprints:
             _fingerprint(fingerprint)
         if self.source_owner is not None:
@@ -222,10 +205,41 @@ class FormatPolicy(Record):
             raise ValueError("Invalid trust policy")
 
 
+def _https_url(value: object, label: str) -> str:
+    value = text(value, label)
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError(f"Invalid {label}")
+    return value
+
+
+@dataclass(frozen=True)
+class CosignPolicy(Record):
+    """Sigstore bundle requirements for a source's release checksum documents."""
+
+    bundle_suffix: str
+    issuer: str
+    identity: str
+
+    def __post_init__(self) -> None:
+        suffix = text(self.bundle_suffix, "cosign bundle suffix")
+        if re.fullmatch(r"\.[A-Za-z0-9][A-Za-z0-9_.-]*", suffix) is None:
+            raise ValueError("Invalid cosign bundle suffix")
+        _https_url(self.issuer, "cosign issuer")
+        _https_url(self.identity, "cosign identity")
+        if "{" in self.identity.replace("{tag}", "") or "}" in self.identity.replace("{tag}", ""):
+            raise ValueError("Cosign identity supports only the {tag} placeholder")
+
+    def certificate_identity(self, tag: str) -> str:
+        return self.identity.replace("{tag}", text(tag, "release tag"))
+
+
 @dataclass(frozen=True)
 class Config(Record):
     sources: tuple[str, ...]
     formats: dict[str, FormatPolicy] = field(default_factory=dict)
+    cosign: dict[str, CosignPolicy] = field(default_factory=dict)
+    storage: StoragePolicy | None = None
 
     def __post_init__(self) -> None:
         if not self.sources or len({source.lower() for source in self.sources}) != len(
@@ -237,6 +251,21 @@ class Config(Record):
         for name, policy in self.formats.items():
             if not isinstance(policy, FormatPolicy) or name != policy.format:
                 raise ValueError("Invalid format policy")
+        for source, cosign in self.cosign.items():
+            if source not in self.sources or not isinstance(cosign, CosignPolicy):
+                raise ValueError("Invalid cosign policy")
+        if self.storage is not None and (
+            not isinstance(self.storage, StoragePolicy)
+            or self.storage.backend != "r2"
+            or not self.storage.public
+        ):
+            raise ValueError("Storage needs R2 public buckets")
+
+    def public_formats(self) -> tuple[str, ...]:
+        """Configured formats that have a public bucket."""
+        if self.storage is None:
+            return ()
+        return tuple(sorted(self.formats.keys() & self.storage.public.keys()))
 
     def format_policy(self, name: str) -> FormatPolicy:
         format_name(name)
@@ -247,7 +276,6 @@ class Config(Record):
 @dataclass(frozen=True)
 class StoragePolicy(Record):
     backend: str = "local"
-    private: str | None = None
     public: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -257,8 +285,6 @@ class StoragePolicy(Record):
         for name, location in self.public.items():
             format_name(name)
             locations.append(text(location, "public destination"))
-        if self.private is not None:
-            locations.append(text(self.private, "private destination"))
         if self.backend == "r2":
             for location in locations:
                 if re.fullmatch(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]", location) is None:
@@ -287,69 +313,49 @@ def _fingerprint(value: object) -> str:
 
 @dataclass(frozen=True)
 class Policy(Record):
+    """Storage and signing key for one publisher run."""
+
     storage: StoragePolicy = field(default_factory=StoragePolicy)
-    approved_formats: tuple[str, ...] = ()
-    approval_references: dict[str, str] = field(default_factory=dict)
     expected_signing_fingerprint: str | None = None
-    clients: dict[str, TrustPolicy] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.storage, StoragePolicy):
             raise ValueError("Invalid storage policy")
-        if len(set(self.approved_formats)) != len(self.approved_formats):
-            raise ValueError("Duplicate approved format")
-        for name in self.approved_formats:
-            format_name(name)
-        for name, value in self.approval_references.items():
-            if name not in APPROVAL_GATES:
-                raise ValueError("Unknown approval gate")
-            text(value, "approval reference")
         if self.expected_signing_fingerprint is not None:
             _fingerprint(self.expected_signing_fingerprint)
-        for name, policy in self.clients.items():
-            format_name(name)
-            if not isinstance(policy, TrustPolicy):
-                raise ValueError("Invalid client policy")
 
-    def format_policy(self, config: Config, name: str) -> FormatPolicy:
-        return replace(config.format_policy(name), trust=self.clients.get(name, TrustPolicy()))
-
-    def require_remote(self, formats: tuple[str, ...]) -> None:
-        required = APPROVAL_GATES - {"apk_v2", "flatpak_runtime"}
-        if "apk" in formats:
-            required |= {"apk_v2"}
-        if "flatpak" in formats:
-            required |= {"flatpak_runtime"}
+    def require_remote(self) -> None:
         if (
-            not formats
+            not self.storage.public
             or self.storage.backend != "r2"
-            or not self.storage.private
             or self.expected_signing_fingerprint != PRODUCTION_FINGERPRINT
-            or not required <= self.approval_references.keys()
         ):
-            raise ValueError("Remote publication is not approved")
-        for name in formats:
-            format_name(name)
-            trust = self.clients.get(name, TrustPolicy())
-            if (
-                name not in self.approved_formats
-                or name not in self.storage.public
-                or not trust.approved
-                or not trust.approval_reference
-            ):
-                raise ValueError("Format publication is not approved")
-            if name == "flatpak" and (
-                not trust.source_owner or not trust.refs or not trust.runtime
-            ):
-                raise ValueError("Flatpak source and runtime approval is incomplete")
+            raise ValueError("Remote publication needs R2 storage and the production signing key")
 
 
 def load_config(path: Path) -> Config:
-    data = _keys(_load(path), {"sources", "formats"})
-    sources = _strings(data.get("sources"))
+    data = _keys(_load(path), {"sources", "formats", "storage"})
+    if not isinstance(data.get("sources"), list):
+        raise ValueError("Expected a list of sources")
+    sources: list[str] = []
+    cosign: dict[str, CosignPolicy] = {}
+    for item in cast(list[object], data["sources"]):
+        if isinstance(item, dict):
+            values = _keys(cast(object, item), {"repository", "cosign"})
+            source = text(values.get("repository"), "source")
+            if "cosign" in values:
+                signer = _keys(values["cosign"], {"bundle_suffix", "issuer", "identity"})
+                cosign[source] = CosignPolicy(
+                    text(signer.get("bundle_suffix"), "cosign bundle suffix"),
+                    text(signer.get("issuer"), "cosign issuer"),
+                    text(signer.get("identity"), "cosign identity"),
+                )
+        else:
+            source = text(item, "source")
+        sources.append(source)
     policies: dict[str, FormatPolicy] = {}
     for name, value in _keys(data.get("formats", {}), FORMATS).items():
-        allowed = {"architectures"}
+        allowed = {"architectures", "trust"}
         if name == "apt":
             allowed |= {"suite", "component", "validity_seconds", "renewal_seconds"}
         values = _keys(value, allowed)
@@ -363,16 +369,25 @@ def load_config(path: Path) -> Config:
             text(values.get("component", "main"), "component"),
             integer(values.get("validity_seconds", 604800), "validity", 1),
             integer(values.get("renewal_seconds", 172800), "renewal", 1),
+            _trust(values.get("trust", {})),
         )
-    return Config(sources, policies)
+    storage = None
+    if "storage" in data:
+        values = _keys(data["storage"], {"public"})
+        storage = StoragePolicy(
+            "r2",
+            {
+                name: text(value, "public bucket")
+                for name, value in _keys(values.get("public"), FORMATS).items()
+            },
+        )
+    return Config(tuple(sources), policies, cosign, storage)
 
 
 def _trust(value: object) -> TrustPolicy:
     data = _keys(
         value,
         {
-            "approved",
-            "approval_reference",
             "allow_signed_upstream",
             "upstream_fingerprints",
             "source_owner",
@@ -409,54 +424,9 @@ def _trust(value: object) -> TrustPolicy:
             _strings(values.get("extensions", [])),
         )
     return TrustPolicy(
-        _bool(data.get("approved", False)),
-        text(data["approval_reference"], "approval reference")
-        if "approval_reference" in data
-        else None,
         _bool(data.get("allow_signed_upstream", False)),
         _strings(data.get("upstream_fingerprints", [])),
         text(data["source_owner"], "source owner") if "source_owner" in data else None,
         _strings(data.get("refs", [])),
         runtime,
-    )
-
-
-def load_policy(path: Path | None) -> Policy:
-    if path is None:
-        return Policy()
-    data = _keys(
-        _load(path),
-        {
-            "storage",
-            "approved_formats",
-            "approval_references",
-            "expected_signing_fingerprint",
-            "clients",
-        },
-    )
-    values = _keys(data.get("storage", {}), {"backend", "private", "public"})
-    public = {
-        name: text(value, "public destination")
-        for name, value in _keys(values.get("public", {}), FORMATS).items()
-    }
-    storage = StoragePolicy(
-        text(values.get("backend", "local"), "backend"),
-        text(values["private"], "private destination") if "private" in values else None,
-        public,
-    )
-    approvals = {
-        name: text(value, "approval reference")
-        for name, value in _keys(data.get("approval_references", {}), APPROVAL_GATES).items()
-    }
-    clients = {
-        name: _trust(value) for name, value in _keys(data.get("clients", {}), FORMATS).items()
-    }
-    return Policy(
-        storage,
-        _strings(data.get("approved_formats", [])),
-        approvals,
-        _fingerprint(data["expected_signing_fingerprint"])
-        if "expected_signing_fingerprint" in data
-        else None,
-        clients,
     )

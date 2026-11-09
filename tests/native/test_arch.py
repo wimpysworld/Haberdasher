@@ -241,7 +241,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
         assert len(second.retained.active_identities) == 2
         assert [
             output.ref.key for output in second.outputs if output.ref.object_class == "entry"
-        ] == list(arch.ENTRIES)
+        ] == list(arch.entries("x86_64"))
         assert all(not output.local_path.is_symlink() for output in second.outputs)
         assert all(
             output.expected_etag == "opaque-one"
@@ -475,3 +475,87 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
                     now=NOW,
                     out=runtime.root / "failed-package-signature",
                 )
+
+
+def test_arch_native_multiarch() -> None:
+    policy = FormatPolicy("arch", ("x86_64", "aarch64"))
+    with (
+        disposable_key() as key,
+        private_workspace(Path("/tmp")) as runtime,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+    ):
+        empty = RetainedFormat("arch", None, (), (), {}, ())
+        accepted: list[AdmittedAsset] = []
+        for architecture in ("x86_64", "aarch64"):
+            asset = fixture(
+                runtime,
+                "multi",
+                "1",
+                architecture=architecture,
+                content=f"multi-{architecture}",
+                label=architecture,
+            )
+            inspected = arch.inspect(
+                asset, policy=policy, runtime=runtime, out=runtime.root / f"inspect-{architecture}"
+            )
+            assert inspected.identity.architecture == architecture
+            accepted.append(
+                admit(inspected, accepted, compare=arch.compare, policy=policy, runtime=runtime)
+            )
+        with pytest.raises(arch.ArchFailure, match="not qualified by policy"):
+            arch.inspect(
+                accepted[1].inspected.verified,
+                policy=POLICY,
+                runtime=runtime,
+                out=runtime.root / "inspect-unconfigured",
+            )
+        prepared = arch.prepare(
+            accepted,
+            empty,
+            policy=policy,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "generation1",
+        )
+        assert [
+            output.ref.key for output in prepared.outputs if output.ref.object_class == "entry"
+        ] == [*arch.entries("aarch64"), *arch.entries("x86_64")]
+        live = runtime.root / "live"
+        live.mkdir()
+        publish(prepared, live)
+        with serve(live) as http:
+            for architecture in ("x86_64", "aarch64"):
+                http.set_generation_mtime(list((live / architecture).iterdir()), 1)
+                pacman = client(
+                    runtime,
+                    f"multi-{architecture.replace('_', '-')}",
+                    http.url(architecture),
+                    key,
+                    architecture=architecture,
+                )
+                pacman.checked("-Sy")
+                pacman.checked("-S", "multi")
+                assert pacman.checked("-Q", "multi").strip() == b"multi 1-1"
+                assert (
+                    pacman.client.path("root/usr/share/arch-test/multi.txt").read_text()
+                    == f"multi-{architecture}\n"
+                )
+                package = f"multi-1-1-{architecture}.pkg.tar.zst"
+                source = next(
+                    item.inspected.verified
+                    for item in accepted
+                    if item.inspected.identity.architecture == architecture
+                )
+                assert sha256_file(pacman.client.path("cache/" + package)) == (
+                    source.sha256,
+                    source.size,
+                )
+            mismatched = client(
+                runtime, "mismatched", http.url("aarch64"), key, architecture="x86_64"
+            )
+            mismatched.checked("-Sy")
+            assert mismatched.run("-S", "multi").returncode != 0
+            assert not mismatched.client.path("root/usr/share/arch-test/multi.txt").exists()

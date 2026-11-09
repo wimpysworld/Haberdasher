@@ -36,13 +36,8 @@ def admit(
         raise AdmissionFailure("Upstream signature is not trusted")
     if identity.format in {"rpm", "apk"} and inspected.upstream_signature == "verified":
         trust = policy.trust
-        if not (
-            trust.approved
-            and trust.approval_reference
-            and trust.allow_signed_upstream
-            and trust.upstream_fingerprints
-        ):
-            raise AdmissionFailure("Signed upstream packages require explicit trust approval")
+        if not (trust.allow_signed_upstream and trust.upstream_fingerprints):
+            raise AdmissionFailure("Signed upstream packages require configured upstream trust")
     if identity.format == "flatpak" and identity.source_commit is None:
         raise AdmissionFailure("Flatpak admission requires an exact source commit")
     equivalent: AdmittedAsset | None = None

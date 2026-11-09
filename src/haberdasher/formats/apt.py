@@ -1,8 +1,8 @@
 """Native APT records, immutable DEBs and expiring signed Release entries.
 
-Retained metadata contains private ``files`` (public key to restored path),
-``etags`` (public key to observed revision), ``keyring`` and its SHA256,
-``fingerprint``, ``expires_at`` and ``policy``. The state layer restores files
+Retained metadata contains ``files`` (object key to downloaded path),
+``etags`` (object key to observed revision), ``keyring`` and its SHA256,
+``fingerprint``, ``expires_at`` and ``policy``. The state layer downloads files
 and supplies observed ETags before replacement. Historical DEBs are not required.
 """
 
@@ -545,9 +545,9 @@ def validate_prepared(
             raise AptFailure("Empty APT state contains outputs")
         return
     if prepared.expires_at != prepared.retained.metadata["expires_at"]:
-        raise AptFailure("Frozen APT expiry differs from Release")
+        raise AptFailure("Prepared APT expiry differs from Release")
     if datetime.fromisoformat(str(prepared.expires_at)) <= now:
-        raise AptFailure("Frozen APT Release expired; regeneration is required")
+        raise AptFailure("Prepared APT Release expired; rerun the publication")
     refs = _refs(prepared.retained)
     previous_rank = -1
     entries = _entries(policy)
@@ -556,7 +556,7 @@ def validate_prepared(
             output.ref.sha256,
             output.ref.size,
         ):
-            raise AptFailure("Frozen APT output bytes changed")
+            raise AptFailure("Prepared APT output bytes changed")
         rank = (
             0
             if output.ref.object_class == "package"

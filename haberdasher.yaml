@@ -1,2 +1,22 @@
 sources:
-  - wimpysworld/tailor
+  - repository: wimpysworld/tailor
+    cosign:
+      bundle_suffix: .sigstore.json
+      issuer: https://token.actions.githubusercontent.com
+      identity: https://github.com/wimpysworld/tailor/.github/workflows/builder.yml@refs/tags/{tag}
+formats:
+  apt:
+    architectures: [amd64, arm64]
+  rpm:
+    architectures: [x86_64, aarch64]
+  arch:
+    architectures: [x86_64, aarch64]
+  apk:
+    architectures: [x86_64, aarch64]
+storage:
+  public:
+    apt: haberdasher-apt
+    rpm: haberdasher-rpm
+    apk: haberdasher-apk
+    arch: haberdasher-pkg
+    flatpak: haberdasher-flatpak

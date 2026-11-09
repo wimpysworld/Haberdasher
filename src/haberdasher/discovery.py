@@ -1,4 +1,4 @@
-"""Complete GitHub scans and checksum-verified private inputs."""
+"""Complete GitHub scans and checksum-verified inputs."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import quote
 
-from haberdasher.config import Config
+from haberdasher.config import Config, CosignPolicy
 from haberdasher.core import (
     Record,
     SourceAsset,
@@ -35,6 +35,7 @@ MAX_PAGES = 10_000
 MAX_ITEMS = 100_000
 MAX_CHECKSUM_BYTES = 1024 * 1024
 MAX_CHECKSUM_ENTRIES = 10_000
+MAX_BUNDLE_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 5 * 1024 * 1024 * 1024 - 1
 PACKAGE_SUFFIXES = (".deb", ".rpm", ".apk", ".pkg.tar.zst", ".flatpak")
 
@@ -83,7 +84,7 @@ class DiscoveredAsset(Record):
 
 @dataclass(frozen=True)
 class DiscoveryState(Record):
-    """A proposed scan, committed only with the publication that consumes it."""
+    """One complete scan of the configured releases."""
 
     records: tuple[DiscoveredAsset, ...] = ()
     assets: tuple[SourceAsset, ...] = ()
@@ -308,7 +309,7 @@ def _check_current(source: SourceAsset, runtime: Runtime) -> None:
 
 
 @contextmanager
-def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[Path]:
+def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[tuple[Path, str]]:
     if source.size > limit:
         raise DiscoveryFailure("Asset exceeds the download size limit")
     base = f"repos/{source.repository}/releases"
@@ -351,7 +352,40 @@ def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[Pa
             current
         ):
             raise DiscoveryFailure("Release tag changed during download")
-        yield path
+        yield path, tag
+
+
+def _verify_bundle(
+    checksum: SourceAsset,
+    group: tuple[SourceAsset, ...],
+    signer: CosignPolicy,
+    tag: str,
+    path: Path,
+    runtime: Runtime,
+) -> None:
+    """Fail closed unless cosign verifies the checksum document against its release bundle."""
+    name = checksum.filename + signer.bundle_suffix
+    bundle = next((asset for asset in group if asset.filename == name), None)
+    if bundle is None:
+        raise DiscoveryFailure(f"Missing cosign bundle {name} for {checksum.filename}")
+    with _download(bundle, runtime, MAX_BUNDLE_BYTES) as (bundle_path, bundle_tag):
+        if bundle_tag != tag:
+            raise DiscoveryFailure("Release tag changed during download")
+        result = runtime.run(
+            [
+                "cosign",
+                "verify-blob",
+                "--bundle",
+                str(bundle_path),
+                "--certificate-identity",
+                signer.certificate_identity(tag),
+                "--certificate-oidc-issuer",
+                signer.issuer,
+                str(path),
+            ]
+        )
+    if result.returncode != 0:
+        raise DiscoveryFailure(f"Cosign bundle verification failed for {checksum.filename}")
 
 
 def scan_releases(config: Config, *, runtime: Runtime, previous: DiscoveryState) -> CompleteScan:
@@ -386,7 +420,10 @@ def scan_releases(config: Config, *, runtime: Runtime, previous: DiscoveryState)
         for source in sorted(group, key=lambda item: item.asset_id):
             if not _is_checksum(source.filename):
                 continue
-            with _download(source, runtime, MAX_CHECKSUM_BYTES) as path:
+            with _download(source, runtime, MAX_CHECKSUM_BYTES) as (path, tag):
+                signer = config.cosign.get(source.repository)
+                if signer is not None:
+                    _verify_bundle(source, group, signer, tag, path, runtime)
                 with path.open("rb") as stream:
                     entries = parse_checksums(stream.read(MAX_CHECKSUM_BYTES + 1), source)
             for entry in entries:
@@ -428,7 +465,7 @@ def verify_asset(
     destination = safe_path(runtime.root, relative.as_posix())
     if destination.exists():
         raise DiscoveryFailure("Verified output already exists")
-    with _download(source, runtime, MAX_ASSET_BYTES) as path:
+    with _download(source, runtime, MAX_ASSET_BYTES) as (path, _tag):
         actual, size = sha256_file(path)
         if actual != checksum.sha256 or source.github_sha256 not in (None, actual):
             raise DiscoveryFailure("Downloaded asset differs from SHA256 checksum")

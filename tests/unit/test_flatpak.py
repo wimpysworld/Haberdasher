@@ -38,8 +38,6 @@ RREF = "runtime/world.example.Runtime/x86_64/stable"
 POLICY = FormatPolicy(
     "flatpak",
     trust=TrustPolicy(
-        approved=True,
-        approval_reference="synthetic",
         source_owner="example",
         refs=(REF,),
         runtime=RuntimePolicy(
@@ -147,7 +145,7 @@ def test_compare_rejects_unqualified_version(runtime: Runtime, version: str) -> 
     ],
 )
 def test_requires_explicit_policy(trust: TrustPolicy) -> None:
-    with pytest.raises(flatpak.FlatpakFailure, match="approval"):
+    with pytest.raises(flatpak.FlatpakFailure, match="Flatpak trust requires"):
         flatpak._policy(replace(POLICY, trust=trust))
 
 

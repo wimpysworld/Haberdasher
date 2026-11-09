@@ -84,10 +84,10 @@ replacement policy.
 
 ## Production adapter and remaining gates
 
-`src/haberdasher/formats/rpm.py` implements unsigned-input admission, package signing before indexing, retained XML, output verification, and frozen replay. Already-signed RPMs reject. Trust-policy fields do not qualify upstream signature replacement.
+`src/haberdasher/formats/rpm.py` implements unsigned-input admission, package signing before indexing, retained XML, and output verification. Already-signed RPMs reject. Trust-policy fields do not qualify upstream signature replacement.
 
-`tests/native/test_rpm.py` checks HTTP install/update, dependencies, retained metadata, and strict package/metadata rejection. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and signer-free recovery.
+`tests/native/test_rpm.py` checks HTTP install/update, dependencies, retained metadata, and strict package/metadata rejection. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and a full rerun after an interruption.
 
 Package trust applies globally to the selected RPM database. Metadata trust uses a repository-specific keyring. The pinned librepo client needs pre-seeded metadata trust. See [RPM setup](../clients.md#rpm).
 
-Fedora, RHEL, and openSUSE images, public HTTPS/cache behaviour, real R2 recovery, production keys, and hosted permissions remain unqualified. Use the [activation gates](../validation.md#remaining-activation-gates) before external tests.
+Fedora, RHEL, and openSUSE images, public HTTPS/cache behaviour, real R2 reruns, production keys, and hosted permissions remain unqualified. Use the [activation checks](../validation.md#remaining-activation-checks) before external tests.

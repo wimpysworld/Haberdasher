@@ -159,7 +159,7 @@ def test_production_apt_install_update_and_rejections() -> None:
                 call.args[0][0] in {"dpkg", "dpkg-deb", "apt-ftparchive"}
                 for call in commands.call_args_list
             )
-            with pytest.raises(apt.AptFailure, match="regeneration is required"):
+            with pytest.raises(apt.AptFailure, match="Release expired; rerun"):
                 apt.validate_prepared(
                     initial,
                     policy=config,

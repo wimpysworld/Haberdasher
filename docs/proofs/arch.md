@@ -10,7 +10,7 @@ In the Linux Nix development shell, use an ordinary account:
 just proof arch
 ```
 
-This command now runs the preserved shell proof and `tests/native/test_arch.py`. The historical shell evidence below uses x86_64 Linux. Pacman, repo-add, and vercmp use version
+This command now runs the preserved shell proof and `tests/native/test_arch.py`. The native tests also publish one x86_64 and one aarch64 package in a single generation. A pacman client with `Architecture = aarch64` installs the aarch64 package on the x86_64 host. No aarch64 host or emulation runs the installed files. The historical shell evidence below uses x86_64 Linux. Pacman, repo-add, and vercmp use version
 7.1.0 from this exact Nix build:
 
 ```text
@@ -75,10 +75,10 @@ without re-signing or deletion.
 
 ## Production adapter and remaining gates
 
-`src/haberdasher/formats/arch.py` implements admitted new packages, verified retained archives, signature gates, and exact frozen output. `tests/native/test_arch.py` checks HTTP installation, update, file search, dependencies, and rejection under strict trust.
+`src/haberdasher/formats/arch.py` implements admitted new packages, verified retained archives, and signature gates. `tests/native/test_arch.py` checks HTTP installation, update, file search, dependencies, and rejection under strict trust.
 
-`tests/native/test_pipeline.py` adds real CLI publication, served public keys, fresh/existing clients, no-op, late assets, and recovery without source packages or signing access.
+`tests/native/test_pipeline.py` adds real CLI publication, served public keys, fresh/existing clients, no-op, late assets, and a full rerun after an interruption.
 
 The client `GPGDir` is global to the selected pacman invocation, not a per-repository signer allow-list. [Arch setup](../clients.md#arch) explains the dedicated configuration/root boundary.
 
-Official Arch images, other architectures, public HTTPS/cache behaviour, split-publication availability, and real R2 permissions remain unqualified. Use the [activation gates](../validation.md#remaining-activation-gates) before deployment.
+Official Arch images, other architectures, public HTTPS/cache behaviour, split-publication availability, and real R2 permissions remain unqualified. Use the [activation checks](../validation.md#remaining-activation-checks) before deployment.

@@ -634,7 +634,7 @@ def validate_prepared(
     for output in prepared.outputs:
         ref = output.ref
         if refs.get(ref.key) != ref or sha256_file(output.local_path) != (ref.sha256, ref.size):
-            raise RpmFailure("Frozen RPM output bytes changed")
+            raise RpmFailure("Prepared RPM output bytes changed")
         keys.append(ref.key)
         if ref.object_class == "package":
             _verify_package(

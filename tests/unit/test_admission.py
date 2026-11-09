@@ -218,16 +218,14 @@ def test_signed_inputs_need_explicit_trust(tmp_path: Path, format: str) -> None:
     runtime = Runtime(tmp_path, environ={"PATH": ""})
     item = replace(inspected(tmp_path, format=format), upstream_signature="verified")
     policy = FormatPolicy(format)
-    with pytest.raises(AdmissionFailure, match="explicit trust"):
+    with pytest.raises(AdmissionFailure, match="configured upstream trust"):
         admit(item, (), compare=NativeDouble(), policy=policy, runtime=runtime)
-    trust = TrustPolicy(True, "synthetic approval", True, ("A" * 40,))
+    trust = TrustPolicy(True, ("A" * 40,))
     accepted = admit(
         item, (), compare=NativeDouble(), policy=replace(policy, trust=trust), runtime=runtime
     )
     assert accepted.inspected is item
     for changes in (
-        {"approved": False},
-        {"approval_reference": None},
         {"allow_signed_upstream": False},
         {"upstream_fingerprints": ()},
     ):

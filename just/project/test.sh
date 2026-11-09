@@ -9,7 +9,7 @@ printf '#!/bin/sh\nexit 99\n' >"$fixture/tool"
 chmod +x "$fixture/tool"
 for tool in bash env cat cp mv rm mkdir mktemp chmod sha256sum sort timeout id \
     find xargs grep sed tar gzip xz zstd bsdtar \
-    jq curl openssl gpg gpgv gpgsm gpgconf shellcheck shfmt nixfmt rclone gh just actionlint \
+    jq curl openssl gpg gpgv gpgsm gpgconf cosign shellcheck shfmt nixfmt rclone gh just actionlint \
     python3 tailor-python uv ruff basedpyright aws miniserve; do
     ln -s "$fixture/tool" "$fixture/bin/$tool"
 done
@@ -41,7 +41,7 @@ for system in x86_64-linux aarch64-linux; do
 done
 printf 'PASS: both Linux systems accept all tools without executing them.\n'
 
-for tool in bash openssl gpgsm gpgconf getopt dnf5 fakechroot fakeroot python3 tailor-python uv ruff basedpyright aws miniserve appstreamcli apt-get rpmkeys vercmp update-mime-database; do
+for tool in bash openssl gpgsm gpgconf cosign getopt dnf5 fakechroot fakeroot python3 tailor-python uv ruff basedpyright aws miniserve appstreamcli apt-get rpmkeys vercmp update-mime-database; do
     rm "$fixture/bin/$tool"
     if check x86_64-linux; then
         printf 'FAIL: inherited PATH hid missing %s.\n' "$tool" >&2

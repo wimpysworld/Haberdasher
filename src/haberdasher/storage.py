@@ -41,14 +41,10 @@ class PreconditionFailed(StorageError):
 
 
 class UnknownWrite(StorageError):
-    """The caller must resolve its durable write intent before further writes.
-
-    An observation proves bytes only, not which generation wrote them. Absence
-    does not prove failure: a request can commit after the verification read.
-    """
+    """A write may or may not have committed. The run stops, and a full rerun converges."""
 
     def __init__(self, observation: WriteReceipt | None = None) -> None:
-        super().__init__("Write outcome needs generation evidence before recovery")
+        super().__init__("Write outcome is unknown; rerun the publication")
         self.observation = observation
 
 
@@ -60,11 +56,11 @@ def _check_ref(ref: ObjectRef) -> None:
         raise ValueError("Objects at or above 5 GiB are not supported")
 
 
-def _check_private_read(key: str, max_bytes: int) -> None:
+def _check_read(key: str, max_bytes: int) -> None:
     safe_key(key)
-    integer(max_bytes, "private read limit", 1)
+    integer(max_bytes, "read limit", 1)
     if max_bytes >= MAX_OBJECT_SIZE:
-        raise ValueError("Private read limits at or above 5 GiB are not supported")
+        raise ValueError("Read limits at or above 5 GiB are not supported")
 
 
 def _etag(value: str) -> str:
@@ -142,16 +138,15 @@ def _install(source: Path, destination: Path) -> None:
 class LocalStore:
     """Directory storage for isolated execution, not an R2 emulator.
 
-    Each bucket directory is the process lock, without a public lock file.
-    The inode revision changes with replacement, including identical bytes.
+    A directory flock serialises each request. The inode revision changes
+    with replacement, including identical bytes.
     """
 
     def __init__(self, storage: StoragePolicy) -> None:
-        if storage.backend != "local" or storage.private is None:
-            raise ValueError("Local storage requires a private destination")
+        if storage.backend != "local":
+            raise ValueError("Local storage requires a local destination")
         storage.__post_init__()
         self._roots = {role: Path(path) for role, path in storage.public.items()}
-        self._roots["private"] = Path(storage.private)
         for root in self._roots.values():
             _mkdir(root)
         self._uncertain = False
@@ -160,6 +155,12 @@ class LocalStore:
         _check_ref(ref)
         try:
             return safe_path(self._roots[ref.bucket_role], ref.key)
+        except KeyError:
+            raise ValueError("No destination for this bucket role") from None
+
+    def _root(self, role: str) -> Path:
+        try:
+            return self._roots[role]
         except KeyError:
             raise ValueError("No destination for this bucket role") from None
 
@@ -207,9 +208,9 @@ class LocalStore:
                 _install(temporary, destination)
             return result
 
-    def read_private(self, key: str, *, max_bytes: int) -> tuple[bytes, ObjectStat] | None:
-        _check_private_read(key, max_bytes)
-        root = self._roots["private"]
+    def read(self, role: str, key: str, *, max_bytes: int) -> tuple[bytes, ObjectStat] | None:
+        _check_read(key, max_bytes)
+        root = self._root(role)
         path = safe_path(root, key)
         with contextlib.ExitStack() as stack:
             directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -232,7 +233,7 @@ class LocalStore:
                     raise StorageError("Stored object is not a regular file")
                 before = self._revision(info)
                 if before.size > max_bytes:
-                    raise StorageError("Private object exceeds the read limit")
+                    raise StorageError("Stored object exceeds the read limit")
                 data = stream.read(before.size + 1)
                 after = self._revision(os.fstat(stream.fileno()))
             if (
@@ -240,8 +241,23 @@ class LocalStore:
                 or after != before
                 or self._stat(safe_path(root, key)) != before
             ):
-                raise StorageError("Private object changed during read")
+                raise StorageError("Stored object changed during read")
             return data, before
+
+    def delete(self, role: str, key: str, *, expected_etag: str) -> None:
+        expected_etag = _etag(expected_etag)
+        root = self._root(role)
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            path = safe_path(root, key)
+            current = self._stat(path)
+            if current is None or current.etag != expected_etag:
+                raise PreconditionFailed("Local object precondition failed")
+            path.unlink()
+            _sync_directory(path.parent)
+        finally:
+            os.close(descriptor)
 
     def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
         return self._write(ref, source, None)
@@ -283,11 +299,10 @@ class LocalStore:
 
 class R2Store:
     def __init__(self, storage: StoragePolicy, *, runtime: Runtime) -> None:
-        if storage.backend != "r2" or storage.private is None:
-            raise ValueError("R2 storage requires a private bucket")
+        if storage.backend != "r2":
+            raise ValueError("R2 storage requires R2 buckets")
         storage.__post_init__()
         self._buckets = dict(storage.public)
-        self._buckets["private"] = storage.private
         self._runtime = runtime
         environment = runtime.environment_for("storage")
         if any(not environment.get(name) for name in STORAGE_VARIABLES):
@@ -311,8 +326,11 @@ class R2Store:
 
     def _bucket(self, ref: ObjectRef) -> str:
         _check_ref(ref)
+        return self._role(ref.bucket_role)
+
+    def _role(self, role: str) -> str:
         try:
-            return self._buckets[ref.bucket_role]
+            return self._buckets[role]
         except KeyError:
             raise ValueError("No bucket for this role") from None
 
@@ -414,14 +432,14 @@ class R2Store:
     def replace(self, ref: ObjectRef, source: Path, *, expected_etag: str) -> WriteReceipt:
         return self._write(ref, source, _etag(expected_etag))
 
-    def read_private(self, key: str, *, max_bytes: int) -> tuple[bytes, ObjectStat] | None:
-        _check_private_read(key, max_bytes)
-        bucket = self._buckets["private"]
+    def read(self, role: str, key: str, *, max_bytes: int) -> tuple[bytes, ObjectStat] | None:
+        _check_read(key, max_bytes)
+        bucket = self._role(role)
         before = self._head(bucket, key)
         if before is None:
             return None
         if before.size > max_bytes:
-            raise StorageError("Private object exceeds the read limit")
+            raise StorageError("Stored object exceeds the read limit")
         data = b""
         if before.size:
             with _temporary(self._runtime.root / "tmp") as temporary:
@@ -438,7 +456,7 @@ class R2Store:
                     env_kind="storage",
                 )
                 if result.returncode:
-                    raise StorageError("Native private object read failed")
+                    raise StorageError("Native object read failed")
                 value = self._response(result.stdout)
                 if (
                     self._response_etag(value) != before.etag
@@ -446,14 +464,33 @@ class R2Store:
                     or value["ContentLength"] != before.size
                     or temporary.stat().st_size != before.size
                 ):
-                    raise StorageError("Private object changed during read")
+                    raise StorageError("Stored object changed during read")
                 with temporary.open("rb") as stream:
                     data = stream.read(before.size + 1)
                 if len(data) != before.size:
-                    raise StorageError("Private object changed during read")
+                    raise StorageError("Stored object changed during read")
         if self._head(bucket, key) != before:
-            raise StorageError("Private object changed during read")
+            raise StorageError("Stored object changed during read")
         return data, before
+
+    def delete(self, role: str, key: str, *, expected_etag: str) -> None:
+        expected_etag = _etag(expected_etag)
+        safe_key(key)
+        bucket = self._role(role)
+        current = self._head(bucket, key)
+        if current is None or current.etag != expected_etag:
+            raise PreconditionFailed("Remote object precondition failed")
+        result = self._runtime.run(
+            self._aws("delete-object", {"Bucket": bucket, "Key": key, "IfMatch": expected_etag}),
+            env_kind="storage",
+        )
+        if result.returncode:
+            if re.search(
+                rb"\((?:412|PreconditionFailed)\) when calling the DeleteObject operation",
+                result.stderr,
+            ):
+                raise PreconditionFailed("Remote object precondition failed")
+            raise StorageError("Native object delete failed")
 
     def _observe(self, ref: ObjectRef) -> WriteReceipt | None:
         try:

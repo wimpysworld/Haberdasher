@@ -1,19 +1,17 @@
-"""Read-only planning and explicit publication and recovery commands."""
+"""Read-only planning, explicit publication, and explicit lock release."""
 
 from __future__ import annotations
 
 import argparse
-import os
 import stat
 import sys
-import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from haberdasher import discovery, publish, state
-from haberdasher.config import Policy, StoragePolicy, load_config, load_policy
-from haberdasher.core import FORMATS, canonical_json, safe_key, utc_now
+from haberdasher.config import PRODUCTION_FINGERPRINT, Config, Policy, StoragePolicy, load_config
+from haberdasher.core import FORMATS, canonical_json, utc_now
 from haberdasher.runtime import private_workspace
 from haberdasher.storage import LocalStore, R2Store
 
@@ -21,29 +19,24 @@ from haberdasher.storage import LocalStore, R2Store
 @dataclass
 class Arguments:
     config: Path = Path("haberdasher.yaml")
-    policy_file: Path | None = None
     format: str = "all"
     plan: bool = False
     apply: bool = False
     local_root: Path | None = None
+    signing_fingerprint: str | None = None
     remote: bool = False
-    replay: str | None = None
-    recover_owner: str | None = None
-    recovery_evidence: Path | None = None
+    break_lock: bool = False
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         description="Plan by default. Publication requires an explicit mode and destination.",
         epilog=(
-            "Interrupted replay requires --recover-owner NONCE --recovery-evidence PATH. "
-            "Evidence is schema-version-1 JSON with stopped_owner, requests_resolved, "
-            "reference, runner_identity and writes (ordinal, outcome, etag). "
+            "Rerun --apply to recover from an interrupted run. "
             "Use HD_SIGNING_KEY_FILE locally or HD_SIGNING_KEY in CI."
         ),
     )
     result.add_argument("--config", type=Path, default=Path("haberdasher.yaml"))
-    result.add_argument("--policy-file", type=Path)
     result.add_argument(
         "--format",
         choices=("all", *sorted(FORMATS)),
@@ -56,30 +49,30 @@ def parser() -> argparse.ArgumentParser:
     )
     modes = result.add_mutually_exclusive_group()
     modes.add_argument("--plan", action="store_true", help="discover without storage or signing")
-    modes.add_argument("--apply", action="store_true", help="prepare and publish a generation")
-    modes.add_argument("--replay", metavar="GENERATION", help="publish exact pending frozen bytes")
+    modes.add_argument("--apply", action="store_true", help="publish changes under bucket locks")
+    modes.add_argument(
+        "--break-lock",
+        action="store_true",
+        help="delete existing haberdasher.lock objects after a stopped run, then exit",
+    )
     destination = result.add_mutually_exclusive_group()
     destination.add_argument("--local-root", type=Path, help="explicit disposable storage root")
-    destination.add_argument("--remote", action="store_true", help="require approved R2 policy")
-    result.add_argument(
-        "--recover-owner", metavar="NONCE", help="recover only the named stopped owner"
+    destination.add_argument(
+        "--remote", action="store_true", help="publish to the R2 buckets in the configuration"
     )
     result.add_argument(
-        "--recovery-evidence", type=Path, help="strict JSON evidence, not a force unlock"
+        "--signing-fingerprint",
+        metavar="FINGERPRINT",
+        help="signing key fingerprint for --local-root; --remote always uses the production key",
     )
     return result
 
 
 def _validate(args: Arguments) -> None:
-    if bool(args.recover_owner) != bool(args.recovery_evidence):
-        raise ValueError("Recovery requires both --recover-owner and --recovery-evidence")
-    if args.recover_owner and (args.plan or args.apply):
-        raise ValueError("Recovery cannot be combined with --plan or --apply")
-    mutation = args.apply or args.replay is not None or args.recover_owner is not None
-    if mutation != bool(args.local_root is not None or args.remote):
+    if (args.apply or args.break_lock) != bool(args.local_root is not None or args.remote):
         raise ValueError("Write modes require exactly one of --local-root or --remote")
-    if args.replay is not None and "/" in safe_key(args.replay):
-        raise ValueError("Generation ID must be one path component")
+    if args.signing_fingerprint is not None and args.local_root is None:
+        raise ValueError("--signing-fingerprint requires --local-root")
 
 
 def _checkout_root(path: Path) -> Path | None:
@@ -93,55 +86,51 @@ def _checkout_root(path: Path) -> Path | None:
     return None
 
 
-def _policy(args: Arguments) -> Policy:
-    policy = load_policy(args.policy_file)
-    if args.format != "all" and policy.storage.public:
-        if args.format not in policy.storage.public:
+def _local_root(path: Path) -> Path:
+    root = path.absolute()
+    for parent in (root, *root.parents):
+        if parent.is_symlink():
+            raise ValueError("Local storage must not use symlinks")
+    root = root.resolve()
+    working_path = Path.cwd().resolve()
+    caller_checkout = _checkout_root(working_path) or working_path
+    source_checkout = _checkout_root(Path(__file__).resolve().parent)
+    if (
+        root == Path.home()
+        or root in Path.home().parents
+        or root.is_relative_to(caller_checkout)
+        or (source_checkout is not None and root.is_relative_to(source_checkout))
+        or working_path.is_relative_to(root)
+    ):
+        raise ValueError("Use a disposable local root outside the checkout and home root")
+    return root
+
+
+def _policy(args: Arguments, config: Config, root: Path | None) -> Policy:
+    configured = config.public_formats()
+    if args.format != "all" and configured:
+        if args.format not in configured:
             raise ValueError(
                 f"--format {args.format} is not a configured public format. Use --format all"
             )
-        if set(policy.storage.public) != {args.format}:
+        if set(configured) != {args.format}:
             raise ValueError("Configured public formats form one publication. Use --format all")
-    names = tuple(sorted(policy.storage.public)) or (
-        (args.format,) if args.format != "all" else tuple(sorted(FORMATS))
-    )
-    if args.local_root is not None:
-        if policy.storage.backend != "local":
-            raise ValueError("--local-root cannot override remote storage policy")
-        root = args.local_root.absolute()
-        for parent in (root, *root.parents):
-            if parent.is_symlink():
-                raise ValueError("Local storage must not use symlinks")
-        root = root.resolve()
-        working_path = Path.cwd().resolve()
-        caller_checkout = _checkout_root(working_path) or working_path
-        source_checkout = _checkout_root(Path(__file__).resolve().parent)
-        if (
-            root == Path.home()
-            or root in Path.home().parents
-            or root.is_relative_to(caller_checkout)
-            or (source_checkout is not None and root.is_relative_to(source_checkout))
-            or working_path.is_relative_to(root)
-        ):
-            raise ValueError("Use a disposable local root outside the checkout and home root")
-        policy = replace(
-            policy,
-            storage=StoragePolicy(
-                "local",
-                str(root / "private"),
-                {name: str(root / "public" / name) for name in names},
-            ),
+    names = configured or ((args.format,) if args.format != "all" else tuple(sorted(FORMATS)))
+    if root is not None:
+        return Policy(
+            StoragePolicy("local", {name: str(root / "public" / name) for name in names}),
+            args.signing_fingerprint,
         )
-    elif args.remote:
-        policy.require_remote(names)
-    return policy
-
-
-def _evidence(path: Path) -> state.RecoveryEvidence:
-    with path.open("rb") as stream:
-        data = state.parse(stream.read(state.MAX_CONTROL_BYTES + 1))
-    del data["schema_version"]
-    return state.decode_record(state.RecoveryEvidence, data)
+    if args.remote:
+        if config.storage is None or not configured:
+            raise ValueError("--remote needs a storage bucket for a configured format")
+        policy = Policy(
+            StoragePolicy("r2", {name: config.storage.public[name] for name in configured}),
+            PRODUCTION_FINGERPRINT,
+        )
+        policy.require_remote()
+        return policy
+    return Policy()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -150,17 +139,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     command.parse_args(argv, namespace=args)
     try:
         _validate(args)
-        policy = _policy(args)
-        evidence = _evidence(args.recovery_evidence) if args.recovery_evidence else None
-        config = load_config(args.config) if args.replay is None and evidence is None else None
+        root = _local_root(args.local_root) if args.local_root is not None else None
+        config = load_config(args.config)
+        policy = _policy(args, config, root)
         with private_workspace() as runtime:
-            if not (args.apply or args.replay or evidence):
-                if config is None:
-                    raise ValueError("Plan requires configuration")
+            if not (args.apply or args.break_lock):
                 scan = discovery.scan_releases(
                     config, runtime=runtime, previous=discovery.DiscoveryState()
                 )
-                selected = tuple(sorted(FORMATS)) if args.format == "all" else (args.format,)
+                selected = config.public_formats() or (
+                    tuple(sorted(FORMATS)) if args.format == "all" else (args.format,)
+                )
                 print(
                     canonical_json(
                         {
@@ -179,40 +168,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.remote
                 else LocalStore(policy.storage)
             )
-            if args.apply:
-                if config is None:
-                    raise ValueError("Apply requires configuration")
-                result = publish.reconcile(
-                    config, policy, store=store, runtime=runtime, now=utc_now()
-                )
-                print(canonical_json(result).decode())
+            if args.break_lock:
+                broken = state.break_locks(store, tuple(policy.storage.public))
+                print(canonical_json({"mode": "break-lock", "broken": broken}).decode())
                 return 0
-            frozen = state.pending_generation(store)
-            if args.replay is not None and (frozen is None or frozen.id != args.replay):
-                raise ValueError("Replay must name the pending private generation")
-            if args.replay is None and frozen is not None:
-                completed = state.read_control(store, "completed.json")
-                if (
-                    completed is None
-                    or state.decode_record(state.FrozenGeneration, completed[0].get("generation"))
-                    != frozen
-                ):
-                    raise ValueError("Pending output requires --replay GENERATION with recovery")
-            ownership = (
-                state.recover_owner(
-                    store, expected_nonce=args.recover_owner or "", evidence=evidence
-                )
-                if evidence is not None
-                else state.acquire(store, owner=f"cli:{os.getpid()}:{uuid.uuid4().hex}")
-            )
-            if args.replay is not None and frozen is not None:
-                result = publish.replay(
-                    frozen, store=store, ownership=ownership, runtime=runtime, now=utc_now()
-                )
-                print(canonical_json(result).decode())
-            else:
-                state.release(store, ownership)
-                print(canonical_json({"recovered": True, "released": True}).decode())
+            result = publish.reconcile(config, policy, store=store, runtime=runtime, now=utc_now())
+            print(canonical_json(result).decode())
         return 0
     except (ValueError, OSError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)

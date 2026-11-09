@@ -82,13 +82,11 @@ def _policy(policy: FormatPolicy) -> None:
     trust = policy.trust
     if (
         policy.format != "flatpak"
-        or not trust.approved
-        or not trust.approval_reference
         or not trust.source_owner
         or not trust.refs
         or trust.runtime is None
     ):
-        raise FlatpakFailure("Explicit Flatpak source, ref and runtime approval is required")
+        raise FlatpakFailure("Flatpak trust requires a source owner, refs and a runtime")
     runtime = trust.runtime
     for ref in trust.refs:
         match = _REF.fullmatch(ref)
@@ -581,13 +579,13 @@ def validate_prepared(
     order = -1
     for ordinal, output in enumerate(prepared.outputs):
         if objects.get(output.ref.key) != output.ref or output.ref.key not in files:
-            raise FlatpakFailure("Output differs from the frozen object manifest")
+            raise FlatpakFailure("Output differs from the prepared object manifest")
         rank = _classify(output.ref.key)[2]
         if (
             output.ordinal != ordinal
             or rank < order
             or sha256_file(output.local_path) != (output.ref.sha256, output.ref.size)
         ):
-            raise FlatpakFailure("Frozen output bytes or publication order changed")
+            raise FlatpakFailure("Prepared output bytes or publication order changed")
         order = rank
     validate_retained(prepared.retained, policy=policy, runtime=runtime)

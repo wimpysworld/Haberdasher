@@ -91,36 +91,61 @@ def test_native_unknown_outcome_no_retry(
 
 
 @pytest.mark.parametrize("truncate", [False, True])
-def test_native_bounded_private_read(isolated_root: Path, client_path: str, truncate: bool) -> None:
+def test_native_bounded_read(isolated_root: Path, client_path: str, truncate: bool) -> None:
     with storage_http() as server:
         key = "control/object with space+percent%"
-        data = b"private control bytes\x00\xff"
-        etag = '"private-revision"'
-        server.objects[f"/test-private/{key}"] = data, etag
-        server.objects[f"/test-public/{key}"] = b"public bytes", '"public-revision"'
+        data = b"inventory bytes\x00\xff"
+        etag = '"rpm-revision"'
+        server.objects[f"/test-rpm/{key}"] = data, etag
+        server.objects[f"/test-public/{key}"] = b"other bucket bytes", '"apt-revision"'
         server.truncate_get = truncate
         runtime = Runtime(
             isolated_root, environ=synthetic_environment(server.endpoint, client_path)
         )
         try:
             store = R2Store(remote_policy(), runtime=runtime)
-            assert store.read_private("absent", max_bytes=10) is None
+            assert store.read("rpm", "absent", max_bytes=10) is None
             with pytest.raises(StorageError, match="read limit"):
-                store.read_private(key, max_bytes=len(data) - 1)
+                store.read("rpm", key, max_bytes=len(data) - 1)
             assert not any(method == "GET" for method, *_ in server.requests)
             if truncate:
                 with pytest.raises(StorageError):
-                    store.read_private(key, max_bytes=len(data))
+                    store.read("rpm", key, max_bytes=len(data))
             else:
-                result = store.read_private(key, max_bytes=len(data))
+                result = store.read("rpm", key, max_bytes=len(data))
                 assert result is not None
                 assert result[0] == data
                 assert result[1].etag == etag
                 assert result[1].size == len(data)
             gets = [request for request in server.requests if request[0] == "GET"]
-            assert gets == [("GET", f"/test-private/{key}", etag, None)]
-            assert all(path.startswith("/test-private/") for _, path, *_ in server.requests)
+            assert gets == [("GET", f"/test-rpm/{key}", etag, None)]
+            assert all(path.startswith("/test-rpm/") for _, path, *_ in server.requests)
             assert not list((runtime.root / "tmp").glob(".hd-store-*"))
+        finally:
+            runtime.close()
+
+
+def test_native_conditional_delete(isolated_root: Path, client_path: str) -> None:
+    with storage_http() as server:
+        runtime = Runtime(
+            isolated_root, environ=synthetic_environment(server.endpoint, client_path)
+        )
+        try:
+            store = R2Store(remote_policy(), runtime=runtime)
+            server.objects["/test-rpm/haberdasher.lock"] = b"lock", '"revision-2"'
+            server.stale_delete = True
+            with pytest.raises(PreconditionFailed):
+                store.delete("rpm", "haberdasher.lock", expected_etag='"revision-2"')
+            changed = '"revision-2-changed"'
+            assert server.objects["/test-rpm/haberdasher.lock"] == (b"lock", changed)
+            server.stale_delete = False
+            store.delete("rpm", "haberdasher.lock", expected_etag=changed)
+            assert "/test-rpm/haberdasher.lock" not in server.objects
+            deletes = [request for request in server.requests if request[0] == "DELETE"]
+            assert deletes == [
+                ("DELETE", "/test-rpm/haberdasher.lock", '"revision-2"', None),
+                ("DELETE", "/test-rpm/haberdasher.lock", changed, None),
+            ]
         finally:
             runtime.close()
 
