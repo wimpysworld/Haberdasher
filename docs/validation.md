@@ -63,7 +63,7 @@ The publish step runs `just publish`. It reads sources from the committed `haber
 
 ## Production checks
 
-Keep `HD_PUBLISH_ENABLED` unset until every check in this list is done. Use publisher credentials for the R2 checks, not the administration token. A read-only credential check does not prove write or CI permissions.
+Keep `HD_PUBLISH_ENABLED` unset until every check in this list is done, except while you test hosted execution. Unset it again after that test. Use publisher credentials for the R2 checks, not the administration token. A read-only credential check does not prove write or CI permissions.
 
 To do:
 
