@@ -936,27 +936,41 @@ def test_local_upload_overwrites_an_unreferenced_leftover(tmp_path: Path) -> Non
     assert (tmp_path / "public/apt/pool/package-1.deb").read_bytes() == b"package 1"
 
 
-def test_rclone_stats_collapse_a_stall_and_a_repeated_total() -> None:
-    recorded = [
-        "4.685 KiB / 4.685 KiB, 100%, 4.684 KiB/s, ETA 0s",
-        "4.685 KiB / 4.685 KiB, 100%, 0 B/s, ETA -",
-        "138.106 MiB / 204.513 MiB, 68%, 156.941 KiB/s, ETA 7m13s",
-        "138.106 MiB / 204.513 MiB, 68%, 82.310 KiB/s, ETA 13m46s",
-        "138.106 MiB / 204.513 MiB, 68%, 1.204 KiB/s, ETA 2y47w2d",
-        "150.000 MiB / 204.513 MiB, 73%, 1.183 MiB/s, ETA 46s",
-        "204.513 MiB / 204.513 MiB, 100%, 10.512 MiB/s, ETA 0s",
-        "204.513 MiB / 204.513 MiB, 100%, 0 B/s, ETA -",
-    ]
+def _recorded_stats(recorded: Sequence[str]) -> list[str]:
     lines: list[str] = []
     report = storage._stats(lines.append)  # pyright: ignore[reportPrivateUsage]
     report("2026/11/09 10:00:00 INFO  : pool/a.deb: Copied (new)")
     for line in recorded:
         report(f"2026/11/09 10:00:00 NOTICE: {line}\n")
-    assert lines == [
+    return lines
+
+
+def test_rclone_stats_omit_a_fast_upload() -> None:
+    assert _recorded_stats(["800 B / 800 B, 100%, 0 B/s, ETA -"]) == []
+    assert _recorded_stats(["10.472 MiB / 10.472 MiB, 100%, 10.471 MiB/s, ETA 0s"]) == []
+
+
+def test_rclone_stats_show_a_slow_upload_without_the_final_line() -> None:
+    recorded = [
+        "52.000 MiB / 204.513 MiB, 25%, 5.200 MiB/s, ETA 29s",
+        "150.000 MiB / 204.513 MiB, 73%, 9.800 MiB/s, ETA 5s",
+        "204.513 MiB / 204.513 MiB, 100%, 10.512 MiB/s, ETA 0s",
+        "204.513 MiB / 204.513 MiB, 100%, 0 B/s, ETA -",
+    ]
+    assert _recorded_stats(recorded) == recorded[:2]
+
+
+def test_rclone_stats_collapse_a_stall_and_resume() -> None:
+    recorded = [
+        "138.106 MiB / 204.513 MiB, 68%, 156.941 KiB/s, ETA 7m13s",
+        "138.106 MiB / 204.513 MiB, 68%, 82.310 KiB/s, ETA 13m46s",
+        "138.106 MiB / 204.513 MiB, 68%, 1.204 KiB/s, ETA 2y47w2d",
+        "150.000 MiB / 204.513 MiB, 73%, 1.183 MiB/s, ETA 46s",
+        "204.513 MiB / 204.513 MiB, 100%, 10.512 MiB/s, ETA 0s",
+    ]
+    assert _recorded_stats(recorded) == [
         recorded[0],
-        recorded[2],
         "upload stalled, waiting",
         "upload resumed",
-        recorded[5],
-        recorded[6],
+        recorded[3],
     ]

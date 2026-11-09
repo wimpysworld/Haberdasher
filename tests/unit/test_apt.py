@@ -5,7 +5,7 @@ import hashlib
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from email.utils import format_datetime
 from functools import partial
 from pathlib import Path
@@ -417,12 +417,10 @@ def retained_history(
         )
     indexes = _indexes(history, config)
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    expiry = now + timedelta(seconds=config.validity_seconds)
     release = (
         f"Suite: {config.suite}\nCodename: {config.suite}\nComponents: {config.component}\n"
         f"Architectures: {' '.join(config.architectures)}\nAcquire-By-Hash: yes\n"
-        f"Date: {format_datetime(now, usegmt=True)}\n"
-        f"Valid-Until: {format_datetime(expiry, usegmt=True)}\nSHA256:\n"
+        f"Date: {format_datetime(now, usegmt=True)}\nSHA256:\n"
     )
     for key, data in indexes.items():
         sha = hashlib.sha256(data).hexdigest()
@@ -454,7 +452,6 @@ def retained_history(
             "keyring": str(keyring),
             "keyring_sha256": sha256_file(keyring)[0],
             "fingerprint": "A" * 40,
-            "expires_at": expiry.isoformat(),
         },
         tuple(refs),
     )

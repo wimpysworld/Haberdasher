@@ -23,7 +23,6 @@ from yaml.nodes import MappingNode, Node
 from haberdasher.core import (
     Record,
     format_name,
-    integer,
     repository_name,
     text,
 )
@@ -103,8 +102,6 @@ class FormatPolicy(Record):
     architectures: tuple[str, ...] = ("x86_64",)
     suite: str = "stable"
     component: str = "main"
-    validity_seconds: int = 604800
-    renewal_seconds: int = 172800
 
     def __post_init__(self) -> None:
         format_name(self.format)
@@ -114,10 +111,6 @@ class FormatPolicy(Record):
             _token(architecture)
         _token(self.suite)
         _token(self.component)
-        integer(self.validity_seconds, "validity", 1)
-        integer(self.renewal_seconds, "renewal", 1)
-        if self.validity_seconds > 31 * 86400 or self.renewal_seconds >= self.validity_seconds:
-            raise ValueError("Invalid validity or renewal window")
 
 
 # Bucket and public URL for each format. Plans read the URL; publication writes the bucket.

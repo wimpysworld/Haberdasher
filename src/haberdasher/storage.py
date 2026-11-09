@@ -94,8 +94,10 @@ def _verify(ref: ObjectRef, source: Path) -> None:
 def _stats(progress: Report) -> Report:
     """Pass on the periodic `rclone` statistics lines of one run, without their log prefix.
 
-    A line whose byte count repeats the previous one is suppressed. At less than 100%
-    the first such line reports a stall, and the next changed count reports the resume.
+    A complete transfer prints no statistics, so a run that ends before the first
+    10 second interval prints nothing. A line whose byte count repeats the previous
+    one is suppressed. At less than 100% the first such line reports a stall, and the
+    next changed count reports the resume.
     """
     previous: str | None = None
     stalled = False
@@ -116,7 +118,8 @@ def _stats(progress: Report) -> Report:
         if stalled:
             stalled = False
             progress("upload resumed")
-        progress(stats)
+        if done != total:
+            progress(stats)
 
     return report
 

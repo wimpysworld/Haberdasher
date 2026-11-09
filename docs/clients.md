@@ -45,7 +45,7 @@ Signed-By: /etc/apt/keyrings/haberdasher.gpg
 
 The publisher uses suite `stable` and component `main`, and indexes `amd64` and `arm64`. Set `Architectures` to the client architecture. The native fixture uses `stable/main/amd64`. The deb822 form expresses the same scoped Signed-By trust.
 
-Then use ordinary `apt-get update`, `apt-get install PACKAGE`, and `apt-get install --only-upgrade PACKAGE`. Keep signature, date, and `Valid-Until` checks enabled. Do not use `apt-key`, global trust, or `trusted=yes`.
+Then use ordinary `apt-get update`, `apt-get install PACKAGE`, and `apt-get install --only-upgrade PACKAGE`. Keep signature and date checks enabled. The `Release` file has no `Valid-Until`, so it does not expire. Do not use `apt-key`, global trust, or `trusted=yes`.
 
 APT verifies signed repository metadata, not signatures on individual DEBs. Immutable pool and by-hash objects support delayed clients.
 
@@ -74,7 +74,15 @@ The production adapter removes upstream RPM signatures with `rpmsign --delsign`,
 
 ## Arch
 
-Verify the public export from `https://pkg.wimpys.world/keys/haberdasher.gpg`. Initialise a dedicated GnuPG directory and import only that key. Set owner trust only after independent fingerprint verification.
+Verify the public export from `https://pkg.wimpys.world/keys/haberdasher.gpg`. Initialise a dedicated GnuPG directory and import only that key. Set owner trust only after independent fingerprint verification. Without owner trust, pacman fails with `unknown trust`.
+
+```sh
+sudo install -d -m 0700 /etc/pacman.d/haberdasher-gnupg
+curl -fsSL https://pkg.wimpys.world/keys/haberdasher.gpg \
+  | sudo gpg --homedir /etc/pacman.d/haberdasher-gnupg --import
+echo 'B39939A127C7A8D338F53A3AE132098A87DB88E0:6:' \
+  | sudo gpg --homedir /etc/pacman.d/haberdasher-gnupg --import-ownertrust
+```
 
 Use these settings in the selected pacman configuration. Set `Architecture` to `x86_64` or `aarch64`. Each architecture has its own signed `haberdasher` database under `$arch`.
 

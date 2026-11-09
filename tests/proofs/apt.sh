@@ -94,7 +94,7 @@ import_asset() {
 
 generation=0
 freeze() {
-    local expiry=$2 frozen="$w/frozen-$1" index digest file
+    local frozen="$w/frozen-$1" index digest file
     generation=$((generation + 1))
     mkdir -p "$frozen/dists/proof/main/binary-amd64" "$frozen/pool"
     index="$frozen/dists/proof/main/binary-amd64"
@@ -116,7 +116,6 @@ freeze() {
         -o APT::FTPArchive::Release::Architectures=amd64 \
         -o APT::FTPArchive::Release::Components=main \
         -o APT::FTPArchive::Release::Acquire-By-Hash=yes release .) >"$frozen/dists/proof/Release"
-    printf 'Valid-Until: %s\n' "$expiry" >>"$frozen/dists/proof/Release"
     for file in InRelease Release.gpg; do
         if [[ $file == InRelease ]]; then
             gpg --batch --yes --digest-algo SHA256 --local-user "$PROOF_FPR" --clearsign \
@@ -301,8 +300,7 @@ cp "$w/state/assets" "$w/accepted-assets"
 reject 'Changed bytes at the same identity' import_asset "$w/input/conflict.deb" "$(sha "$w/input/conflict.deb")"
 reject 'Native-equivalent 1.0-0 identity' import_asset "$w/input/equivalent.deb" "$(sha "$w/input/equivalent.deb")"
 same_bytes "$w/accepted-assets" "$w/state/assets"
-expiry=$(date -u -d '+1 day' -R)
-freeze 1 "$expiry"
+freeze 1
 publish "$w/frozen-1" "$w/http/live"
 cp "$w/frozen-1/inventory" "$w/state/history"
 cp -a "$w/http/live" "$w/base"
@@ -328,7 +326,8 @@ if cat "$w/http/live/pool/$v1.deb" >/dev/null 2>&1; then
     proof_fail 'Publisher can still open the old public DEB.'
 fi
 import_asset "$w/input/v2.deb" "$v2"
-freeze 2 "$expiry"
+freeze 2
+grep -q '^Valid-Until:' "$w/frozen-2/dists/proof/Release" && proof_fail 'Release has Valid-Until.'
 same_bytes "$w/old-record" "$w/state/records/$v1"
 cat "$w/state/records/$v1" "$w/state/records/$v2" >"$w/expected-packages"
 same_bytes "$w/expected-packages" "$w/frozen-2/dists/proof/main/binary-amd64/Packages"
@@ -395,13 +394,6 @@ apt_run update
 reject 'Tampered package bytes' apt_run install -y haberdasher-proof
 grep -q 'Hash Sum mismatch' "$w/rejection.log"
 not_installed
-freeze expired "$(date -u -d '-1 day' -R)"
-cp -a "$w/http/live" "$w/http/expired"
-publish "$w/frozen-expired" "$w/http/expired"
-client expired expired
-reject 'Expired signed Release' apt_run update
-grep -q 'is expired' "$w/rejection.log"
-reject_install
 same_bytes "$w/accepted-inventory" "$w/http/live/inventory"
 (cd "$w/http/live" && sha256sum -c inventory) >/dev/null
 proof_pass 'Client rejection cases left the accepted publication unchanged'
@@ -419,7 +411,7 @@ reject 'Invalid signature despite matching frozen checksums' publish "$w/broken-
 same_bytes "$w/accepted-inventory" "$w/http/live/inventory"
 chmod 000 "$w/input" "$w/publisher" "$w/build" "$w/state"
 prepared_signatures=$(grep -Ec -- '--clearsign|--detach-sign' "$w/signatures")
-[[ $prepared_signatures == 6 ]] || proof_fail 'Expected six native signing invocations during preparation.'
+[[ $prepared_signatures == 4 ]] || proof_fail 'Expected four native signing invocations during preparation.'
 : >"$w/signer-frozen"
 cp "$w/signatures" "$w/signatures-before"
 (cd "$w/frozen-2" && sha256sum control.sha256) >"$w/frozen-before"

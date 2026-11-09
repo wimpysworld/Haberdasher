@@ -144,33 +144,8 @@ def test_production_apt_install_update_and_rejections() -> None:
             assert [call.args[0][0] for call in commands.call_args_list] == ["gpgv", "gpgv"]
             assert not unchanged.outputs and unchanged.retained is retained
             assert not (runtime.root / "unused").exists()
-            renewal_time = now + timedelta(seconds=config.validity_seconds - config.renewal_seconds)
-            with patch.object(runtime, "run", wraps=runtime.run) as commands:
-                renewed = apt.prepare(
-                    [],
-                    retained,
-                    policy=config,
-                    runtime=runtime,
-                    signer=signer,
-                    now=renewal_time,
-                    out=runtime.root / "renewal",
-                )
-            assert [item.ref.key for item in renewed.outputs] == [
-                "dists/stable/Release",
-                "dists/stable/Release.gpg",
-                "dists/stable/InRelease",
-            ]
-            assert not any(
-                call.args[0][0] in {"dpkg", "dpkg-deb", "apt-ftparchive"}
-                for call in commands.call_args_list
-            )
-            with pytest.raises(apt.AptFailure, match="Release expired; rerun"):
-                apt.validate_prepared(
-                    initial,
-                    policy=config,
-                    runtime=runtime,
-                    now=now + timedelta(seconds=config.validity_seconds),
-                )
+            for name in ("Release", "InRelease"):
+                assert b"Valid-Until" not in (live / "dists/stable" / name).read_bytes()
             with serve(http_root) as server:
                 client = Client(runtime, "normal", server.url("live"), key.public_file)
                 client.apt("update")
@@ -215,7 +190,7 @@ def test_production_apt_install_update_and_rejections() -> None:
                 for item in initial.retained.objects:
                     if item.object_class in {"package", "dependency"}:
                         assert item in updated.referenced_objects
-                retained_two = publish(updated, live, 2)
+                publish(updated, live, 2)
                 client.apt("update")
                 client.apt("upgrade", "-y")
                 client.installed("hd-application", "1:2.0", "second")
@@ -295,42 +270,40 @@ def test_production_apt_install_update_and_rejections() -> None:
                     bad.apt("update", succeeds=name == "package")
                     bad.apt("install", "-y", "hd-application", succeeds=False)
                     bad.not_installed("hd-application")
-                expired = apt.prepare(
+                old_date = apt.prepare(
                     [accepted],
                     empty,
                     policy=config,
                     runtime=runtime,
                     signer=signer,
-                    now=now - timedelta(days=8),
-                    out=runtime.root / "expired-generation",
+                    now=now - timedelta(days=400),
+                    out=runtime.root / "old-generation",
                 )
-                publish(expired, http_root / "expired", 3)
-                bad = Client(runtime, "expired", server.url("expired"), key.public_file)
-                assert b"expired" in bad.apt("update", succeeds=False)
-                bad.apt("install", "-y", "hd-application", succeeds=False)
-                bad.not_installed("hd-application")
+                publish(old_date, http_root / "old", 3)
+                aged = Client(runtime, "old", server.url("old"), key.public_file)
+                aged.apt("update")
                 with patch.object(
                     signer, "sign_file", side_effect=SigningFailure("injected failure")
                 ):
                     with pytest.raises(SigningFailure):
                         apt.prepare(
-                            [],
-                            retained_two,
+                            [accepted],
+                            retained,
                             policy=config,
                             runtime=runtime,
                             signer=signer,
-                            now=renewal_time,
+                            now=now,
                             out=runtime.root / "failed-signing",
                         )
                 with patch.object(signer, "sign_file", return_value=None):
                     with pytest.raises((ValueError, OSError)):
                         apt.prepare(
-                            [],
-                            retained_two,
+                            [accepted],
+                            retained,
                             policy=config,
                             runtime=runtime,
                             signer=signer,
-                            now=renewal_time,
+                            now=now,
                             out=runtime.root / "missing-signature",
                         )
                 fetched = server.requests()

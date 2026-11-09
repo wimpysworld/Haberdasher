@@ -371,7 +371,6 @@ class PreparedFormat(Record):
     retained: RetainedFormat
     outputs: tuple[OutputObject, ...]
     referenced_objects: tuple[ObjectRef, ...]
-    expires_at: str | None = None
 
     def __post_init__(self) -> None:
         format_name(self.format)
@@ -391,8 +390,6 @@ class PreparedFormat(Record):
         for ref in self.referenced_objects:
             if not isinstance(ref, ObjectRef) or ref.bucket_role != self.format:
                 raise ValueError("Invalid referenced public object")
-        if self.expires_at is not None:
-            timestamp(self.expires_at)
 
 
 @dataclass(frozen=True)

@@ -8,7 +8,7 @@ import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -216,14 +216,14 @@ def _duration(seconds: float) -> str:
 
 
 def _unchanged(published: Published) -> PreparedFormat:
-    expiry = published.retained.metadata.get("expires_at")
-    return PreparedFormat(
-        published.format,
-        published.retained,
-        (),
-        published.retained.objects,
-        expiry if isinstance(expiry, str) else None,
-    )
+    return PreparedFormat(published.format, published.retained, (), published.retained.objects)
+
+
+def has_expiry(published: Published) -> bool:
+    """Whether published APT metadata still has Valid-Until, so a run must rewrite it."""
+    from haberdasher.formats import apt
+
+    return published.format == "apt" and apt.has_expiry(published.retained)
 
 
 def reconcile(
@@ -284,15 +284,7 @@ def _reconcile(
     if scan is None:
         scan = discovery.scan_releases(config, runtime=runtime, report=report)
     changed = new_assets(scan, published)
-    renew: set[str] = set()
-    if "apt" in published and published["apt"].retained.metadata:
-        expiry = published["apt"].retained.metadata.get("expires_at")
-        if not isinstance(expiry, str):
-            raise StateError("Published APT state lacks expiry")
-        if datetime.fromisoformat(expiry) - now <= timedelta(
-            seconds=policies["apt"].renewal_seconds
-        ):
-            renew.add("apt")
+    renew = {name for name in names if has_expiry(published[name])}
     if "flatpak" in published and published["flatpak"].retained.metadata:
         from haberdasher.formats import flatpak
 
@@ -328,6 +320,8 @@ def _reconcile(
                     name,
                     f"preparing {plural(len(changed[name]), 'new package')}"
                     if changed[name]
+                    else "refreshing metadata without Valid-Until"
+                    if name == "apt"
                     else "renewing metadata",
                 )
                 prepared.append(
@@ -386,12 +380,6 @@ def _reconcile(
             for output in outputs:
                 if output in batch:
                     continue
-                if (
-                    output.ref.object_class == "entry"
-                    and item.expires_at is not None
-                    and datetime.fromisoformat(item.expires_at) <= utc_now()
-                ):
-                    raise StateError("APT metadata expired before publication; rerun")
                 step(report, item.format, f"  {output.ref.key} ({_size(output.ref.size)})")
                 _write(store, output)
                 count += 1

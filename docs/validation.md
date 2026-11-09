@@ -71,14 +71,14 @@ To do:
 - [ ] Real R2: test lock conflicts, conditional replace and delete, and exact ETags against disposable buckets.
 - [ ] Hosted execution: set the CI secrets, `HD_PUBLISH_ENABLED`, and the `publisher` environment protection, then test hosted permissions.
 - [ ] Public delivery: test HTTPS, content types, cache headers, delayed clients, and split entry/signature reads on the live domains.
-- [ ] APK: test real packages with Alpine clients.
-- [ ] Flatpak: install a real bundle from the public bucket, with its runtime from Flathub.
+- [ ] Live APT metadata: run `just publish` once to rewrite `dists/stable/Release` and `InRelease` without `Valid-Until`, before Mon, 16 Nov 2026 14:26:57 GMT.
 - [ ] Distribution clients: test official images for each format, including `arm64` APT and `aarch64` packages, separately from the pinned Nix clients.
 
 Done:
 
 - [x] Real R2 publication with publisher credentials: conditional lock writes, lock release, and parallel `rclone` uploads with size and MD5 checks.
 - [x] Real R2 recovery after a network interruption during upload: the first full publish on 2026-11-09 completed after a router restart stalled the APT upload for about 3 minutes.
+- [x] Live installs with signature checks on, using the pinned Nix clients in private roots: Tailor 0.6.0 with APT, DNF5, pacman, and apk on x86_64, with `tailor --version` from each; arm64 and aarch64 packages downloaded and verified for every format; Sidra 1.3.0 from its `.flatpakref`, with the runtime from Flathub. Served packages match the upstream assets byte for byte, except where Haberdasher signs them.
 - [x] Production signing: `just publish` matched the production key to `PRODUCTION_FINGERPRINT` and signed all five formats.
 - [x] Real inputs: the latest Tailor and Sidra releases published to all five repositories.
 - [x] Domain activation: each custom domain is attached to its bucket, with SSL and ownership `active` and `r2.dev` access off.

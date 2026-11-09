@@ -35,10 +35,8 @@ GnuPG signs `Release` with SHA256 as `InRelease` and detached armoured
 `Release.gpg`. APT verifies both entry forms with scoped `signed-by` trust,
 without global trust or disabled checks.
 
-`Release` declares `Acquire-By-Hash: yes` and SHA256 checksums. The proof
-sets `Valid-Until` to preparation time plus one day. Date and expiry checks
-stay enabled. Signed metadata expired by one day is rejected. This is a
-local expiry decision, not a production refresh policy.
+`Release` declares `Acquire-By-Hash: yes` and SHA256 checksums. It has a
+`Date` and no `Valid-Until`, so it does not expire. Date checks stay enabled.
 
 ## Native client evidence
 
@@ -49,10 +47,9 @@ After generation two, a delayed client uses the old `InRelease`. The server
 records its exact old SHA256 by-hash index request. Installation selects
 version one. Immutable pool and by-hash objects stay available.
 
-Missing trust, wrong trust, altered `InRelease`, corrupt index, corrupt
-package, and expired metadata each reject installation. All six clients
-retain no installed dpkg state or payload. Rejection leaves the accepted
-publication unchanged.
+Missing trust, wrong trust, altered `InRelease`, corrupt index, and corrupt
+package each reject installation. All five clients retain no installed dpkg
+state or payload. Rejection leaves the accepted publication unchanged.
 
 ## Frozen retry and cleanup
 
@@ -80,10 +77,10 @@ cache behaviour, remote recovery, or crash durability.
 
 ## Publisher adapter
 
-`src/haberdasher/formats/apt.py` uses admitted new inputs and retained package records. It signs both Release forms and publishes immutable by-hash dependencies before entries. Default validity is seven days, with renewal within two days, set in code.
+`src/haberdasher/formats/apt.py` uses admitted new inputs and retained package records. It signs both Release forms and publishes immutable by-hash dependencies before entries. `Release` has no `Valid-Until`.
 
-`tests/native/test_apt.py` covers HTTP install/update, strict rejection, delayed by-hash clients, retained records, and expiry. `tests/native/test_pipeline.py` adds real CLI publication, served-key trust, late assets, no-op, and a full rerun after an interruption.
+`tests/native/test_apt.py` covers HTTP install/update, strict rejection, delayed by-hash clients, retained records, and a `Release` with an old `Date`. `tests/native/test_pipeline.py` adds real CLI publication, served-key trust, late assets, no-op, and a full rerun after an interruption.
 
-A run renews APT metadata inside the renewal window and rejects expired metadata before it writes entries.
+When the published `Release` has a `Valid-Until` from an earlier version, the next run signs it again without that field, writes only the entry metadata and `haberdasher.json`, and `just plan` reports the pending refresh. Later runs without new packages write nothing.
 
 See [client setup](../clients.md#apt) for the client configuration.

@@ -21,7 +21,7 @@ Haberdasher derives every other setting:
 | Format | Asset suffix: `.deb` APT, `.rpm` RPM, `.pkg.tar.zst` and `.pkg.tar.xz` Arch, `.apk` Alpine, `.flatpak` Flatpak. Native inspection confirms the type. Other assets are ignored. |
 | Architecture | Package metadata, never the file name |
 | Bucket and public URL | The `PUBLIC` table in `src/haberdasher/config.py` |
-| APT suite, component, and validity | Code defaults: `stable`, `main`, seven days, renewal within two days |
+| APT suite and component | Code defaults: `stable` and `main`. `Release` has a `Date` and no `Valid-Until`. |
 | Upstream signatures | Not checked. RPM inputs lose upstream signatures before Haberdasher signs them. APK inputs lose their `.SIGN.*` stream. Arch ignores release `.sig` assets. APT publishes `.deb` packages unchanged. Flatpak commits lose their detached upstream signatures. |
 
 A `.flatpak` bundle supplies its own settings. The application ref gives the app ID, architecture, and branch. The application metadata gives the runtime. The bundle's `runtime-repo` gives the runtime repository, or Flathub (`https://dl.flathub.org/repo/flathub.flatpakrepo`) when the bundle has none. All applications go into one OSTree repository, with `wimpysworld.flatpakrepo` and one `<app-id>.flatpakref` per application at its root. The `.flatpakref` file takes its `Title` from the AppStream name and its `RuntimeRepo` from the bundle. A run fails when bundles name different runtime repositories, because `wimpysworld.flatpakrepo` holds one `RuntimeRepo`. When published state lacks a `.flatpakref` file for an application, the next run adds it without a new bundle.
@@ -113,7 +113,7 @@ apt     pool/main/s/sidra/sidra_1.3.0_amd64.deb (104 MB)
 apt   138.106 MiB / 204.513 MiB, 68%, 156.941 KiB/s, ETA 7m13s
 apt   upload stalled, waiting
 apt   upload resumed
-apt   204.513 MiB / 204.513 MiB, 100%, 10.512 MiB/s, ETA 0s
+apt   182.400 MiB / 204.513 MiB, 89%, 9.871 MiB/s, ETA 2s
 apt   uploaded 10 objects in 5m11s
 apt     dists/stable/main/binary-amd64/Packages (2 KB)
 ...
@@ -131,7 +131,7 @@ apt   unlocked
 Published 72 packages to 4 repositories.
 ```
 
-Each upload lists every object by key and size before `rclone` starts. Flatpak lists OSTree `objects/` as one line. Each metadata line names the key before its write. `rclone` reports progress every 10 seconds. When the byte count does not change, one `upload stalled, waiting` line replaces the repeated progress lines until the upload continues.
+Each upload lists every object by key and size before `rclone` starts. Flatpak lists OSTree `objects/` as one line. Each metadata line names the key before its write. `rclone` reports progress every 10 seconds while an upload runs. An upload that ends within 10 seconds prints no progress lines, and no upload prints the final total. When the byte count does not change, one `upload stalled, waiting` line replaces the repeated progress lines until the upload continues.
 
 When nothing is new, each format prints `unchanged` and the summary is `Nothing changed in 4 repositories.`
 
@@ -157,7 +157,7 @@ APT places each package at `pool/main/<prefix>/<source>/<package>_<version>_<arc
 
 `discovery.py` scans the latest release of each source and its assets, including assets added to that release later. Assets without a matching release checksum are skipped. Admission verifies source SHA256 before native import and rejects changed bytes under equivalent native identities.
 
-Each bucket's public `haberdasher.json` is the publication state for its format. It holds the inventory allow-list (package identity, source, published digests, and referenced objects) and the accepted history and metadata keys that the native adapter needs. There is no private state bucket. A run reads each inventory first. An asset whose bytes are already in the inventory needs no download. When a format changes, the run downloads only the published metadata that the inventory references, not the package pool. Unchanged runs avoid package downloads, inspection, indexing, and signing, and write nothing except the locks. APT renews metadata within its renewal window. Flatpak restoration downloads only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. `flatpak build-update-repo` needs those AppStream paths to keep unchanged applications in the AppStream catalogue. Payload files and earlier commits stay published and are not downloaded again.
+Each bucket's public `haberdasher.json` is the publication state for its format. It holds the inventory allow-list (package identity, source, published digests, and referenced objects) and the accepted history and metadata keys that the native adapter needs. There is no private state bucket. A run reads each inventory first. An asset whose bytes are already in the inventory needs no download. When a format changes, the run downloads only the published metadata that the inventory references, not the package pool. Unchanged runs avoid package downloads, inspection, indexing, and signing, and write nothing except the locks. When the published APT `Release` has a `Valid-Until` from an earlier version, the next run signs it again without that field and does not upload packages. Flatpak restoration downloads only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. `flatpak build-update-repo` needs those AppStream paths to keep unchanged applications in the AppStream catalogue. Payload files and earlier commits stay published and are not downloaded again.
 
 Both OpenPGP exports appear in every published bucket. The native APK public key appears only with the first APK index. An empty APK bucket does not claim native APK trust. Changed public export bytes reject even when the fingerprint stays unchanged. Key rotation is not supported.
 

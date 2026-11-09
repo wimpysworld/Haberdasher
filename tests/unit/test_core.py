@@ -66,7 +66,7 @@ def test_records(tmp_path: Path) -> None:
     asset = admitted(tmp_path / "package.deb")
     output = OutputObject(ref(), tmp_path / "package.deb", "create", None, 0)
     retained = RetainedFormat("apt", None, (asset,), (asset.inspected.identity,), {}, (ref(),))
-    prepared = PreparedFormat("apt", retained, (output,), (ref(),), NOW)
+    prepared = PreparedFormat("apt", retained, (output,), (ref(),))
     assert json.loads(canonical_json(prepared.to_dict()))["schema_version"] == 1
     assert ObjectStat('"not-a-hash"', 3).size == 3
     assert WriteReceipt("opaque", HASH, 3).sha256 == HASH

@@ -1,9 +1,11 @@
-"""Native APT records, immutable DEBs and expiring signed Release entries.
+"""Native APT records, immutable DEBs and signed Release entries without an expiry.
 
 Retained metadata contains ``files`` (object key to downloaded path),
 ``etags`` (object key to observed revision), ``keyring`` and its SHA256,
-``fingerprint``, ``expires_at`` and ``policy``. The state layer downloads files
-and supplies observed ETags before replacement. Historical DEBs are not required.
+``fingerprint`` and ``policy``. Metadata from earlier runs can also hold the
+``expires_at`` of a Release with ``Valid-Until``, which the next run rewrites.
+The state layer downloads files and supplies observed ETags before replacement.
+Historical DEBs are not required.
 """
 
 from __future__ import annotations
@@ -15,8 +17,8 @@ import shutil
 import tempfile
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import datetime, timedelta
-from email.utils import format_datetime, parsedate_to_datetime
+from datetime import datetime
+from email.utils import format_datetime
 from functools import cmp_to_key
 from itertools import pairwise
 from pathlib import Path
@@ -76,9 +78,16 @@ def _policy(policy: FormatPolicy) -> dict[str, JSONValue]:
         "architectures": list(policy.architectures),
         "suite": policy.suite,
         "component": policy.component,
-        "validity_seconds": policy.validity_seconds,
-        "renewal_seconds": policy.renewal_seconds,
     }
+
+
+# Policy keys that earlier runs stored with a Release that has Valid-Until.
+_EXPIRY_POLICY = ("validity_seconds", "renewal_seconds")
+
+
+def has_expiry(retained: RetainedFormat) -> bool:
+    """Whether the published Release still has Valid-Until, so a run must rewrite it."""
+    return "expires_at" in retained.metadata
 
 
 def _identity(fields: dict[str, str], policy: FormatPolicy) -> NativeIdentity:
@@ -259,13 +268,7 @@ def _verify_release(retained: RetainedFormat, policy: FormatPolicy) -> None:
         }.items()
     ):
         raise AptFailure("Release policy differs from approved policy")
-    expiry = datetime.fromisoformat(_string(retained.metadata, "expires_at"))
-    try:
-        date = parsedate_to_datetime(release["Date"])
-        valid = parsedate_to_datetime(release["Valid-Until"])
-    except (KeyError, ValueError, TypeError) as error:
-        raise AptFailure("Invalid Release validity") from error
-    if valid != expiry or valid - date != timedelta(seconds=policy.validity_seconds):
+    if ("Valid-Until" in release) != has_expiry(retained):
         raise AptFailure("Release expiry differs from retained state")
     checksums: dict[str, tuple[str, int]] = {}
     for line in release.get("SHA256", "").splitlines():
@@ -296,7 +299,12 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
         ):
             raise AptFailure("Incomplete retained APT history")
         return
-    if retained.metadata.get("policy") != expected_policy:
+    published_policy = retained.metadata.get("policy")
+    if isinstance(published_policy, dict) and has_expiry(retained):
+        published_policy = {
+            key: value for key, value in published_policy.items() if key not in _EXPIRY_POLICY
+        }
+    if published_policy != expected_policy:
         raise AptFailure("Retained APT policy differs from configured policy")
     refs = _refs(retained)
     files = _strings(retained.metadata.get("files"), "restored metadata files")
@@ -396,10 +404,8 @@ def prepare(
     if not history:
         return PreparedFormat("apt", retained, (), retained.objects)
     _check_names(history, policy)
-    if retained.accepted_history and not additions:
-        expires = _string(retained.metadata, "expires_at")
-        if datetime.fromisoformat(expires) - now > timedelta(seconds=policy.renewal_seconds):
-            return PreparedFormat("apt", retained, (), retained.objects, expires)
+    if retained.accepted_history and not additions and not has_expiry(retained):
+        return PreparedFormat("apt", retained, (), retained.objects)
     if retained.accepted_history and signer.fingerprint != retained.metadata["fingerprint"]:
         raise AptFailure("APT signing primary changed without a trust transition")
     safe_path(out, "validation")
@@ -476,7 +482,6 @@ def prepare(
     release_key, detached_key, clear_key = _entries(policy)
     release_path = safe_path(out, release_key)
     release_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    expiry = now + timedelta(seconds=policy.validity_seconds)
     options = {
         "MD5": "false",
         "SHA1": "false",
@@ -499,19 +504,13 @@ def prepare(
         ).decode()
         if "Valid-Until:" in release:
             raise AptFailure("Unexpected native Release expiry")
-        release += f"Valid-Until: {format_datetime(expiry, usegmt=True)}\n"
     else:
         previous_files = _strings(retained.metadata.get("files"), "restored metadata files")
         release = Path(previous_files[release_key]).read_text()
         release = re.sub(
             r"^Date:.*$", f"Date: {format_datetime(now, usegmt=True)}", release, flags=re.M
         )
-        release = re.sub(
-            r"^Valid-Until:.*$",
-            f"Valid-Until: {format_datetime(expiry, usegmt=True)}",
-            release,
-            flags=re.M,
-        )
+        release = re.sub(r"^Valid-Until:.*\n", "", release, flags=re.M)
     atomic_write(release_path, release.encode())
     signer.sign_file(release_path, safe_path(out, detached_key))
     signer.sign_file(release_path, safe_path(out, clear_key), clear=True)
@@ -551,14 +550,11 @@ def prepare(
             "keyring": str(keyring),
             "keyring_sha256": sha256_file(keyring)[0],
             "fingerprint": signer.fingerprint,
-            "expires_at": expiry.isoformat(),
             "policy": _policy(policy),
         },
         tuple(refs.values()),
     )
-    prepared = PreparedFormat(
-        "apt", resulting, tuple(outputs), resulting.objects, expiry.isoformat()
-    )
+    prepared = PreparedFormat("apt", resulting, tuple(outputs), resulting.objects)
     validate_prepared(prepared, policy=policy, runtime=runtime, now=now)
     return prepared
 
@@ -566,18 +562,13 @@ def prepare(
 def validate_prepared(
     prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
 ) -> None:
-    now = utc_now(lambda: now)
     if prepared.format != "apt" or prepared.referenced_objects != prepared.retained.objects:
         raise AptFailure("Prepared APT references differ from retained state")
     validate_retained(prepared.retained, policy=policy, runtime=runtime)
     if not prepared.retained.accepted_history:
-        if prepared.outputs or prepared.expires_at is not None:
+        if prepared.outputs:
             raise AptFailure("Empty APT state contains outputs")
         return
-    if prepared.expires_at != prepared.retained.metadata["expires_at"]:
-        raise AptFailure("Prepared APT expiry differs from Release")
-    if datetime.fromisoformat(str(prepared.expires_at)) <= now:
-        raise AptFailure("Prepared APT Release expired; rerun the publication")
     refs = _refs(prepared.retained)
     previous_rank = -1
     entries = _entries(policy)

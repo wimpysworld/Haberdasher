@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import shutil
 from dataclasses import replace
+from datetime import datetime
+from email.utils import format_datetime
 from pathlib import Path
 
 from haberdasher.config import FormatPolicy
@@ -15,9 +18,12 @@ from haberdasher.core import (
     RetainedFormat,
     SourceAsset,
     VerifiedAsset,
+    canonical_json,
     sha256_file,
 )
 from haberdasher.runtime import Runtime
+from haberdasher.signing import SigningSession
+from haberdasher.state import INVENTORY_KEY
 from tests.support.http import set_generation_mtime
 from tests.support.native import NativeClient
 
@@ -86,6 +92,25 @@ def publish(prepared: PreparedFormat, root: Path, generation: int) -> RetainedFo
         prior_generation=f"generation-{generation}",
         metadata={**prepared.retained.metadata, "etags": etags},
     )
+
+
+def add_valid_until(bucket: Path, signer: SigningSession, expiry: datetime) -> None:
+    """Rewrite a published bucket as earlier runs left it, with Valid-Until in the Release."""
+    entries = ("Release", "Release.gpg", "InRelease")
+    release = bucket / "dists/stable/Release"
+    valid = f"Valid-Until: {format_datetime(expiry, usegmt=True)}\n"
+    release.write_bytes(release.read_bytes() + valid.encode())
+    for name, clear in (("Release.gpg", False), ("InRelease", True)):
+        (bucket / "dists/stable" / name).unlink()
+        signer.sign_file(release, bucket / "dists/stable" / name, clear=clear)
+    inventory = json.loads((bucket / INVENTORY_KEY).read_bytes())
+    for item in inventory["objects"]:
+        if item["key"] in {f"dists/stable/{name}" for name in entries}:
+            item["sha256"], item["size"] = sha256_file(bucket / item["key"])
+    metadata = inventory["state"]["metadata"]
+    metadata["expires_at"] = expiry.isoformat()
+    metadata["policy"].update(validity_seconds=604800, renewal_seconds=172800)
+    (bucket / INVENTORY_KEY).write_bytes(canonical_json(inventory))
 
 
 class Client:

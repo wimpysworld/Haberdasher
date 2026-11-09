@@ -227,7 +227,7 @@ def test_native_batch_upload_uses_one_rclone_run_and_overwrites_leftovers(
             progress: list[str] = []
             store.upload(outputs, progress=progress.append)
             assert processes == ["rclone copy", "rclone lsjson"]
-            assert progress and progress[-1].split(",")[1].strip() == "100%"
+            assert not any(line.split(",")[1].strip() == "100%" for line in progress)
             for output in outputs:
                 key = f"/test-public/{output.ref.key}"
                 assert server.objects[key][0] == output.local_path.read_bytes()

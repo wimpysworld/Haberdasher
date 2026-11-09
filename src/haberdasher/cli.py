@@ -172,14 +172,21 @@ def show_plan(scan: discovery.CompleteScan, urls: Mapping[str, str] | None = Non
     say("")
     total = sum(len(items) for items in new.values())
     missing = [name for name in names if name not in published]
+    stale = [name for name in names if name in published and publish.has_expiry(published[name])]
+    for name in stale:
+        step(say, name, "pending: refresh metadata without Valid-Until")
     if total:
         summary = f"{plural(total, 'new package')}. Nothing written."
+    elif stale:
+        summary = f"No new packages. {', '.join(stale)} metadata needs a refresh. Nothing written."
     else:
         summary = "No new packages. Nothing written."
     if missing:
         summary += f" Could not read {', '.join(missing)}, so the plan is incomplete."
     elif total:
         summary += " Run `just publish` to publish them."
+    elif stale:
+        summary += " Run `just publish` to refresh it."
     say(summary)
 
 

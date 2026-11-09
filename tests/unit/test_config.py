@@ -30,12 +30,7 @@ def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
     for name in ("rpm", "arch", "apk", "flatpak"):
         assert config.format_policy(name).architectures == ("x86_64", "aarch64")
     apt = config.format_policy("apt")
-    assert (apt.suite, apt.component, apt.validity_seconds, apt.renewal_seconds) == (
-        "stable",
-        "main",
-        604800,
-        172800,
-    )
+    assert (apt.suite, apt.component) == ("stable", "main")
     assert PUBLIC == {
         "apt": ("haberdasher-apt", "https://apt.wimpys.world"),
         "rpm": ("haberdasher-rpm", "https://rpm.wimpys.world"),
@@ -96,9 +91,7 @@ def test_unknown_key_is_one_clear_line(tmp_path: Path, key: str) -> None:
         "sources: [owner/repo]\nformats: {unknown: {}}",
         "sources: [owner/repo]\nformats: {apt: {unknown: true}}",
         "sources: [owner/repo]\nformats: {apt: {suite: true}}",
-        "sources: [owner/repo]\nformats: {apt: {validity_seconds: true}}",
-        "sources: [owner/repo]\nformats: {apt: {renewal_seconds: '123'}}",
-        "sources: [owner/repo]\nformats: {apt: {renewal_seconds: 604800}}",
+        "sources: [owner/repo]\nformats: {apt: {validity_seconds: 604800}}",
         "sources: [owner/repo]\nformats: {apt: {suite: '../escape'}}",
         "sources: [owner/repo]\nformats: {rpm: {suite: stable}}",
         "sources: [owner/repo]\nformats: {apt: {architectures: [amd64, amd64]}}",
@@ -211,6 +204,6 @@ def test_remote_needs_r2_and_production_key(tmp_path: Path) -> None:
 
 def test_direct_policy_validation() -> None:
     with pytest.raises(ValueError):
-        FormatPolicy("apt", validity_seconds=True)
+        FormatPolicy("apt", suite="../escape")
     with pytest.raises(ValueError):
         Config(("owner/repo", "OWNER/REPO"))

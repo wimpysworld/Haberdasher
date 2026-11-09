@@ -619,7 +619,7 @@ def prepare(
 def validate_prepared(
     prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime, now: datetime
 ) -> None:
-    if prepared.format != "apk" or prepared.expires_at is not None:
+    if prepared.format != "apk":
         raise ApkFailure("Invalid prepared APK format")
     validate_retained(prepared.retained, policy=policy, runtime=runtime)
     if prepared.referenced_objects != prepared.retained.objects:
