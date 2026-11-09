@@ -145,7 +145,7 @@ def storage_http() -> Generator[StorageHTTP]:
             with state.lock:
                 key = self._record()
                 if "uploads" in query:
-                    upload = f"upload-{len(state.uploads) + 1}"
+                    upload = f"upload-{len(state.requests)}"
                     state.uploads[upload] = {}
                     state.headers[upload] = self._stored()
                     self._xml(
