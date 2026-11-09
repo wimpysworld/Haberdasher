@@ -39,6 +39,12 @@ Each format accepts these architectures:
 
 Another architecture stops the run with one line that names the package and the architecture.
 
+### Releases
+
+Discovery reads only the GitHub "Latest" release of each source, from `repos/<owner>/<repo>/releases/latest`. GitHub never marks a draft or a pre-release as "Latest". When a source has no latest release (HTTP 404), the plan prints `<source>: no latest release` and continues. Any other failed request stops the run.
+
+A run adds the packages of each latest release to the published repositories. Versions that are already published stay published, and their objects stay in the buckets. When a new release becomes "Latest", the next run adds its packages beside the earlier versions. When an asset is added to the latest release after publication, the next run adds that asset. Older releases that were never published are not read and are not backfilled.
+
 ### Checksums and cosign
 
 Each release needs a checksum before import. Discovery reads combined checksum files (`SHA256SUMS`, `checksums.txt`, `*_checksums.txt`, `*.sha256sum`) and per-asset `<asset>.sha256` files. A per-asset file can hold a bare digest. When two checksum files list the same asset, their digests must agree.
@@ -69,23 +75,24 @@ just unlock
 
 Each command prints plain text lines to stdout as each step starts or ends, then a short summary. An error prints one `Error:` line to stderr and exits with status 1.
 
-`just plan` checks the checksums and cosign bundle of each release. Then it reads the public `haberdasher.json` of every format over HTTPS without credentials. HTTP 404 means that nothing is published. The table shows each format that the sources provide or that is already published. A repository that cannot be read shows `?` and the plan continues:
+`just plan` checks the checksums and cosign bundle of the latest release of each source. Then it reads the public `haberdasher.json` of every format over HTTPS without credentials. HTTP 404 means that nothing is published. The table shows each format that the sources provide or that is already published. A repository that cannot be read shows `?` and the plan continues:
 
 ```text
-Reading haberdasher.yaml: 1 source
-wimpysworld/tailor: 9 releases
+Reading haberdasher.yaml: 2 sources
+wimpysworld/tailor: latest release v0.6.0
   v0.6.0  checksums OK  cosign OK  8 packages
-  v0.5.0  checksums OK  cosign OK  8 packages
-  ...
+wimpysworld/sidra: latest release 1.3.0
+  1.3.0  GitHub digests OK  no cosign bundle  6 packages
 Reading published state from apt.wimpys.world, rpm.wimpys.world, pkg.wimpys.world, apk.wimpys.world, flatpak.wimpys.world
 
-Format  Repository        Published  New
-apt     apt.wimpys.world          0   18
-rpm     rpm.wimpys.world          0   18
-arch    pkg.wimpys.world          0   18
-apk     apk.wimpys.world          0   18
+Format   Repository            Published  New
+apt      apt.wimpys.world              0    4
+rpm      rpm.wimpys.world              0    4
+arch     pkg.wimpys.world              0    2
+apk      apk.wimpys.world              0    2
+flatpak  flatpak.wimpys.world          0    2
 
-72 new packages. Nothing written. Run `just publish` to publish them.
+14 new packages. Nothing written. Run `just publish` to publish them.
 ```
 
 The plan matches packages to the published state by the SHA256 checksum of each release asset, the same test that `just publish` uses to skip a download. It does not download packages, so it cannot inspect their native identities.
@@ -124,7 +131,7 @@ Storage subprocesses receive only the three documented `HD_CLOUDFLARE_*` storage
 
 ## Publication and state
 
-`discovery.py` scans configured releases and assets, including additions to existing releases. Assets without a matching release checksum remain pending. Admission verifies source SHA256 before native import and rejects changed bytes under equivalent native identities.
+`discovery.py` scans the latest release of each source and its assets, including assets added to that release later. Assets without a matching release checksum remain pending. Admission verifies source SHA256 before native import and rejects changed bytes under equivalent native identities.
 
 Each bucket's public `haberdasher.json` is the publication state for its format. It holds the inventory allow-list (package identity, source, published digests, and referenced objects) and the accepted history and metadata keys that the native adapter needs. There is no private state bucket. A run reads each inventory first. An asset whose bytes are already in the inventory needs no download. When a format changes, the run downloads only the published metadata that the inventory references, not the package pool. Unchanged runs avoid package downloads, inspection, indexing, and signing, and write nothing except the locks. APT renews metadata within its renewal window. Flatpak restoration downloads only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. `flatpak build-update-repo` needs those AppStream paths to keep unchanged applications in the AppStream catalogue. Payload files and earlier commits stay published and are not downloaded again.
 

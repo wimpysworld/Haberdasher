@@ -39,7 +39,8 @@ Haberdasher is a personal-use publisher for prebuilt GitHub release assets from 
   Require a new package version or release identity under that ecosystem's rules.
 - Keep publication state in each bucket's public `haberdasher.json` inventory and published metadata.
   Do not add a private state bucket.
-- Reconcile configured releases and assets beyond a latest-tag map.
+- Publish only the GitHub "Latest" release of each source, including assets added to it later.
+  Keep every version already published. Do not backfill older releases.
 - Reuse published metadata instead of downloading the entire historical package pool on each run.
 - Serialise publishers with a `haberdasher.lock` object in each bucket that a run writes.
   Create each lock with a conditional write, in a fixed bucket order, and delete the locks when the run ends.

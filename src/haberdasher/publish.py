@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import functools
 import hashlib
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -124,7 +123,7 @@ def new_assets(
 ) -> dict[str, list[discovery.DiscoveredAsset]]:
     """Group checksummed assets by format, without the bytes that each inventory already holds."""
     result: dict[str, list[discovery.DiscoveredAsset]] = {name: [] for name in published}
-    for item in scan.changed:
+    for item in scan.checksummed:
         name = _format(item.source.filename)
         if name not in result or item.checksum is None:
             continue
@@ -258,9 +257,7 @@ def _reconcile(
             )
     policies = {name: config.format_policy(name) for name in names}
     if scan is None:
-        scan = discovery.scan_releases(
-            config, runtime=runtime, previous=discovery.DiscoveryState(), report=report
-        )
+        scan = discovery.scan_releases(config, runtime=runtime, report=report)
     changed = new_assets(scan, published)
     renew: set[str] = set()
     if "apt" in published and published["apt"].retained.metadata:
@@ -391,24 +388,7 @@ def _prepare(
                 out=out.with_name(f"{name}-{index}-inspect"),
             )
         )
-    # Releases arrive newest first. Admit each package's versions in ascending native order,
-    # so that a Flatpak head moves forwards through every release of one run.
-    groups: dict[str, list[InspectedAsset]] = {}
     for inspected in inspected_assets:
-        groups.setdefault(inspected.identity.name, []).append(inspected)
-    ordered = [
-        inspected
-        for group in groups.values()
-        for inspected in sorted(
-            group,
-            key=functools.cmp_to_key(
-                lambda left, right: (
-                    adapter.compare(left.identity, right.identity, runtime=runtime) or 0
-                )
-            ),
-        )
-    ]
-    for inspected in ordered:
         accepted = admission.admit(
             inspected,
             (*retained.accepted_history, *additions),

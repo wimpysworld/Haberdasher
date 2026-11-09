@@ -206,9 +206,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.command == "publish" and root is None
                 else None
             )
-            scan = discovery.scan_releases(
-                config, runtime=runtime, previous=discovery.DiscoveryState(), report=say
-            )
+            scan = discovery.scan_releases(config, runtime=runtime, report=say)
             if args.command == "plan":
                 show_plan(scan)
                 return 0

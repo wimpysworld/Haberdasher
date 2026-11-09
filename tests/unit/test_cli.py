@@ -24,7 +24,7 @@ from haberdasher.runtime import Runtime
 
 
 def empty_scan(*args: object, **kwargs: object) -> discovery.CompleteScan:
-    return discovery.CompleteScan(discovery.DiscoveryState(), (), (), (), ())
+    return discovery.CompleteScan(discovery.DiscoveryState(), (), ())
 
 
 def scan_with(*filenames: str) -> discovery.CompleteScan:
@@ -42,11 +42,11 @@ def scan_with(*filenames: str) -> discovery.CompleteScan:
             "a" * 64,
         )
         checksum = discovery.ChecksumEntry(source, filename, "a" * 64, "a" * 64)
-        records.append(discovery.DiscoveredAsset(source, checksum, "b" * 64))
+        records.append(discovery.DiscoveredAsset(source, checksum))
     state_ = discovery.DiscoveryState(
         tuple(records), tuple(record.source for record in records), ("synthetic/test",)
     )
-    return discovery.CompleteScan(state_, tuple(records), (), (), ())
+    return discovery.CompleteScan(state_, tuple(records), ())
 
 
 def unpublished(name: str, url: str) -> state.Published:
@@ -378,12 +378,14 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
         "import os, sys\n"
         "assert sys.argv[1:] == ['api', '--hostname', 'github.com', '--method', 'GET', "
         "'--header', 'Accept: application/vnd.github+json', '--header', "
-        "'X-GitHub-Api-Version: 2022-11-28', 'repos/synthetic/test/releases?per_page=100&page=1']\n"
+        "'X-GitHub-Api-Version: 2022-11-28', 'repos/synthetic/test/releases/latest']\n"
         "assert os.environ['GH_TOKEN'] == 'synthetic-workflow-token'\n"
         "assert os.environ['GH_CONFIG_DIR'] == os.environ['HOME'] + '/.config/gh'\n"
         "assert os.environ['GH_PROMPT_DISABLED'] == '1'\n"
         "assert not any(key.startswith(('HD_', 'AWS_')) for key in os.environ)\n"
-        "print('[]')\n"
+        'print(\'{"message":"Not Found","status":"404"}\')\n'
+        "print('gh: Not Found (HTTP 404)', file=sys.stderr)\n"
+        "sys.exit(1)\n"
     )
     gh.chmod(0o700)
     runtime = Runtime(
@@ -391,10 +393,12 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
         environ={"PATH": str(binary), "GH_TOKEN": "synthetic-workflow-token"},
     )
     try:
+        lines: list[str] = []
         scan = discovery.scan_releases(
-            Config(("synthetic/test",)), runtime=runtime, previous=discovery.DiscoveryState()
+            Config(("synthetic/test",)), runtime=runtime, report=lines.append
         )
         assert not scan.state.assets
+        assert lines == ["synthetic/test: no latest release"]
         assert "GH_TOKEN" not in runtime.environment_for("native")
         assert "GH_TOKEN" not in runtime.environment_for("storage")
     finally:

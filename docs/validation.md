@@ -34,15 +34,15 @@ The first command builds the current system's checks. The second evaluates all d
 | Boundary | Executable evidence | What it establishes |
 | --- | --- | --- |
 | CLI and configuration | `tests/unit/test_cli.py`, `test_config.py` | Subcommands without options, read-only planning, strict policy, early destination rejection |
-| Discovery and admission | `tests/unit/`, `tests/native/test_pipeline.py` | Release reconciliation, late assets, pending checksums, native identity conflicts, no-op behaviour |
-| Locked publication | `tests/unit/test_publish.py`, `test_storage.py` | Bucket locks, `unlock`, conditional writes and deletes, unchanged reruns, late assets, an interrupted run followed by a full rerun |
+| Discovery and admission | `tests/unit/`, `tests/native/test_pipeline.py` | Only the GitHub "Latest" release is read, a source without one, no backfill of older releases, late assets, pending checksums, native identity conflicts, no-op behaviour |
+| Locked publication | `tests/unit/test_publish.py`, `test_storage.py` | Bucket locks, `unlock`, conditional writes and deletes, unchanged reruns, late assets, a new latest release that keeps the published version, an interrupted run followed by a full rerun |
 | Hosted policy input | `tests/unit/test_publish_workflow.py` | Synthetic workflow execution, exact policy bytes, private permissions, empty-input rejection, cleanup on success, failure, and signals |
 | Storage clients | `tests/native/test_storage_clients.py` | Native transport against local protocol fixtures, not real R2 permissions |
 | Native adapters | `tests/native/test_{apt,rpm,arch,apk,flatpak}.py` | Retained state, install/update, rejection cases, local HTTP acquisition |
 | Served trust | `tests/native/test_pipeline.py` | Fetched public keys, full independent fixture fingerprint, fresh and existing strict clients |
 | Historical proofs | `tests/proofs/` | Independent shell approaches and their original format boundaries |
 
-The pipeline runs the real CLI with recorded GitHub responses, real native adapters, durable local storage, and loopback HTTP clients. It checks unchanged runs, which write only their locks, and assets added to an existing release. An interruption before entry metadata, and interruptions during bootstrap key writes, each converge with a full rerun to signed metadata that native clients install.
+The pipeline runs the real CLI with recorded GitHub responses, real native adapters, durable local storage, and loopback HTTP clients. It checks unchanged runs, which write only their locks, and assets added to the latest release. An interruption before entry metadata, and interruptions during bootstrap key writes, each converge with a full rerun to signed metadata that native clients install.
 
 See [the proof index](proofs/README.md) for preserved shell evidence. Do not substitute those scripts for production adapter acceptance.
 

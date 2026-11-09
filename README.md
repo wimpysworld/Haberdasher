@@ -47,20 +47,21 @@ just publish
 just unlock
 ```
 
-`just plan` checks each release, reads the published state from each public repository, and prints a table of published and new packages. It writes nothing and signs nothing. `just publish` publishes every format that the sources provide or that is already published. `just unlock` deletes stale locks after a stopped run.
+`just plan` checks the GitHub "Latest" release of each source, reads the published state from each public repository, and prints a table of published and new packages. It writes nothing and signs nothing. `just publish` publishes every format that the sources provide or that is already published. `just unlock` deletes stale locks after a stopped run.
 
 Planning reads GitHub and checksum assets. Supply `GH_TOKEN` or `GITHUB_TOKEN` through the runtime environment. The isolated GitHub configuration does not use a stored personal `gh` login.
 
 Each command prints plain progress lines and a short summary, for example:
 
 ```text
-Format  Repository        Published  New
-apt     apt.wimpys.world          0   18
-rpm     rpm.wimpys.world          0   18
-arch    pkg.wimpys.world          0   18
-apk     apk.wimpys.world          0   18
+Format   Repository            Published  New
+apt      apt.wimpys.world              0    4
+rpm      rpm.wimpys.world              0    4
+arch     pkg.wimpys.world              0    2
+apk      apk.wimpys.world              0    2
+flatpak  flatpak.wimpys.world          0    2
 
-72 new packages. Nothing written. Run `just publish` to publish them.
+14 new packages. Nothing written. Run `just publish` to publish them.
 ```
 
 Read the [publisher guide](docs/publisher.md) before you run `just publish` or `just unlock`.
@@ -72,7 +73,7 @@ Read the [publisher guide](docs/publisher.md) before you run `just publish` or `
 
 A small Python coordinator handles discovery, admission, bucket locks, and conditional storage. Native tools inspect, index, sign, and verify packages. There is no plugin framework or Go migration.
 
-Haberdasher reconciles releases and late assets, verifies release SHA256 checksums, and derives identity from native metadata. It rejects changed bytes under an accepted identity. Retained native state avoids routine downloads of the historical package pool.
+Haberdasher publishes only the GitHub "Latest" release of each source, including assets added to it later. It keeps every version that is already published and does not backfill older releases. It verifies release SHA256 checksums and derives identity from native metadata. It rejects changed bytes under an accepted identity. Retained native state avoids routine downloads of the historical package pool.
 
 Each bucket's public `haberdasher.json` holds the publication state. A run locks each bucket that it writes. Public keys and packages precede native entries. Each format's inventory follows its entries. A full rerun recovers an interrupted run. Publication is not atomic across objects. Older referenced objects remain available, without deletion or retention changes.
 

@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from email.message import Message
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -180,25 +180,35 @@ class CountingStore(LocalStore):
 
 
 class Releases:
+    """The GitHub "Latest" release of one source, as discovery returns it."""
+
     def __init__(self, root: Path) -> None:
         self.root = root
         root.mkdir()
         self.assets: list[tuple[SourceAsset, Path]] = []
+        self.release_id = 1
+        self.next_id = 1
         self.fail = False
+
+    def new_release(self) -> None:
+        """Mark a new release as the latest, so that discovery no longer reads the old one."""
+        self.release_id += 1
+        self.assets.clear()
 
     def add(self, name: str, version: str, data: bytes | None = None) -> None:
         filename = f"{name}-{version}.pkg.tar.zst"
-        path = self.root / f"{len(self.assets)}-{filename}"
+        path = self.root / f"{self.next_id}-{filename}"
         path.write_bytes(data or f"{name} {version}".encode())
         source = SourceAsset(
             "test/project",
-            1,
-            len(self.assets) + 1,
+            self.release_id,
+            self.next_id,
             filename,
             path.stat().st_size,
             "2026-01-01T00:00:00Z",
             f"https://example.invalid/{filename}",
         )
+        self.next_id += 1
         self.assets.append((source, path))
 
     def scan(
@@ -206,14 +216,13 @@ class Releases:
         config: Config,
         *,
         runtime: Runtime,
-        previous: discovery.DiscoveryState,
         report: core.Report = core.quiet,
     ) -> discovery.CompleteScan:
         if self.fail:
             raise discovery.DiscoveryFailure("synthetic discovery failure")
         sums = SourceAsset(
             "test/project",
-            1,
+            self.release_id,
             999,
             "SHA256SUMS",
             1,
@@ -224,14 +233,13 @@ class Releases:
             discovery.DiscoveredAsset(
                 source,
                 discovery.ChecksumEntry(sums, source.filename, core.sha256_file(path)[0], "c" * 64),
-                "f" * 64,
             )
             for source, path in self.assets
         )
         scanned = discovery.DiscoveryState(
             records, (*(source for source, _ in self.assets), sums), config.sources
         )
-        return discovery.CompleteScan(scanned, records, (), (), ())
+        return discovery.CompleteScan(scanned, records, ())
 
     def verify(
         self,
@@ -330,7 +338,7 @@ def test_unchanged_rerun_writes_only_its_locks(
     assert (fixture.adapter.inspections, fixture.adapter.prepares) == counts
 
 
-def test_asset_added_to_existing_release_publishes_only_the_change(
+def test_asset_added_to_the_latest_release_publishes_only_the_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = Fixture(tmp_path, monkeypatch, ("arch",))
@@ -355,23 +363,31 @@ def test_asset_added_to_existing_release_publishes_only_the_change(
     assert_published(fixture)
 
 
-def test_newest_first_releases_are_admitted_in_version_order(
+def test_new_latest_release_adds_packages_and_keeps_the_published_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = Fixture(tmp_path, monkeypatch, ("arch",))
-    for version in ("3", "1", "2"):
-        fixture.releases.add("tool", version)
-    fixture.releases.add("helper", "1")
-    admitted: list[str] = []
-    admit = publish.admission.admit
-
-    def record(inspected: InspectedAsset, *args: Any, **kwargs: Any) -> AdmittedAsset:
-        admitted.append(f"{inspected.identity.name}-{inspected.identity.version}")
-        return admit(inspected, *args, **kwargs)
-
-    monkeypatch.setattr(publish.admission, "admit", record)
-    assert fixture.run().changed
-    assert admitted == ["tool-1", "tool-2", "tool-3", "helper-1"]
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    package = fixture.path("arch", "x86_64/tool-1.pkg").read_bytes()
+    fixture.releases.new_release()
+    fixture.releases.add("tool", "2")
+    result = fixture.run()
+    assert result.changed and result.packages == 1
+    assert fixture.store.writes == [
+        "arch/haberdasher.lock",
+        "arch/x86_64/tool-2.pkg",
+        "arch/x86_64/db",
+        "arch/haberdasher.json",
+    ]
+    assert fixture.store.deletes == ["arch/haberdasher.lock"]
+    assert fixture.path("arch", "x86_64/tool-1.pkg").read_bytes() == package
+    assert fixture.path("arch", "x86_64/db").read_text() == "tool-1\ntool-2\n"
+    assets = cast(list[dict[str, object]], fixture.inventory()["assets"])
+    assert len(assets) == 2
+    assert_published(fixture)
+    assert fixture.run() == publish.RunResult(False, 0, 0)
+    assert fixture.store.writes == ["arch/haberdasher.lock"]
 
 
 def test_interrupted_run_converges_with_a_full_rerun(
@@ -567,9 +583,7 @@ def test_plan_counts_published_and_new_packages_from_the_public_inventory(
             raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
         return io.BytesIO(inventory)
 
-    scan = fixture.releases.scan(
-        fixture.config, runtime=fixture.runtime, previous=discovery.DiscoveryState()
-    )
+    scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
     with patch.object(urllib.request, "urlopen", side_effect=answer):
         cli.show_plan(scan, urls)
     assert requested == [
