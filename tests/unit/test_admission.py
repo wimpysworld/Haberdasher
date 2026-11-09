@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from haberdasher.admission import AdmissionFailure, admit
-from haberdasher.config import FormatPolicy, TrustPolicy
+from haberdasher.config import FormatPolicy
 from haberdasher.core import (
     AdmittedAsset,
     InspectedAsset,
@@ -213,31 +213,19 @@ def test_untrusted_signatures_reject(tmp_path: Path, status: str) -> None:
         admit(item, (), compare=NativeDouble(), policy=FormatPolicy("apt"), runtime=runtime)
 
 
-@pytest.mark.parametrize("format", ["rpm", "apk"])
-def test_signed_inputs_need_explicit_trust(tmp_path: Path, format: str) -> None:
+@pytest.mark.parametrize(("format", "transformation"), [("rpm", "rpm-sign"), ("apk", "apk-unsign")])
+def test_signed_upstream_inputs_admit_without_trust(
+    tmp_path: Path, format: str, transformation: str
+) -> None:
     runtime = Runtime(tmp_path, environ={"PATH": ""})
-    item = replace(inspected(tmp_path, format=format), upstream_signature="verified")
-    policy = FormatPolicy(format)
-    with pytest.raises(AdmissionFailure, match="configured upstream trust"):
-        admit(item, (), compare=NativeDouble(), policy=policy, runtime=runtime)
-    trust = TrustPolicy(True, ("A" * 40,))
-    accepted = admit(
-        item, (), compare=NativeDouble(), policy=replace(policy, trust=trust), runtime=runtime
-    )
+    item = replace(inspected(tmp_path, format=format), upstream_signature="signed")
+    accepted = admit(item, (), compare=NativeDouble(), policy=FormatPolicy(format), runtime=runtime)
     assert accepted.inspected is item
-    for changes in (
-        {"allow_signed_upstream": False},
-        {"upstream_fingerprints": ()},
-    ):
-        incomplete = replace(trust, **changes)
-        with pytest.raises(AdmissionFailure):
-            admit(
-                item,
-                (),
-                compare=NativeDouble(),
-                policy=replace(policy, trust=incomplete),
-                runtime=runtime,
-            )
+    assert accepted.transformation_policy == transformation
+    rerun = admit(
+        item, (accepted,), compare=NativeDouble(), policy=FormatPolicy(format), runtime=runtime
+    )
+    assert rerun is accepted
 
 
 def test_policy_format_and_cross_format_history(tmp_path: Path) -> None:

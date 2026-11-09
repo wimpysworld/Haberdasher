@@ -78,13 +78,12 @@ deletion or disabled checks.
 Fakechroot/fakeroot emulates root for trusted script-free fixtures, not a
 security boundary. Cleanup removes temporary state and keys.
 
-This proof does not authorise replacing upstream signatures. Defer
-already-signed RPM ingestion until the owner approves a preservation or
-replacement policy.
+This shell proof uses unsigned inputs only. The production adapter replaces
+upstream signatures, as the next section describes.
 
 ## Production adapter and remaining gates
 
-`src/haberdasher/formats/rpm.py` implements unsigned-input admission, package signing before indexing, retained XML, and output verification. Already-signed RPMs reject. Trust-policy fields do not qualify upstream signature replacement.
+`src/haberdasher/formats/rpm.py` removes any upstream signature with `rpmsign --delsign`, then signs packages before indexing. It also implements retained XML and output verification. The source digest stays the GitHub asset digest. The published digest is the digest of the package that Haberdasher signed.
 
 `tests/native/test_rpm.py` checks HTTP install/update, dependencies, retained metadata, and strict package/metadata rejection. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and a full rerun after an interruption.
 

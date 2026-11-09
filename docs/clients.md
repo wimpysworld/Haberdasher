@@ -70,7 +70,7 @@ RPM package trust is global to the selected RPM database, not a per-repository s
 
 The pinned DNF5/librepo client requires a pre-seeded repository-specific metadata keyring. `tests/native/fixtures/rpm.py::DnfClient` defines the exact cache-keyring setup and private root. Do not assume another distribution needs the same workaround. After client qualification, ordinary `dnf5 --refresh install PACKAGE` and `dnf5 --refresh upgrade PACKAGE` must preserve both checks.
 
-Already-signed upstream RPMs reject in the production adapter. Replacement or preservation of upstream signatures requires separate qualification.
+The production adapter removes upstream RPM signatures with `rpmsign --delsign`, then signs with the Haberdasher key. Clients need only the Haberdasher key.
 
 ## Arch
 

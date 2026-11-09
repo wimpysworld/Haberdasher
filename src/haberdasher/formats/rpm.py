@@ -81,11 +81,21 @@ def _identity(path: Path, runtime: Runtime) -> NativeIdentity:
         raise RpmFailure("Invalid native RPM identity") from error
 
 
-def _unsigned(path: Path, runtime: Runtime) -> None:
+def _signed(path: Path, runtime: Runtime) -> bool:
     signatures = _run(runtime, ["rpm", "-qp", "--qf", SIGNATURE_QUERY, str(path)])
-    if signatures != b"(none)|(none)|(none)|(none)":
-        raise RpmFailure("Signed upstream RPMs are not supported by the unsigned-input policy")
-    _run(runtime, ["rpmkeys", "--checksig", str(path)])
+    return signatures != b"(none)|(none)|(none)|(none)"
+
+
+def _unsign(source: Path, target: Path, runtime: Runtime) -> str:
+    """Copy source to target without upstream signatures, and check the package digests."""
+    shutil.copyfile(source, target)
+    status = "signed" if _signed(target, runtime) else "unsigned"
+    if status == "signed":
+        _run(runtime, ["rpmsign", "--delsign", str(target)])
+        if _signed(target, runtime):
+            raise RpmFailure("RPM upstream signature removal failed")
+    _run(runtime, ["rpmkeys", "--checksig", str(target)])
+    return status
 
 
 def inspect(
@@ -99,12 +109,14 @@ def inspect(
         raise RpmFailure(
             f"{asset.source.filename}: unsupported RPM architecture {identity.architecture!r}"
         )
-    _unsigned(asset.local_path, runtime)
+    out.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="rpm-inspect-", dir=out) as directory:
+        status = _unsign(asset.local_path, Path(directory) / "package.rpm", runtime)
     header = _run(runtime, ["rpm", "-qp", "--xml", str(asset.local_path)])
     parse_xml(header)
     requires = _run(runtime, ["rpm", "-qp", "--requires", str(asset.local_path)]).decode()
     return InspectedAsset(
-        asset, identity, {"header_xml": header.decode()}, {"requires": requires}, "unsigned"
+        asset, identity, {"header_xml": header.decode()}, {"requires": requires}, status
     )
 
 
@@ -395,10 +407,10 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
             raise RpmFailure("Retained RPM architecture is not approved")
         if asset.inspected.metadata.get("rpm_records") != records[asset.history_key]:
             raise RpmFailure("Complete retained RPM records changed")
-        if (
-            asset.transformation_policy != "rpm-sign"
-            or asset.inspected.upstream_signature != "unsigned"
-        ):
+        if asset.transformation_policy != "rpm-sign" or asset.inspected.upstream_signature not in {
+            "unsigned",
+            "signed",
+        }:
             raise RpmFailure("Invalid retained RPM transformation")
         location = _string(asset.inspected.metadata, "location")
         ref = objects.get(location)
@@ -451,9 +463,9 @@ def prepare(
         if (
             asset.inspected.identity.format != "rpm"
             or asset.transformation_policy != "rpm-sign"
-            or asset.inspected.upstream_signature != "unsigned"
+            or asset.inspected.upstream_signature not in {"unsigned", "signed"}
         ):
-            raise RpmFailure("Expected admitted unsigned RPM")
+            raise RpmFailure("Expected an admitted RPM")
         equivalents = [
             prior
             for prior in (*history, *additions)
@@ -494,7 +506,6 @@ def prepare(
         source = asset.inspected.verified
         if sha256_file(source.local_path) != (source.sha256, source.size):
             raise RpmFailure("Verified RPM bytes changed before signing")
-        _unsigned(source.local_path, runtime)
         identity = asset.inspected.identity
         if _identity(source.local_path, runtime) != identity:
             raise RpmFailure("RPM identity changed before signing")
@@ -504,7 +515,8 @@ def prepare(
         key = safe_key(f"packages/{source.sha256}/{filename}")
         target = safe_path(out, key)
         target.parent.mkdir(mode=0o700, parents=True)
-        shutil.copyfile(source.local_path, target)
+        if _unsign(source.local_path, target, runtime) != asset.inspected.upstream_signature:
+            raise RpmFailure("RPM upstream signature status changed before signing")
         gpg = shutil.which("gpg", path=runtime.environment["PATH"])
         if gpg is None:
             raise RpmFailure("GPG is unavailable")

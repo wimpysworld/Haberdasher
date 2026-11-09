@@ -52,6 +52,8 @@ Haberdasher is a personal-use publisher for prebuilt GitHub release assets from 
 - Retain older objects that published metadata still references.
 - Obtain approval before changing deletion or retention behaviour.
 - Distinguish repository metadata signing from package signing.
+- Never reject a package because the upstream signed it. The owner is always the upstream.
+  Remove or ignore upstream package signatures, and sign with the Haberdasher key where the format needs it.
 - Keep native client signature checks enabled.
 - Use SHA256 OpenPGP signatures across APT, RPM, Arch, and Flatpak.
 - For APT (WW-371), sign `Release` as `InRelease` and `Release.gpg`, not `.deb` packages.
@@ -73,7 +75,7 @@ Haberdasher is a personal-use publisher for prebuilt GitHub release assets from 
 - For Alpine, verify indexes and packages with native `apk verify`, then check actual resolver and fetched-package outputs.
   Neither `apk update` nor `apk fetch --recursive` exit `0` proves trust or successful resolution.
   Tampered metadata can remain searchable without an installable candidate.
-  Preserve upstream APK bytes. Do not infer unsigned-package acceptance from tests with signed packages.
+  Preserve the bytes of unsigned upstream APKs. Do not infer unsigned-package acceptance from tests with signed packages.
 - Verify domain activation separately from bucket provisioning.
 - Do not infer write or CI permissions from a successful local read-only credential check.
 

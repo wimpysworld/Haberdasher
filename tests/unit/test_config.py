@@ -36,8 +36,6 @@ def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
         604800,
         172800,
     )
-    for name in ("rpm", "apk"):
-        assert not config.format_policy(name).trust.allow_signed_upstream
     assert PUBLIC == {
         "apt": ("haberdasher-apt", "https://apt.wimpys.world"),
         "rpm": ("haberdasher-rpm", "https://rpm.wimpys.world"),

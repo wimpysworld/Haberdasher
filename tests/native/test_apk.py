@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from haberdasher.admission import AdmissionFailure, admit
-from haberdasher.config import FormatPolicy, TrustPolicy
+from haberdasher.config import FormatPolicy
 from haberdasher.core import (
     AdmittedAsset,
     JSONValue,
@@ -425,7 +425,7 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
 
 
 @pytest.mark.parametrize("mixed_order", [None, "signed-first", "unsigned-first"])
-def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | None) -> None:
+def test_signed_upstream_loses_its_signature(mixed_order: str | None) -> None:
     with (
         private_workspace() as runtime,
         disposable_key() as key,
@@ -463,22 +463,37 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
             dependency=dependency,
             signer=upstream_signer,
         )
-        with pytest.raises(apk.ApkFailure, match="configured upstream trust"):
-            accept(signed, runtime)
-        run(runtime, "gpg", "--batch", "--import", str(upstream_key.public_file))
-        run(runtime, "gpg", "--batch", "--import", str(key.public_file))
-        policy = replace(
-            POLICY,
-            trust=TrustPolicy(
-                allow_signed_upstream=True,
-                upstream_fingerprints=(upstream_key.fingerprint,),
-            ),
+        policy = POLICY
+        # The same package without the upstream signature stream, as abuild builds it unsigned.
+        plain = fixture(
+            runtime,
+            "hd-signed",
+            "1.0-r0",
+            payload="signed-payload",
+            dependency=dependency,
+            suffix="-unsigned",
         )
-        accepted = accept(signed, runtime, policy=policy)
-        assert accepted.inspected.upstream_signature == "verified"
-        assert accepted.inspected.evidence["upstream_fingerprint"] == upstream_key.fingerprint
+        plain_second = fixture(
+            runtime,
+            "hd-signed",
+            "2.0-r0",
+            payload="signed-update",
+            dependency=dependency,
+            suffix="-unsigned",
+        )
+        accepted = accept(signed, runtime)
+        assert accepted.inspected.upstream_signature == "signed"
+        assert accepted.transformation_policy == "apk-unsign"
+        unsigned_view = accept(plain, runtime)
+        assert accepted.inspected.identity == unsigned_view.inspected.identity
+        assert (
+            accepted.inspected.evidence["control_identity"]
+            == unsigned_view.inspected.evidence["control_identity"]
+        )
+        assert accepted.inspected.metadata["stanza"] == unsigned_view.inspected.metadata["stanza"]
+        assert accepted.inspected.metadata["published_sha256"] == plain.sha256
         inputs = [accepted]
-        assets = {"hd-signed-1.0-r0.apk": signed}
+        assets = {"hd-signed-1.0-r0.apk": plain}
         if mixed_order:
             dep = fixture(runtime, "hd-mixed-dependency", "1.0-r0", payload="mixed-dependency")
             unsigned_dep = accept(dep, runtime, policy=policy)
@@ -502,6 +517,9 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
             upstream_client = Client(runtime, "upstream-only", http.url(), upstream_public)
             upstream_client.run("verify", str(signed.local_path))
             assert client.run("verify", str(signed.local_path), check=False).returncode != 0
+            published = root / "x86_64/hd-signed-1.0-r0.apk"
+            assert sha256_file(published) == (plain.sha256, plain.size)
+            assert ".SIGN.RSA256.haberdasher.rsa.pub" not in apk._members(published, runtime)
             client.run("verify", str(root / "x86_64/APKINDEX.tar.gz"))
             assert (
                 upstream_client.run(
@@ -517,23 +535,31 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
             for filename, asset in assets.items():
                 assert sha256_file(fetched / filename) == (asset.sha256, asset.size)
                 assert sha256_file(root / "x86_64" / filename) == (asset.sha256, asset.size)
-                asset.local_path.rename(asset.local_path.with_suffix(".unavailable"))
             state = committed(generation)
+            rerun = accept(signed, runtime, state.accepted_history)
+            assert rerun in state.accepted_history
+            unchanged = apk.prepare(
+                [rerun],
+                state,
+                policy=policy,
+                runtime=runtime,
+                signer=signer,
+                now=NOW,
+                out=runtime.root / "signed-rerun",
+            )
+            assert unchanged.outputs == () and unchanged.retained == state
+            signed.local_path.rename(signed.local_path.with_suffix(".unavailable"))
             prior_hash = sha256_file(generation.outputs[-1].local_path)
             addition = accept(second, runtime, state.accepted_history, policy)
-            with patch.object(runtime, "run", wraps=runtime.run) as commands:
-                generation2 = apk.prepare(
-                    [addition],
-                    state,
-                    policy=policy,
-                    runtime=runtime,
-                    signer=signer,
-                    now=NOW,
-                    out=runtime.root / "signed-generation2",
-                )
-                assert not any(
-                    "--allow-untrusted" in call.args[0] for call in commands.call_args_list
-                )
+            generation2 = apk.prepare(
+                [addition],
+                state,
+                policy=policy,
+                runtime=runtime,
+                signer=signer,
+                now=NOW,
+                out=runtime.root / "signed-generation2",
+            )
             assert sha256_file(generation.outputs[-1].local_path) == prior_hash
             assert generation2.outputs[-1].expected_etag == '"synthetic-etag"'
             assert generation2.outputs[-1].mode == "replace"
@@ -552,7 +578,7 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
                 client.installed("hd-mixed-dependency", "1.0-r0", "mixed-dependency")
             fetched = client.fetch("downloads-two", "hd-signed=2.0-r0")
             assets.pop("hd-signed-1.0-r0.apk")
-            assets["hd-signed-2.0-r0.apk"] = second
+            assets["hd-signed-2.0-r0.apk"] = plain_second
             assert {path.name for path in fetched.iterdir()} == assets.keys()
             for filename, asset in assets.items():
                 assert sha256_file(fetched / filename) == (asset.sha256, asset.size)
@@ -586,20 +612,14 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
             + parts[1].read_bytes()
             + parts[2].read_bytes(),
         )
-        with patch.object(runtime, "run", wraps=runtime.run) as commands:
-            with pytest.raises(apk.ApkFailure, match="invalid or unknown"):
-                accept(verified(invalid), runtime, policy=policy)
-            assert not any("--allow-untrusted" in call.args[0] for call in commands.call_args_list)
-        for fingerprint in (key.fingerprint, "F" * 40):
-            unknown = replace(
-                policy, trust=replace(policy.trust, upstream_fingerprints=(fingerprint,))
-            )
-            with patch.object(runtime, "run", wraps=runtime.run) as commands:
-                with pytest.raises(apk.ApkFailure):
-                    accept(signed, runtime, policy=unknown)
-                assert not any(
-                    "--allow-untrusted" in call.args[0] for call in commands.call_args_list
-                )
+        # A corrupt upstream signature is removed like a valid one. Only the package remains.
+        corrupt = accept(verified(invalid), runtime)
+        assert corrupt.inspected.metadata["published_sha256"] == plain.sha256
+        assert corrupt.inspected.identity == accepted.inspected.identity
+        twice = work / "twice.apk"
+        atomic_write(twice, parts[0].read_bytes() + signed.local_path.read_bytes())
+        with pytest.raises(apk.ApkFailure, match="gzip member"):
+            accept(verified(twice), runtime)
         unsigned = fixture(runtime, "hd-unsigned", "1.0-r0", payload="unsigned")
         with pytest.raises(apk.ApkFailure):
             apk.inspect(
@@ -638,7 +658,7 @@ def test_signed_upstream_is_separate_and_never_falls_back(mixed_order: str | Non
             accept(verified(v3), runtime)
         print(
             f"Observed: distinct upstream/publisher keys, mixed order {mixed_order}, "
-            "two HTTP generations, unchanged fetched bytes and strict upstream rejection. "
+            "two HTTP generations, fetched bytes equal to unsigned builds, and no-op reruns. "
             "APK v2 C:Q1 remains a SHA1 boundary."
         )
 

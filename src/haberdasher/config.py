@@ -92,12 +92,6 @@ def _load(path: Path) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
-def _bool(value: object) -> bool:
-    if type(value) is not bool:
-        raise ValueError("Expected a Boolean")
-    return value
-
-
 def _token(value: object) -> str:
     value = text(value, "policy token")
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", value) is None:
@@ -142,16 +136,11 @@ class RuntimePolicy(Record):
 
 @dataclass(frozen=True)
 class TrustPolicy(Record):
-    allow_signed_upstream: bool = False
-    upstream_fingerprints: tuple[str, ...] = ()
     source_owner: str | None = None
     refs: tuple[str, ...] = ()
     runtime: RuntimePolicy | None = None
 
     def __post_init__(self) -> None:
-        _bool(self.allow_signed_upstream)
-        for fingerprint in self.upstream_fingerprints:
-            _fingerprint(fingerprint)
         if self.source_owner is not None:
             repository_name(f"{self.source_owner}/validation")
         for ref in self.refs:

@@ -45,7 +45,7 @@ from haberdasher.storage import LocalStore
 from tests.native.fixtures import apk, apt, arch, flatpak, rpm
 from tests.native.test_flatpak import add_remotes, client_run, installed
 from tests.support.http import serve
-from tests.support.keys import DisposableKey, disposable_key
+from tests.support.keys import DisposableKey, disposable_key, run
 from tests.support.native import NativeClient
 
 
@@ -78,6 +78,7 @@ class RecordedGitHub:
         }
         self.visible = len(self.assets) - 1
         self.checksummed = self.visible
+        self.extras: dict[str, bytes] = {}
         self.downloads: list[str] = []
         self.native: list[tuple[str, ...]] = []
         self.inspected: set[str] = set()
@@ -95,9 +96,13 @@ class RecordedGitHub:
             asset.source.filename: self.contents[asset.source.filename]
             for asset in self.assets[: self.visible]
         }
+        contents.update(self.extras)
         sums = "".join(
             f"{asset.sha256}  {asset.source.filename}\n"
             for asset in self.assets[: self.checksummed]
+        ).encode()
+        sums += "".join(
+            f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in self.extras.items()
         ).encode()
         contents["SHA256SUMS"] = sums
         rows: list[dict[str, object]] = []
@@ -710,6 +715,109 @@ def test_recorded_pipeline_and_full_rerun(
             request.status == 200 and request.path.startswith(f"/{name}/") for request in requests
         )
         assert not any(state.LOCK_KEY in request.path for request in requests)
+
+
+def signed_upstream_assets(
+    name: str, runtime: Runtime, upstream: DisposableKey
+) -> tuple[list[VerifiedAsset], dict[str, bytes]]:
+    """Release assets that a separate upstream key signed, with a detached .sig for Arch."""
+    with signing_session(
+        upstream.runtime, expected_fingerprint=upstream.fingerprint, key_file=upstream.key_file
+    ) as signer:
+        match name:
+            case "rpm":
+                data = rpm.build(runtime, "hd-proof-data", "1", "dependency-v1", number=1)
+                app = rpm.build(runtime, "hd-proof-app", "1", "application-v1", number=2)
+                return [rpm.upstream_sign(runtime, asset, signer) for asset in (data, app)], {}
+            case "apk":
+                return [
+                    apk.fixture(
+                        runtime, "hd-dependency", "1.0-r0", payload="dependency", signer=signer
+                    ),
+                    apk.fixture(
+                        runtime,
+                        "hd-application",
+                        "1.0-r0",
+                        payload="first",
+                        dependency="hd-dependency",
+                        signer=signer,
+                    ),
+                ], {}
+            case "arch":
+                assets = [
+                    arch.fixture(runtime, "keeper", "1", dependency="updateable>=1"),
+                    arch.fixture(runtime, "updateable", "1"),
+                ]
+                signatures = {
+                    asset.source.filename + ".sig": run(
+                        runtime,
+                        "gpg",
+                        "--homedir",
+                        str(signer.gnupghome),
+                        "--batch",
+                        "--local-user",
+                        signer.fingerprint + "!",
+                        "--detach-sign",
+                        "--output",
+                        "-",
+                        str(asset.local_path),
+                    )
+                    for asset in assets
+                }
+                return assets, signatures
+            case _:
+                raise ValueError(name)
+
+
+@pytest.mark.parametrize("name", ["rpm", "arch", "apk"])
+def test_signed_upstream_publishes_installs_and_reruns(name: str) -> None:
+    with (
+        private_workspace() as fixtures,
+        disposable_key() as key,
+        disposable_key() as upstream,
+        ExitStack() as stack,
+    ):
+        assert key.fingerprint != upstream.fingerprint
+        assets, extras = signed_upstream_assets(name, fixtures, upstream)
+        recorded = RecordedGitHub(assets)
+        recorded.visible = recorded.checksummed = len(assets)
+        recorded.extras = extras
+        local_root = fixtures.root / "store"
+        bucket = local_root / "public" / name
+        (fixtures.root / "work").mkdir()
+        (fixtures.root / "work/haberdasher.yaml").write_text("sources: [wimpysworld/fixture]\n")
+        arguments = ["publish", "--local-root", str(local_root)]
+        first = apply_cli(recorded, fixtures.root, key, arguments)
+        assert first.changed and first.published_objects > 0
+        assert recorded.downloads == ["SHA256SUMS", *(a.source.filename for a in assets)]
+        public = fixtures.root / "http" / name
+        shutil.copytree(bucket, public)
+        http = stack.enter_context(serve(fixtures.root / "http"))
+        http.set_generation_mtime([path for path in public.rglob("*") if path.is_file()], 1)
+        storage = StoragePolicy("local", {name: str(bucket)})
+        with private_workspace() as runtime:
+            retained = committed(LocalStore(storage), runtime, name)
+        for asset in retained.accepted_history:
+            assert asset.inspected.verified.sha256 in {a.sha256 for a in assets}
+            if name != "arch":
+                assert asset.inspected.upstream_signature == "signed"
+                assert asset.published_sha256 != asset.inspected.verified.sha256
+        if name == "arch":
+            assert not [
+                path
+                for path in public.rglob("*.pkg.tar.zst.sig")
+                if path.read_bytes() in extras.values()
+            ]
+        check = native_client(name, fixtures, "signed", http.url(name), key, "", ("", ""))
+        check(retained, 1)
+        before = snapshot(bucket)
+        recorded.downloads.clear()
+        recorded.native.clear()
+        recorded.forbid_native = True
+        rerun = apply_cli(recorded, fixtures.root, key, arguments)
+        assert not rerun.changed and rerun.published_objects == 0
+        assert recorded.downloads == ["SHA256SUMS"] and not recorded.native
+        assert snapshot(bucket) == before
 
 
 @pytest.mark.parametrize("after", [False, True], ids=["before-key-write", "after-key-write"])

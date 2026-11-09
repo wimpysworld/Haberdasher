@@ -76,6 +76,6 @@ This change does not provision secrets, change environment protection, or enable
 | Flatpak | Derive source owner, application refs, runtime origin, extensions, and empty collection without per-project settings. Until then, discovery skips `.flatpak` assets. |
 | Distribution clients | Test declared official distribution images and architectures separately from pinned Nix clients |
 
-Already-signed RPMs and signed upstream Flatpak bundles remain rejected. Flatpak publication is not supported yet, and there is no automatic source addition. No activation test above ran as part of the local acceptance path.
+Signed upstream Flatpak bundles remain rejected. Flatpak publication is not supported yet, and there is no automatic source addition. No activation test above ran as part of the local acceptance path.
 
 Obtain explicit approval before production credentials, key use, public actions, or external permission tests. No deletion or retention change forms part of activation.

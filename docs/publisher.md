@@ -22,7 +22,7 @@ Haberdasher derives every other setting:
 | Architecture | Package metadata, never the file name |
 | Bucket and public URL | The `PUBLIC` table in `src/haberdasher/config.py` |
 | APT suite, component, and validity | Code defaults: `stable`, `main`, seven days, renewal within two days |
-| Upstream signature trust | None. Already-signed RPM and APK inputs reject. |
+| Upstream signatures | Not checked. RPM inputs lose upstream signatures before Haberdasher signs them. APK inputs lose their `.SIGN.*` stream. Arch ignores release `.sig` assets. APT publishes `.deb` packages unchanged. |
 
 A `.flatpak` asset prints `Flatpak not supported yet, skipped`, and the run continues. The Flatpak adapter needs per-project runtime and application settings, which `haberdasher.yaml` does not allow.
 

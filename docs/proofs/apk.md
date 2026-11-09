@@ -48,7 +48,7 @@ Same-key conversion proves one disposable RSA4096 primary, matching keygrips and
 
 ## Production adapter and remaining gates
 
-`src/haberdasher/formats/apk.py` implements v2 admission, retained records, RSA256 index signing, and unchanged package bytes. The native key basename is `haberdasher.rsa.pub`, distinct from the historical shell fixture basename.
+`src/haberdasher/formats/apk.py` implements v2 admission, retained records, and RSA256 index signing. Unsigned packages keep their bytes. A signed upstream package loses its `.SIGN.*` gzip stream, so the published bytes equal the unsigned package with the same control and payload streams. The `C:` control identity does not change. The native key basename is `haberdasher.rsa.pub`, distinct from the historical shell fixture basename.
 
 `tests/native/test_apk.py` checks HTTP install/update and strict rejection. `tests/native/test_pipeline.py` fetches the public RSA key, binds its modulus to the independently verified OpenPGP primary, and checks fresh/existing clients after a full rerun that follows an interruption.
 

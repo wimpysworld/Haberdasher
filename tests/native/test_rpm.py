@@ -22,7 +22,7 @@ from haberdasher.core import (
 from haberdasher.formats import rpm
 from haberdasher.runtime import private_workspace
 from haberdasher.signing import SigningFailure, signing_session
-from tests.native.fixtures.rpm import NOW, DnfClient, build, checked, publish
+from tests.native.fixtures.rpm import NOW, DnfClient, build, checked, publish, upstream_sign
 from tests.support.http import serve
 from tests.support.keys import disposable_key
 
@@ -122,17 +122,6 @@ def test_rpm_adapter_http_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
             left = NativeIdentity("rpm", "app", "noarch", "1.01", release="1")
             assert rpm.compare(left, replace(left, version="1.1"), runtime=runtime) == 0
             assert rpm.compare(left, replace(left, epoch=1), runtime=runtime) == -1
-            for output in first.outputs:
-                if output.ref.object_class == "package":
-                    signed = replace(
-                        app,
-                        local_path=output.local_path,
-                        sha256=output.ref.sha256,
-                        size=output.ref.size,
-                        source=replace(app.source, size=output.ref.size),
-                    )
-                    with pytest.raises(rpm.RpmFailure, match="Signed upstream"):
-                        rpm.inspect(signed, policy=POLICY, runtime=runtime, out=runtime.root)
             retained = replace(
                 first.retained,
                 prior_generation="one",
@@ -362,3 +351,89 @@ def test_signer_failure_does_not_produce_prepared_state(monkeypatch: pytest.Monk
             )
         assert canonical_json(empty) == before
         assert sha256_file(asset.local_path) == (asset.sha256, asset.size)
+
+
+def test_signed_upstream_rpm_installs_with_haberdasher_trust() -> None:
+    with (
+        disposable_key() as key,
+        disposable_key() as upstream_key,
+        private_workspace() as runtime,
+        signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer,
+        signing_session(
+            upstream_key.runtime,
+            expected_fingerprint=upstream_key.fingerprint,
+            key_file=upstream_key.key_file,
+        ) as upstream_signer,
+    ):
+        data = build(runtime, "hd-proof-data", "1", "dependency-v1", number=1)
+        app = build(runtime, "hd-proof-app", "1", "application-v1", number=2)
+        app = upstream_sign(runtime, app, upstream_signer)
+        assert upstream_key.fingerprint[-16:].lower().encode() in checked(
+            runtime, "rpm", "-qp", "--qf", "%{RSAHEADER:pgpsig}", str(app.local_path)
+        )
+        inspected = [
+            rpm.inspect(asset, policy=POLICY, runtime=runtime, out=runtime.root / "inspect")
+            for asset in (data, app)
+        ]
+        assert [item.upstream_signature for item in inspected] == ["unsigned", "signed"]
+        admissions = [
+            admit(item, (), compare=rpm.compare, policy=POLICY, runtime=runtime)
+            for item in inspected
+        ]
+        prepared = rpm.prepare(
+            admissions,
+            RetainedFormat("rpm", None, (), (), {}, ()),
+            policy=POLICY,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "one",
+        )
+        signed = next(
+            asset
+            for asset in prepared.retained.accepted_history
+            if asset.inspected.identity.name == "hd-proof-app"
+        )
+        assert signed.inspected.verified.sha256 == app.sha256
+        assert signed.published_sha256 not in (None, app.sha256)
+        package = next(
+            output
+            for output in prepared.outputs
+            if output.ref.object_class == "package" and output.ref.sha256 == signed.published_sha256
+        )
+        signature = checked(
+            runtime, "rpm", "-qp", "--qf", "%{RSAHEADER:pgpsig}", str(package.local_path)
+        )
+        assert key.fingerprint[-16:].lower().encode() in signature
+        assert upstream_key.fingerprint[-16:].lower().encode() not in signature
+        root = runtime.root / "published"
+        root.mkdir()
+        with serve(root) as server:
+            publish(prepared, root, server, 1)
+            client = DnfClient(
+                runtime, "signed-upstream", server.url(), runtime.root / "one/public.gpg"
+            )
+            client.run("install", "hd-proof-app")
+            client.state("1")
+            cached = {sha256_file(path)[0] for path in client.base.glob("cache/**/packages/*.rpm")}
+            assert signed.published_sha256 in cached
+        rerun = admit(
+            rpm.inspect(app, policy=POLICY, runtime=runtime, out=runtime.root / "rerun"),
+            prepared.retained.accepted_history,
+            compare=rpm.compare,
+            policy=POLICY,
+            runtime=runtime,
+        )
+        assert rerun in prepared.retained.accepted_history
+        unchanged = rpm.prepare(
+            [rerun],
+            prepared.retained,
+            policy=POLICY,
+            runtime=runtime,
+            signer=signer,
+            now=NOW,
+            out=runtime.root / "two",
+        )
+        assert unchanged.outputs == () and unchanged.retained == prepared.retained

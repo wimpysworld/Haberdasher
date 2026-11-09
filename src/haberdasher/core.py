@@ -278,7 +278,7 @@ class InspectedAsset(Record):
             raise ValueError("Expected complete metadata and evidence mappings")
         canonical_json(self.metadata)
         canonical_json(self.evidence)
-        if self.upstream_signature not in {"unsigned", "verified", "unknown", "invalid"}:
+        if self.upstream_signature not in {"unsigned", "signed", "verified", "unknown", "invalid"}:
             raise ValueError("Invalid upstream signature status")
 
 

@@ -1,4 +1,4 @@
-"""Native APK v2 publication, with unchanged packages and RSA256 indexes."""
+"""Native APK v2 publication, with unsigned packages and RSA256 indexes."""
 
 from __future__ import annotations
 
@@ -33,6 +33,10 @@ from haberdasher.signing import ALPINE_SIGNATURE_MEMBER, SigningSession
 MAX_METADATA = 16 * 1024 * 1024
 PUBLIC_KEY = "haberdasher.rsa.pub"
 ARCHITECTURES = ("x86_64", "aarch64")
+
+
+# Signed upstream APKs lose their signature stream. Unsigned upstream APKs keep their bytes.
+_TRANSFORMATIONS = {"unsigned": "preserve", "signed": "apk-unsign"}
 
 
 class ApkFailure(ValueError):
@@ -194,73 +198,6 @@ def _control(info: str, identity: NativeIdentity | None = None) -> str:
     return digest(values["datahash"])
 
 
-def _upstream_keys(
-    policy: FormatPolicy, runtime: Runtime, out: Path, basename: str
-) -> list[tuple[str, Path]]:
-    trust = policy.trust
-    if not (trust.allow_signed_upstream and trust.upstream_fingerprints):
-        raise ApkFailure("Signed APK input requires configured upstream trust")
-    keys: list[tuple[str, Path]] = []
-    for fingerprint in trust.upstream_fingerprints:
-        listing = _run(
-            runtime,
-            [
-                "gpg",
-                "--no-options",
-                "--batch",
-                "--no-auto-key-retrieve",
-                "--with-colons",
-                "--with-key-data",
-                "--list-keys",
-                fingerprint,
-            ],
-        )
-        rows = [line.split(":") for line in listing.decode("ascii").splitlines()]
-        primaries = [row for row in rows if row[0] == "pub"]
-        fprs = [row[9] for row in rows if row[0] == "fpr"]
-        numbers = [row[3] for row in rows if row[0] == "pkd"]
-        if (
-            len(primaries) != 1
-            or primaries[0][3] != "1"
-            or primaries[0][1] in {"r", "e", "d", "i"}
-            or fprs != [fingerprint]
-            or len(numbers) != 2
-            or any(re.fullmatch(r"[A-Fa-f0-9]+", n) is None for n in numbers)
-        ):
-            raise ApkFailure("Approved upstream RSA primary is unavailable or invalid")
-        directory = out / fingerprint
-        directory.mkdir(mode=0o700)
-        config, der = directory / "public.asn1", directory / "public.der"
-        atomic_write(
-            config,
-            (
-                "asn1=SEQUENCE:rsakey\n[rsakey]\n"
-                f"n=INTEGER:0x{numbers[0]}\ne=INTEGER:0x{numbers[1]}\n"
-            ).encode(),
-        )
-        _run(runtime, ["openssl", "asn1parse", "-genconf", str(config), "-out", str(der), "-noout"])
-        keydir = directory / "keys"
-        keydir.mkdir(mode=0o700)
-        atomic_write(
-            keydir / basename,
-            _run(
-                runtime,
-                [
-                    "openssl",
-                    "rsa",
-                    "-RSAPublicKey_in",
-                    "-inform",
-                    "DER",
-                    "-in",
-                    str(der),
-                    "-pubout",
-                ],
-            ),
-        )
-        keys.append((fingerprint, keydir))
-    return keys
-
-
 def inspect(
     asset: VerifiedAsset, *, policy: FormatPolicy, runtime: Runtime, out: Path
 ) -> InspectedAsset:
@@ -273,29 +210,7 @@ def inspect(
         parts = _parts(asset.local_path, work)
         if not parts:
             raise ApkFailure("Empty APK input")
-        first = _members(parts[0], runtime)
-        signatures = [name for name in first if name.startswith(".SIGN")]
-        keys = work / "empty-keys"
-        keys.mkdir(mode=0o700)
-        status, fingerprint = "unsigned", None
-        if signatures:
-            if len(parts) != 3 or len(first) != 1:
-                raise ApkFailure("Malformed signed APK input")
-            match = re.fullmatch(
-                r"\.SIGN\.RSA(?:256|512)?\.([A-Za-z0-9_-][A-Za-z0-9_.-]*\.rsa\.pub)", first[0]
-            )
-            if match is None:
-                raise ApkFailure("Unsupported upstream APK signature")
-            for candidate, keydir in _upstream_keys(policy, runtime, work, match[1]):
-                result = runtime.run(_apk(keydir, "verify", str(asset.local_path)))
-                if result.returncode == 0:
-                    keys, fingerprint = keydir, candidate
-                    break
-            if fingerprint is None:
-                raise ApkFailure("Upstream APK signature is invalid or unknown")
-            status = "verified"
-        elif len(parts) != 2:
-            raise ApkFailure("Expected an unsigned APK v2 control and payload")
+        status, package = _unsigned(asset.local_path, parts, work, runtime)
         control, payload = parts[-2:]
         members = _members(control, runtime)
         if members.count(".PKGINFO") != 1 or any(name.startswith(".SIGN") for name in members):
@@ -304,17 +219,12 @@ def inspect(
         datahash = _control(info)
         if sha256_file(payload)[0] != datahash:
             raise ApkFailure("APK compressed payload datahash mismatch")
+        keys = work / "empty-keys"
+        keys.mkdir(mode=0o700)
         index = work / "APKINDEX.tar.gz"
         _run(
             runtime,
-            _apk(
-                keys,
-                "index",
-                *(["--allow-untrusted"] if status == "unsigned" else []),
-                "--output",
-                str(index),
-                str(asset.local_path),
-            ),
+            _apk(keys, "index", "--allow-untrusted", "--output", str(index), str(package)),
         )
         records = _records(_extract(index, "APKINDEX", runtime))
         if len(records) != 1:
@@ -327,20 +237,46 @@ def inspect(
         _control(info, identity)
         _run(runtime, ["apk", "version", "--check", version])
         _check(asset.local_path, asset.sha256, asset.size)
+        published, size = sha256_file(package)
         fields = _fields(stanza)
-        if int(fields["S"]) != asset.size:
-            raise ApkFailure("Native APK size differs from verified input")
+        if int(fields["S"]) != size:
+            raise ApkFailure("Native APK size differs from the published package")
+        metadata: dict[str, JSONValue] = {"stanza": stanza, "pkginfo": info, "datahash": datahash}
+        if status == "signed":
+            metadata |= {"published_sha256": published, "published_size": size}
         return InspectedAsset(
             asset,
             identity,
-            {"stanza": stanza, "pkginfo": info, "datahash": datahash},
-            {
-                "dependencies": fields.get("D", ""),
-                "upstream_fingerprint": fingerprint,
-                "control_identity": fields["C"],
-            },
+            metadata,
+            {"dependencies": fields.get("D", ""), "control_identity": fields["C"]},
             status,
         )
+
+
+def _unsigned(path: Path, parts: Sequence[Path], work: Path, runtime: Runtime) -> tuple[str, Path]:
+    """Return the APK without its upstream signature stream, as an unsigned package has it."""
+    signatures = [name for name in _members(parts[0], runtime) if name.startswith(".SIGN")]
+    if not signatures:
+        if len(parts) != 2:
+            raise ApkFailure("Expected an unsigned APK v2 control and payload")
+        return "unsigned", path
+    if len(parts) != 3 or _members(parts[0], runtime) != signatures:
+        raise ApkFailure("Malformed signed APK input")
+    package = work / "unsigned.apk"
+    with package.open("xb") as stream:
+        for part in parts[1:]:
+            stream.write(part.read_bytes())
+    return "signed", package
+
+
+def _published(item: InspectedAsset) -> tuple[str, int]:
+    """Return the digest and size of the package bytes that the repository serves."""
+    if item.upstream_signature == "unsigned":
+        return item.verified.sha256, item.verified.size
+    digest_value, size = item.metadata.get("published_sha256"), item.metadata.get("published_size")
+    if not isinstance(digest_value, str) or type(size) is not int:
+        raise ApkFailure("Missing published APK digest evidence")
+    return digest(digest_value), size
 
 
 def compare(left: NativeIdentity, right: NativeIdentity, *, runtime: Runtime) -> int | None:
@@ -396,20 +332,15 @@ def _expected(
         item = accepted.inspected
         identity = item.identity
         _filename(identity)
-        if (
-            identity.architecture not in (*policy.architectures, "noarch")
-            or accepted.transformation_policy != "preserve"
+        if identity.architecture not in (*policy.architectures, "noarch") or (
+            accepted.transformation_policy != _TRANSFORMATIONS.get(item.upstream_signature)
         ):
             raise ApkFailure("Invalid retained APK policy")
-        if accepted.published_sha256 != item.verified.sha256:
-            raise ApkFailure("Retained APK source and published digests differ")
-        if item.upstream_signature not in {"unsigned", "verified"}:
-            raise ApkFailure("Untrusted retained APK")
-        if item.upstream_signature == "verified" and not (
-            policy.trust.allow_signed_upstream
-            and item.evidence.get("upstream_fingerprint") in policy.trust.upstream_fingerprints
+        published, size = _published(item)
+        if accepted.published_sha256 != published or (published == item.verified.sha256) != (
+            item.upstream_signature == "unsigned"
         ):
-            raise ApkFailure("Retained upstream APK trust is not configured")
+            raise ApkFailure("Retained APK source and published digests differ")
         stanza = _string(item.metadata.get("stanza"))
         parsed = _records(stanza)
         key = identity.name, identity.version, identity.architecture
@@ -422,9 +353,7 @@ def _expected(
             or item.evidence.get("control_identity") != fields["C"]
         ):
             raise ApkFailure("Incomplete retained APK control evidence")
-        if int(fields["S"]) != item.verified.size or item.evidence.get(
-            "dependencies"
-        ) != fields.get("D", ""):
+        if int(fields["S"]) != size or item.evidence.get("dependencies") != fields.get("D", ""):
             raise ApkFailure("Retained APK evidence differs from native metadata")
         records[key] = stanza
     return records
@@ -529,11 +458,7 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
         if (
             ref is None
             or ref.object_class != "package"
-            or (ref.sha256, ref.size)
-            != (
-                item.inspected.verified.sha256,
-                item.inspected.verified.size,
-            )
+            or (ref.sha256, ref.size) != _published(item.inspected)
         ):
             raise ApkFailure("Missing retained APK package reference")
     if refs.keys() != required:
@@ -555,8 +480,10 @@ def prepare(
     history = list(retained.accepted_history)
     additions: list[AdmittedAsset] = []
     for candidate in new:
-        if candidate.transformation_policy != "preserve":
-            raise ApkFailure("APK package transformation is forbidden")
+        if candidate.transformation_policy != _TRANSFORMATIONS.get(
+            candidate.inspected.upstream_signature
+        ):
+            raise ApkFailure("Unexpected APK package transformation")
         equivalent = next(
             (
                 old
@@ -577,7 +504,7 @@ def prepare(
         inspected = inspect(candidate.inspected.verified, policy=policy, runtime=runtime, out=out)
         if inspected != candidate.inspected:
             raise ApkFailure("APK input changed after admission")
-        item = replace(candidate, published_sha256=inspected.verified.sha256)
+        item = replace(candidate, published_sha256=_published(inspected)[0])
         additions.append(item)
         history.append(item)
     if not additions:
@@ -609,8 +536,15 @@ def prepare(
         object_key = _filename(item.inspected.identity)
         path = safe_path(out, object_key)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        shutil.copyfile(item.inspected.verified.local_path, path)
-        _check(path, item.inspected.verified.sha256, item.inspected.verified.size)
+        source = item.inspected.verified
+        if item.inspected.upstream_signature == "unsigned":
+            shutil.copyfile(source.local_path, path)
+        else:
+            with tempfile.TemporaryDirectory(dir=out, prefix="unsign-") as temporary:
+                work = Path(temporary)
+                parts = _parts(source.local_path, work)
+                shutil.copyfile(_unsigned(source.local_path, parts, work, runtime)[1], path)
+        _check(path, *_published(item.inspected))
         output(path, object_key, "package")
     indexes = dict(_mapping(retained.metadata["indexes"])) if retained.accepted_history else {}
     with tempfile.TemporaryDirectory(dir=out, prefix="index-") as temporary:
