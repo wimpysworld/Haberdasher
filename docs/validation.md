@@ -73,7 +73,7 @@ To do:
 - [ ] Hosted execution: set the CI secrets, `HD_PUBLISH_ENABLED`, and the `publisher` environment protection, then test hosted permissions.
 - [ ] Public delivery: test HTTPS, content types, cache headers, delayed clients, and split entry/signature reads on the live domains.
 - [ ] Real inputs: run `just plan` and a disposable publish against the latest release of each source.
-- [ ] APK: decide whether to accept the native v2 SHA1 control identity, and test real packages with Alpine clients.
+- [ ] APK: test real packages with Alpine clients.
 - [ ] Flatpak: install a real bundle from the public bucket, with its runtime from Flathub.
 - [ ] Distribution clients: test official images for each format, including `arm64` APT and `aarch64` packages, separately from the pinned Nix clients.
 
