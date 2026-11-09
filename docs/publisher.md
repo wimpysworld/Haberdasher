@@ -37,41 +37,33 @@ Each public bucket must be distinct. Bucket names must be valid R2 names. A form
 
 Each format can have a `trust` mapping. RPM and APK use `allow_signed_upstream` and `upstream_fingerprints` to admit already-signed upstream packages. Flatpak needs `source_owner`, application `refs`, and a `runtime` with URL, full fingerprint, collection, branch, architecture, remote, refs, and optional extensions. The current Flatpak adapter requires an empty collection. It rejects arbitrary runtime repository selection and signed upstream bundles. It does not add a source automatically.
 
-`--local-root` ignores the R2 buckets. It writes to `<root>/public/<format>`. A local root must be disposable, outside the checkout, and distinct from the home root. Symlink paths reject.
-
-### Format selection
-
-All configured public formats form one publication from one discovery scan. With multiple configured public formats, `--format all` is mandatory before any writes.
-
-`--format NAME` is allowed only when NAME is the sole configured public format. A fresh local bootstrap without configured public destinations can also select NAME. A run never changes the bucket of a format that it does not select.
+All configured public formats form one publication from one discovery scan. A run never changes the bucket of a format that is not configured.
 
 ## Commands
 
-After `just setup`, inspect the exact interface:
+After `just setup`, use the three recipes. None takes arguments. Each reads `haberdasher.yaml` in the working directory:
 
 ```sh
-just publish --help
-just publish --plan --config haberdasher.yaml
+just plan
+just publish
+just unlock
 ```
 
-The plan requires runtime `GH_TOKEN` or `GITHUB_TOKEN`. GitHub subprocesses use an isolated configuration, not a stored personal login. Native subprocesses receive neither GitHub nor storage credentials.
+`just plan` needs runtime `GH_TOKEN` or `GITHUB_TOKEN` and uses no storage or signing. GitHub subprocesses use an isolated configuration, not a stored personal login. Native subprocesses receive neither GitHub nor storage credentials.
 
-Write examples:
+`just publish` publishes every configured format to its R2 bucket. `just unlock` deletes stale locks, as described in [Locks](#locks).
 
-```sh
-env -u HD_SIGNING_KEY HD_SIGNING_KEY_FILE=/private/disposable-test-key.asc \
-  just publish --apply --local-root /tmp/haberdasher-example --format all \
-    --signing-fingerprint DISPOSABLE_KEY_FINGERPRINT
-just publish --apply --remote --format all
-```
+### Local test root
 
-The local example requires a disposable test key outside the checkout, in a private file with mode `0400` or `0600`. `--signing-fingerprint` must give its full fingerprint, and is valid only with `--local-root`. Without it, a local run can publish only output that needs no signature. Do not copy or decrypt the canonical SOPS key for this fixture.
+Tests and proofs use a hidden `--local-root PATH` option on `python -m haberdasher publish` and `unlock`. It ignores the R2 buckets and writes to `<root>/public/<format>`. A local root must be disposable, outside the checkout, and distinct from the home root. Symlink paths reject. A local run publishes the formats with a public bucket, otherwise the formats under `formats`, otherwise all formats.
+
+A local run takes its signing fingerprint from the key in `HD_SIGNING_KEY_FILE` or `HD_SIGNING_KEY`. Use a disposable test key outside the checkout, in a private file with mode `0400` or `0600`. Without a key, a local run can publish only output that needs no signature. Do not copy or decrypt the canonical SOPS key for this fixture.
 
 Production local signing reads the existing SOPS-managed path through `HD_SIGNING_KEY_FILE`. CI reads `HD_SIGNING_KEY`. Supply only one signing source. Keep the local SOPS convention. Do not copy, decrypt, or export the production key as a setup workaround. Signing requires the expected RSA4096 primary with signing and certification capabilities, without subkeys. Temporary keyrings and Alpine PKCS#8 conversion stay outside the checkout and Nix store. Cleanup stops owned agents and removes private exports.
 
 ### Remote publication
 
-`--remote` needs the `storage` section and at least one configured format with a public bucket. It always signs with the production fingerprint `PRODUCTION_FINGERPRINT` in `src/haberdasher/config.py`. The signing key must match that fingerprint.
+`just publish` needs the `storage` section and at least one configured format with a public bucket. It always signs with the production fingerprint `PRODUCTION_FINGERPRINT` in `src/haberdasher/config.py`. The signing key must match that fingerprint.
 
 Storage subprocesses receive only the three documented `HD_CLOUDFLARE_*` storage variables through an isolated AWS configuration. Conditional create requires absence. Conditional replace requires the exact observed ETag. An ETag identifies a revision, not a SHA256 digest.
 
@@ -89,22 +81,22 @@ There is no multi-object atomicity. Split entry/signature pairs can temporarily 
 
 ## Locks
 
-Before it writes, `--apply` creates `haberdasher.lock` in each selected bucket, in sorted format order, with a conditional create. The lock holds a random run identifier, the host name or GitHub runner and run URL, and the UTC start time. It never appears in `haberdasher.json`. `--local-root` writes the same file in each format directory.
+Before it writes, `just publish` creates `haberdasher.lock` in each configured bucket, in sorted format order, with a conditional create. The lock holds a random run identifier, the host name or GitHub runner and run URL, and the UTC start time. It never appears in `haberdasher.json`. A local test root holds the same file in each format directory.
 
 When a lock already exists, the run deletes the locks that it created and fails. The error names the bucket and shows the existing lock. At the end of a run, and after a handled error, the run deletes only its own locks, conditionally on the ETags that it created.
 
 A run that stops without cleanup, for example after a killed process, leaves its locks. When you know that the run has stopped, delete them explicitly:
 
 ```sh
-just publish --break-lock --remote --format all
+just unlock
 ```
 
-`--break-lock` deletes the existing locks in the selected buckets, prints what it deleted, and exits without publishing. Use `--local-root` instead of `--remote` for a local root.
+`just unlock` deletes the existing locks in the configured buckets, prints what it deleted, and exits without publishing.
 
 ## Recovery
 
-Recover from an interrupted run with a full rerun of the same `--apply` command. The rerun reads the last complete `haberdasher.json`, prepares and signs again, overwrites leftover unreferenced objects, and publishes new metadata. There is no replay, write journal, or crash-recovery state.
+Recover from an interrupted run with a full rerun of `just publish`. The rerun reads the last complete `haberdasher.json`, prepares and signs again, overwrites leftover unreferenced objects, and publishes new metadata. There is no replay, write journal, or crash-recovery state.
 
-An unknown write outcome stops the run. Delete a stale lock with `--break-lock` first when the run could not release it.
+An unknown write outcome stops the run. Delete a stale lock with `just unlock` first when the run could not release it.
 
 See `src/haberdasher/{cli,state,publish,storage}.py` and `tests/unit/test_publish.py` for the exact behaviour.

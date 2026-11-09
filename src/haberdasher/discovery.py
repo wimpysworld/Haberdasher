@@ -210,7 +210,9 @@ def _json_request(endpoint: str, runtime: Runtime) -> object:
         env_kind="github",
     )
     if result.returncode != 0:
-        raise DiscoveryFailure("GitHub metadata request failed")
+        raise DiscoveryFailure(
+            "GitHub metadata request failed. Run `gh auth login` or set GH_TOKEN"
+        )
     if len(result.stdout) > MAX_PAGE_BYTES:
         raise DiscoveryFailure("GitHub response exceeds the byte limit")
     try:

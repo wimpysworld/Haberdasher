@@ -41,5 +41,4 @@ jobs:
         shell: bash
         run: |
           set +x
-          nix develop --no-write-lock-file --command \
-            just publish --apply --remote --format all
+          nix develop --no-write-lock-file --command just publish

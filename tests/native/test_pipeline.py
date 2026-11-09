@@ -105,7 +105,7 @@ class RecordedGitHub:
         return rows, contents
 
     def record_native(self, argv: Sequence[str], input: bytes | None = None) -> None:
-        if argv[0] == "gpgconf":
+        if argv[0] == "gpgconf" or (argv[0] == "gpg" and "--show-keys" in argv):
             return
         self.native.append(tuple(argv))
         assert not self.forbid_native, f"No-op ran native command: {argv}"
@@ -232,7 +232,7 @@ assert not any(k.startswith(('HD_','GH_','GITHUB_','AWS_','RCLONE_')) for k in o
 data=sys.stdin.buffer.read() if {command!r}=='haberdasher-flatpak-metadata' else None
 with (Path(__file__).parent/'native.jsonl').open('a') as log:
     log.write(json.dumps({{'argv':[{command!r},*sys.argv[1:]],'input':data.decode() if data else None}})+'\\n')
-if {recorded.forbid_native!r} and {command!r}!='gpgconf': sys.exit(88)
+if {recorded.forbid_native!r} and {command!r}!='gpgconf' and '--show-keys' not in sys.argv: sys.exit(88)
 if data is not None:
     sys.exit(subprocess.run([{target!r},*sys.argv[1:]],input=data).returncode)
 os.execv({target!r},[{target!r},*sys.argv[1:]])
@@ -241,6 +241,7 @@ os.execv({target!r},[{target!r},*sys.argv[1:]])
     path = str(shim) + ":" + os.environ["HABERDASHER_TOOL_PATH"]
     result = subprocess.run(
         [sys.executable, "-m", "haberdasher", *arguments],
+        cwd=root / "work",
         env={
             "PATH": path,
             "HABERDASHER_TOOL_PATH": path,
@@ -552,7 +553,8 @@ def test_recorded_pipeline_and_full_rerun(
         config = Config(("wimpysworld/fixture",), {name: format_policy})
         policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
         monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
-        config_file = fixtures.root / "config.json"
+        (fixtures.root / "work").mkdir()
+        config_file = fixtures.root / "work/haberdasher.yaml"
         configured = {"architectures": json_value(format_policy.architectures)}
         if name == "apt":
             configured["suite"] = format_policy.suite
@@ -566,16 +568,7 @@ def test_recorded_pipeline_and_full_rerun(
         config_file.write_bytes(
             canonical_json({"sources": config.sources, "formats": {name: configured}})
         )
-        arguments = [
-            "--config",
-            str(config_file),
-            "--local-root",
-            str(local_root),
-            "--format",
-            name,
-            "--signing-fingerprint",
-            key.fingerprint,
-        ]
+        arguments = ["publish", "--local-root", str(local_root)]
 
         @contextmanager
         def recorded_workspace() -> Generator[Runtime]:
@@ -589,7 +582,7 @@ def test_recorded_pipeline_and_full_rerun(
                     recorded,
                     fixtures.root,
                     key,
-                    ["--apply", *arguments],
+                    arguments,
                 )
             with private_workspace() as runtime:
                 recorded.bind(runtime)
@@ -620,8 +613,9 @@ def test_recorded_pipeline_and_full_rerun(
             recorded.forbid_native = False
 
         if interrupted:
+            monkeypatch.chdir(fixtures.root / "work")
             with patch.object(cli, "private_workspace", recorded_workspace):
-                assert cli.main(["--apply", *arguments]) == 0
+                assert cli.main(arguments) == 0
             first = publish.RunResult(**json.loads(capsys.readouterr().out))
         else:
             first = reconcile()

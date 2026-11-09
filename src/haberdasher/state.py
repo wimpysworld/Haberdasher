@@ -199,7 +199,7 @@ def acquire(store: Store, locations: Mapping[str, str], *, now: datetime) -> Loc
                 shown = _shown(current[0]) if current else "(released during the check)"
                 raise StateError(
                     f"Bucket {locations[name]} ({name}) is locked by another run: {shown}. "
-                    "Use --break-lock only after that run has stopped"
+                    "Use just unlock only after that run has stopped"
                 ) from None
             lock = replace(lock, held=(*lock.held, (name, receipt.etag)))
     except BaseException:

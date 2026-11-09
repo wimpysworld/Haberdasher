@@ -438,24 +438,25 @@ def test_lock_records_only_run_publisher_and_start(
     assert not fixture.locks()
 
 
-def test_break_lock_deletes_existing_locks_only_on_request(
+def test_unlock_deletes_existing_locks_only_on_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = tmp_path / "local"
-    config = tmp_path / "config.yaml"
-    config.write_text("sources: [test/project]\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "haberdasher.yaml").write_text("sources: [test/project]\n")
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("HD_SIGNING_KEY_FILE", "")
     storage = StoragePolicy("local", {name: str(root / "public" / name) for name in core.FORMATS})
     store = LocalStore(storage)
     state.acquire(store, {"arch": storage.public["arch"]}, now=NOW)
-    base = ["--config", str(config), "--format", "all"]
-    assert cli.main(["--break-lock", *base]) == 1
-    assert "exactly one of --local-root or --remote" in capsys.readouterr().err
-    assert cli.main(["--apply", "--local-root", str(root), *base]) == 1
-    assert "is locked by another run" in capsys.readouterr().err
+    assert cli.main(["publish", "--local-root", str(root)]) == 1
+    error = capsys.readouterr().err
+    assert "is locked by another run" in error and "Use just unlock only after" in error
     assert (root / "public/arch" / state.LOCK_KEY).exists()
-    assert cli.main(["--break-lock", "--local-root", str(root), *base]) == 0
+    assert cli.main(["unlock", "--local-root", str(root)]) == 0
     output = json.loads(capsys.readouterr().out)
-    assert output["mode"] == "break-lock" and set(output["broken"]) == {"arch"}
+    assert output["mode"] == "unlock" and set(output["broken"]) == {"arch"}
     assert not any((root / "public" / name / state.LOCK_KEY).exists() for name in core.FORMATS)
     assert not (root / "public/arch" / state.INVENTORY_KEY).exists()
 

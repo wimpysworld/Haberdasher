@@ -16,7 +16,6 @@ just check-tools
 just build
 just test
 just lint
-just publish --help
 ```
 
 `just setup` creates the root `.venv` from `uv.lock`. Haberdasher requires Python 3.14 or later and PyYAML 6.0.3 with LibYAML `CSafeLoader`. There is no pure-Python YAML fallback.
@@ -46,18 +45,22 @@ formats:
     renewal_seconds: 172800
 ```
 
-The default command plans without storage access or signing:
+Three recipes run Haberdasher. None takes arguments, and each reads `haberdasher.yaml` in the working directory:
 
 ```sh
-just publish --plan --config haberdasher.yaml
+just plan
+just publish
+just unlock
 ```
+
+`just plan` shows a read-only plan without storage access or signing. `just publish` publishes every configured format to its R2 bucket. `just unlock` deletes stale locks after a stopped run.
 
 Planning reads GitHub and checksum assets. Supply `GH_TOKEN` or `GITHUB_TOKEN` through the runtime environment. The isolated GitHub configuration does not use a stored personal `gh` login.
 
-Publication requires `--apply` and either `--local-root` or `--remote`. Read the [publisher guide](docs/publisher.md) before either write mode.
+Read the [publisher guide](docs/publisher.md) before you run `just publish` or `just unlock`.
 
 > [!WARNING]
-> All configured public formats form one publication. With multiple public formats, use `--format all`. A partial update of shared state is not supported.
+> All configured public formats form one publication. A partial update of shared state is not supported.
 
 ## Architecture
 

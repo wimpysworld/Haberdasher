@@ -32,11 +32,19 @@ def configured(names: tuple[str, ...], buckets: tuple[str, ...] | None = None) -
     )
 
 
-def test_default_plan_never_opens_store_or_signer(
+def work_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> Path:
+    work = tmp_path / "work"
+    work.mkdir()
+    config = work / "haberdasher.yaml"
+    config.write_text(text)
+    monkeypatch.chdir(work)
+    return config
+
+
+def test_plan_never_opens_store_or_signer(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text("sources: [synthetic/test]\n")
+    work_config(tmp_path, monkeypatch, "sources: [synthetic/test]\n")
     monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(tmp_path / "must-not-open"))
     with (
         patch.object(discovery, "scan_releases", side_effect=empty_scan) as scan,
@@ -46,7 +54,7 @@ def test_default_plan_never_opens_store_or_signer(
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
         patch("haberdasher.signing.SigningSession", side_effect=AssertionError("key imported")),
     ):
-        assert cli.main(["--config", str(config)]) == 0
+        assert cli.main(["plan"]) == 0
         scan.assert_called_once()
     assert '"mode":"plan"' in capsys.readouterr().out
 
@@ -54,29 +62,22 @@ def test_default_plan_never_opens_store_or_signer(
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["--apply"],
-        ["--remote"],
-        ["--local-root", "/tmp/unused"],
-        ["--break-lock"],
-        ["--plan", "--local-root", "/tmp/unused"],
+        [],
+        ["--plan"],
+        ["plan", "--local-root", "/tmp/unused"],
+        ["publish", "--apply"],
+        ["publish", "--remote"],
+        ["publish", "--format", "all"],
+        ["publish", "--config", "haberdasher.yaml"],
+        ["publish", "--signing-fingerprint", "A" * 40],
+        ["unlock", "--break-lock"],
     ],
 )
-def test_invalid_modes_fail_before_runtime(arguments: list[str]) -> None:
-    with patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")):
-        assert cli.main(arguments) == 1
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ["--plan", "--apply"],
-        ["--apply", "--break-lock"],
-        ["--plan", "--break-lock"],
-        ["--apply", "--remote", "--local-root", "/tmp/unused"],
-    ],
-)
-def test_argparse_rejects_incompatible_modes(arguments: list[str]) -> None:
-    with pytest.raises(SystemExit) as error:
+def test_argparse_rejects_removed_options(arguments: list[str]) -> None:
+    with (
+        patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
+        pytest.raises(SystemExit) as error,
+    ):
         cli.main(arguments)
     assert error.value.code == 2
 
@@ -89,23 +90,22 @@ def test_argparse_rejects_incompatible_modes(arguments: list[str]) -> None:
     ],
     ids=["no-storage", "no-configured-bucket"],
 )
+@pytest.mark.parametrize("command", ["publish", "unlock"])
 def test_remote_denied_before_credentials_or_workspace(
-    tmp_path: Path, config: str, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: str,
+    command: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(config)
+    work_config(tmp_path, monkeypatch, config)
     with (
         patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
         patch.dict(os.environ, clear=True),
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
     ):
-        assert cli.main(["--apply", "--remote", "--config", str(path)]) == 1
-    assert "--remote needs a storage bucket" in capsys.readouterr().err
-
-
-def test_signing_fingerprint_requires_local_root() -> None:
-    with patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")):
-        assert cli.main(["--apply", "--remote", "--signing-fingerprint", "A" * 40]) == 1
+        assert cli.main([command]) == 1
+    assert "needs a storage bucket" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -125,7 +125,7 @@ def test_signing_fingerprint_requires_local_root() -> None:
     ],
 )
 @pytest.mark.parametrize("marker_kind", ["file", "directory", "symlink"])
-@pytest.mark.parametrize("mode", [["--apply"], ["--break-lock"]])
+@pytest.mark.parametrize("mode", [["publish"], ["unlock"]])
 def test_local_root_denied_before_workspace_store_or_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -221,7 +221,7 @@ def test_local_root_uses_nearest_markers_or_packaged_cwd_fallback(
         patch.object(cli, "LocalStore") as store,
         patch.object(publish, "reconcile", return_value=publish.RunResult(False, 0)) as run,
     ):
-        result = cli.main(["--apply", "--local-root", str(root)])
+        result = cli.main(["publish", "--local-root", str(root)])
     if destination in ("cwd", "child"):
         assert result == 1
         config.assert_not_called()
@@ -238,49 +238,9 @@ def test_local_root_uses_nearest_markers_or_packaged_cwd_fallback(
 
 
 @pytest.mark.parametrize("backend", ["local", "r2"])
-@pytest.mark.parametrize(
-    "names, selected, message",
-    [
-        [("apt", "rpm"), "apt", "one publication"],
-        [("apt", "rpm"), "arch", "not a configured public format"],
-        [("apt",), "rpm", "not a configured public format"],
-    ],
-)
-@pytest.mark.parametrize("mode", [["--apply"], ["--break-lock"]])
-def test_format_selection_denied_before_workspace_store_or_key(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    backend: str,
-    names: tuple[str, ...],
-    selected: str,
-    message: str,
-    mode: list[str],
-) -> None:
-    root = tmp_path / "store"
-    destination = ["--local-root", str(root)] if backend == "local" else ["--remote"]
-    with (
-        patch.object(cli, "load_config", return_value=configured(names)),
-        patch.object(cli, "private_workspace", side_effect=AssertionError("runtime opened")),
-        patch.object(cli, "LocalStore", side_effect=AssertionError("storage opened")),
-        patch.object(cli, "R2Store", side_effect=AssertionError("storage opened")),
-        patch.object(state, "acquire", side_effect=AssertionError("lock acquired")),
-        patch.object(state, "break_locks", side_effect=AssertionError("locks broken")),
-        patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
-    ):
-        assert cli.main([*mode, *destination, "--format", selected]) == 1
-    error = capsys.readouterr().err
-    assert message in error
-    assert "Use --format all" in error
-    assert not root.exists()
-
-
-@pytest.mark.parametrize("backend", ["local", "r2"])
-@pytest.mark.parametrize(
-    "names, selected",
-    [(("apt",), "apt"), (("apt",), "all"), (("rpm", "apt"), "all")],
-)
+@pytest.mark.parametrize("names", [("apt",), ("rpm", "apt")])
 def test_policy_preserves_all_configured_roles(
-    tmp_path: Path, backend: str, names: tuple[str, ...], selected: str
+    tmp_path: Path, backend: str, names: tuple[str, ...]
 ) -> None:
     root = tmp_path / "store"
     roles = tuple(sorted(names))
@@ -294,15 +254,16 @@ def test_policy_preserves_all_configured_roles(
         ),
         PRODUCTION_FINGERPRINT if backend == "r2" else None,
     )
-    destination = ["--local-root", str(root)] if backend == "local" else ["--remote"]
+    destination = ["--local-root", str(root)] if backend == "local" else []
     with (
         patch.object(cli, "load_config", return_value=configured(names, (*names, "flatpak"))),
         patch.object(cli, "LocalStore"),
         patch.object(cli, "R2Store"),
         patch.object(publish, "reconcile", return_value=publish.RunResult(False, 0)) as run,
+        patch.dict(os.environ, {"HD_SIGNING_KEY_FILE": ""}),
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
     ):
-        assert cli.main(["--apply", *destination, "--format", selected]) == 0
+        assert cli.main(["publish", *destination]) == 0
     run.assert_called_once()
     assert run.call_args.args[1] == expected
     assert not root.exists()
@@ -319,7 +280,7 @@ def test_remote_uses_configured_buckets_and_production_key(
         patch.object(publish, "reconcile", return_value=publish.RunResult(False, 0)) as run,
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
     ):
-        assert cli.main(["--apply", "--remote", "--format", "all"]) == 0
+        assert cli.main(["publish"]) == 0
     policy = Policy(
         StoragePolicy("r2", {"apk": "test-apk", "rpm": "test-rpm"}),
         PRODUCTION_FINGERPRINT,
@@ -333,51 +294,43 @@ def test_remote_uses_configured_buckets_and_production_key(
     assert not capsys.readouterr().err
 
 
-@pytest.mark.parametrize("omit_from_config", [False, True])
 def test_omitted_format_bucket_is_preserved(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], omit_from_config: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def write_config(names: tuple[str, ...]) -> None:
-        config.write_text(
-            yaml.safe_dump(
-                {
-                    "sources": ["synthetic/test"],
-                    "formats": {name: {} for name in names},
-                    "storage": {"public": {name: f"test-{name}" for name in names}},
-                }
-            )
-        )
-
-    config = tmp_path / "config.yaml"
-    write_config(("apt", "rpm"))
+    work_config(
+        tmp_path,
+        monkeypatch,
+        yaml.safe_dump(
+            {
+                "sources": ["synthetic/test"],
+                "formats": {"apt": {}},
+                "storage": {"public": {"apt": "test-apt"}},
+            }
+        ),
+    )
     root = tmp_path / "store"
-    args = ["--apply", "--local-root", str(root), "--config", str(config)]
     inventory = root / "public/rpm/haberdasher.json"
     inventory.parent.mkdir(parents=True)
     inventory.write_bytes(b"previously published rpm inventory")
     before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
-    if omit_from_config:
-        write_config(("apt",))
     with (
         patch.object(discovery, "scan_releases", side_effect=empty_scan),
+        patch.dict(os.environ, {"HD_SIGNING_KEY_FILE": ""}),
         patch("haberdasher.signing._input", side_effect=AssertionError("key input read")),
     ):
-        result = cli.main([*args, "--format", "all" if omit_from_config else "apt"])
-    output = capsys.readouterr()
-    if omit_from_config:
-        assert result == 0 and '"changed":false' in output.out
-    else:
-        assert result == 1 and "Use --format all" in output.err
+        result = cli.main(["publish", "--local-root", str(root)])
+    assert result == 0 and '"changed":false' in capsys.readouterr().out
     after = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
     assert after == before
     assert not list(root.rglob(state.LOCK_KEY))
 
 
-def test_format_help_explains_single_publication_constraint() -> None:
-    help_text = " ".join(cli.parser().format_help().split())
-    assert "all configured public formats form one publication" in help_text
-    assert "only configured public format" in help_text
-    assert "local bootstrap with no configured public destinations" in help_text
+def test_help_lists_commands_and_hides_local_root(capsys: pytest.CaptureFixture[str]) -> None:
+    assert "{plan,publish,unlock}" in cli.parser().format_help()
+    for command in ("plan", "publish", "unlock"):
+        with pytest.raises(SystemExit):
+            cli.main([command, "--help"])
+        assert "--local-root" not in capsys.readouterr().out
 
 
 def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -> None:
@@ -405,8 +358,7 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
     publishing = steps[-1]
     assert publishing["name"] == "Publish"
     assert str(publishing["run"]).endswith(
-        "nix develop --no-write-lock-file --command \\\n"
-        "  just publish --apply --remote --format all\n"
+        "nix develop --no-write-lock-file --command just publish\n"
     )
     assert all("env" not in step for step in steps[:-1])
     env = state.mapping(publishing["env"])
@@ -449,15 +401,16 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
         runtime.close()
 
 
-def test_local_apply_without_key_or_assets_writes_nothing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_local_publish_without_key_or_assets_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    config = tmp_path / "config.yaml"
-    config.write_text("sources: [synthetic/test]\n")
+    work_config(tmp_path, monkeypatch, "sources: [synthetic/test]\nformats: {apt: {}}\n")
     root = tmp_path / "store"
-    args = ["--apply", "--local-root", str(root), "--config", str(config), "--format", "apt"]
-    with patch.object(discovery, "scan_releases", side_effect=empty_scan):
-        assert cli.main(args) == 0
+    with (
+        patch.object(discovery, "scan_releases", side_effect=empty_scan),
+        patch.dict(os.environ, {"HD_SIGNING_KEY_FILE": ""}),
+    ):
+        assert cli.main(["publish", "--local-root", str(root)]) == 0
     assert '"changed":false' in capsys.readouterr().out
     assert sorted(path.name for path in (root / "public").iterdir()) == ["apt"]
     assert not any((root / "public/apt").iterdir())

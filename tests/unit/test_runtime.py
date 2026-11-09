@@ -338,3 +338,39 @@ def test_help_and_collection_need_no_credentials() -> None:
     )
     assert result.returncode == 0
     assert b"--collect-only" in result.stdout
+
+
+def test_github_falls_back_to_stored_gh_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def login(path: str) -> str:
+        calls.append(path)
+        return "synthetic-login-token"
+
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr("haberdasher.runtime._gh_login_token", login)
+    runtime = Runtime(tmp_path / "workspace")
+    try:
+        assert "GH_TOKEN" not in runtime.environment_for("native")
+        assert runtime.environment_for("github")["GH_TOKEN"] == "synthetic-login-token"
+        assert runtime.environment_for("github")["GH_TOKEN"] == "synthetic-login-token"
+        assert len(calls) == 1
+    finally:
+        runtime.close()
+
+
+def test_explicit_environment_never_reads_gh_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def login(_path: str) -> str:
+        raise AssertionError("stored login must not be read")
+
+    monkeypatch.setattr("haberdasher.runtime._gh_login_token", login)
+    runtime = Runtime(tmp_path / "workspace", environ={"PATH": os.defpath})
+    try:
+        assert "GH_TOKEN" not in runtime.environment_for("github")
+    finally:
+        runtime.close()

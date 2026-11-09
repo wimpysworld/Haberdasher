@@ -76,8 +76,4 @@ def test_publish_command(tmp_path: Path, workflow: dict[str, Any], exit_code: in
         "--command",
         "just",
         "publish",
-        "--apply",
-        "--remote",
-        "--format",
-        "all",
     ]

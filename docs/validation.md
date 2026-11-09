@@ -33,9 +33,9 @@ The first command builds the current system's checks. The second evaluates all d
 
 | Boundary | Executable evidence | What it establishes |
 | --- | --- | --- |
-| CLI and configuration | `tests/unit/test_cli.py`, `test_config.py` | Default planning, strict policy, explicit destinations, early format-selection rejection |
+| CLI and configuration | `tests/unit/test_cli.py`, `test_config.py` | Subcommands without options, read-only planning, strict policy, early destination rejection |
 | Discovery and admission | `tests/unit/`, `tests/native/test_pipeline.py` | Release reconciliation, late assets, pending checksums, native identity conflicts, no-op behaviour |
-| Locked publication | `tests/unit/test_publish.py`, `test_storage.py` | Bucket locks, `--break-lock`, conditional writes and deletes, unchanged reruns, late assets, an interrupted run followed by a full rerun |
+| Locked publication | `tests/unit/test_publish.py`, `test_storage.py` | Bucket locks, `unlock`, conditional writes and deletes, unchanged reruns, late assets, an interrupted run followed by a full rerun |
 | Hosted policy input | `tests/unit/test_publish_workflow.py` | Synthetic workflow execution, exact policy bytes, private permissions, empty-input rejection, cleanup on success, failure, and signals |
 | Storage clients | `tests/native/test_storage_clients.py` | Native transport against local protocol fixtures, not real R2 permissions |
 | Native adapters | `tests/native/test_{apt,rpm,arch,apk,flatpak}.py` | Retained state, install/update, rejection cases, local HTTP acquisition |
@@ -48,7 +48,7 @@ See [the proof index](proofs/README.md) for preserved shell evidence. Do not sub
 
 ## Safe example checks
 
-`just publish --help` needs no token or key. Parse the README source example with `load_config` and the publisher policy example with `load_policy` from `src/haberdasher/config.py`.
+`python -m haberdasher --help` needs no token or key. Parse the README source example with `load_config` and the publisher policy example with `load_policy` from `src/haberdasher/config.py`.
 
 Run `tests/native/test_pipeline.py` for served-key trust without production URLs or credentials. APT deb822 templates must retain the same scoped key, suite, component, and architecture as the tested client.
 
@@ -60,7 +60,7 @@ Run `tests/native/test_pipeline.py` for served-key trust without production URLs
 
 The workflow passes `github.token` as `GH_TOKEN` with `contents: read`. Storage variables and `HD_SIGNING_KEY` come from secrets. These inputs stay scoped to the publish step.
 
-The publish step runs `just publish --apply --remote --format all`. It reads buckets and formats from the committed `haberdasher.yaml`. No secret holds publisher configuration.
+The publish step runs `just publish`. It reads buckets and formats from the committed `haberdasher.yaml`. No secret holds publisher configuration.
 
 This change does not provision secrets, change environment protection, or enable `HD_PUBLISH_ENABLED`. Keep publication disabled until the activation checks below pass. Workflow configuration alone does not prove hosted access.
 

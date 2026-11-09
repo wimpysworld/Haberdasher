@@ -138,14 +138,16 @@ printf '<%s>\n' "$@" >publish.log
 EOF
 (
     cd "$fixture/project"
-    env -i PATH="$PATH" just publish
-    [[ $(cat publish.log) == $'<-m>\n<haberdasher>' ]]
-    literal="path with spaces;\$(touch unexpected)"
-    env -i PATH="$PATH" just publish --config "$literal" --plan
-    [[ $(cat publish.log) == $'<-m>\n<haberdasher>\n<--config>\n'"<$literal>"$'\n<--plan>' ]]
-    [[ ! -e unexpected ]]
+    for recipe in plan publish unlock; do
+        env -i PATH="$PATH" just "$recipe"
+        [[ $(cat publish.log) == $'<-m>\n<haberdasher>\n'"<$recipe>" ]]
+        if env -i PATH="$PATH" just "$recipe" --local-root /tmp/unused 2>/dev/null; then
+            printf 'FAIL: %s accepted an argument.\n' "$recipe" >&2
+            exit 1
+        fi
+    done
 )
-printf 'PASS: publish defaults to no arguments and preserves literal argument boundaries.\n'
+printf 'PASS: plan, publish, and unlock run their subcommands and take no arguments.\n'
 
 cat >"$fixture/helpers/gpgconf" <<'EOF'
 #!/bin/sh

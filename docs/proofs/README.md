@@ -41,9 +41,9 @@ The production pipeline fetches both public OpenPGP exports over HTTP and compar
 
 The earlier discovery, admission, storage, native adapter, and public-key follow-ons are implemented. Bucket locks replace the earlier private state store. The coordinator is minimal Python with native repository tools, not a shell-only publisher or plugin framework.
 
-`src/haberdasher/core.py` defines records. `discovery.py` and `admission.py` reconcile and verify assets. `state.py` reads each bucket's public `haberdasher.json` and manages the bucket locks. `storage.py` and `publish.py` conditionally publish. All configured public formats share one publication. Multiple configured formats require `--format all`.
+`src/haberdasher/core.py` defines records. `discovery.py` and `admission.py` reconcile and verify assets. `state.py` reads each bucket's public `haberdasher.json` and manages the bucket locks. `storage.py` and `publish.py` conditionally publish. All configured public formats share one publication.
 
-Bootstrap keys and packages precede native entries, and inventories follow their format outputs. Locks have no automatic expiry. Only an explicit `--break-lock` deletes a stale lock. A full rerun recovers an interrupted run.
+Bootstrap keys and packages precede native entries, and inventories follow their format outputs. Locks have no automatic expiry. Only an explicit `just unlock` deletes a stale lock. A full rerun recovers an interrupted run.
 
 These controls do not provide multi-object atomicity. Older referenced objects remain available. No deletion or retention change is authorised.
 

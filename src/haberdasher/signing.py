@@ -319,6 +319,21 @@ class SigningSession:
         return paths[0], paths[1], paths[2]
 
 
+def key_fingerprint(runtime: Runtime) -> str | None:
+    """Primary fingerprint of the signing key in the environment, or None without a key."""
+    if not (os.environ.get("HD_SIGNING_KEY_FILE") or os.environ.get("HD_SIGNING_KEY")):
+        return None
+    data = _input(None, None)
+    with private_workspace(runtime.root / "tmp") as workspace:
+        home = str(workspace.root / "gnupg")
+        listing = _checked(
+            workspace,
+            ["gpg", "--no-options", "--homedir", home, "--batch", "--with-colons", "--show-keys"],
+            data=data,
+        )
+    return _field(_records(listing), "fpr", 9)
+
+
 @contextlib.contextmanager
 def signing_session(
     runtime: Runtime,

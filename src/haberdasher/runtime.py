@@ -30,6 +30,28 @@ class RuntimeFailure(RuntimeError):
     pass
 
 
+def _gh_login_token(path: str) -> str | None:
+    """Read the token of the operator's stored `gh` login, when one exists."""
+    executable = shutil.which("gh", path=path)
+    if executable is None:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, "auth", "token", "--hostname", "github.com"],
+            env={**os.environ, "PATH": path, "GH_PROMPT_DISABLED": "1"},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return None
+    token = result.stdout.decode("ascii", "replace").strip()
+    if result.returncode != 0 or not token or any(char.isspace() for char in token):
+        return None
+    return token
+
+
 class Runtime:
     def __init__(
         self,
@@ -46,6 +68,7 @@ class Runtime:
         source = os.environ if environ is None else environ
         self._path = source.get("HABERDASHER_TOOL_PATH", source.get("PATH", os.defpath))
         self._github = {key: source[key] for key in GITHUB_VARIABLES if key in source}
+        self._github_login = environ is None and not self._github
         self._storage = {key: source[key] for key in STORAGE_VARIABLES if key in source}
         self._children: set[subprocess.Popen[bytes]] = set()
         self._closed = False
@@ -81,6 +104,11 @@ class Runtime:
     def environment_for(self, kind: str) -> dict[str, str]:
         env = dict(self._base)
         if kind == "github":
+            if self._github_login and not self._closed:
+                self._github_login = False
+                token = _gh_login_token(self._path)
+                if token:
+                    self._github = {"GH_TOKEN": token}
             env.update(self._github)
             env.update(
                 {
