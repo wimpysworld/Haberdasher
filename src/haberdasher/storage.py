@@ -91,11 +91,34 @@ def _verify(ref: ObjectRef, source: Path) -> None:
         raise StorageError("Object bytes differ from the expected SHA256 or size")
 
 
-def _stats(line: str, progress: Report) -> None:
-    """Pass on the periodic `rclone` statistics line, without its log prefix."""
-    _, marker, stats = line.partition(" NOTICE: ")
-    if marker and " ETA " in stats:
-        progress(stats.strip())
+def _stats(progress: Report) -> Report:
+    """Pass on the periodic `rclone` statistics lines of one run, without their log prefix.
+
+    A line whose byte count repeats the previous one is suppressed. At less than 100%
+    the first such line reports a stall, and the next changed count reports the resume.
+    """
+    previous: str | None = None
+    stalled = False
+
+    def report(line: str) -> None:
+        nonlocal previous, stalled
+        _, marker, stats = line.partition(" NOTICE: ")
+        stats = stats.strip()
+        if not marker or " ETA " not in stats:
+            return
+        done, _, total = stats.partition(",")[0].partition(" / ")
+        if done == previous:
+            if not stalled and done != total:
+                stalled = True
+                progress("upload stalled, waiting")
+            return
+        previous = done
+        if stalled:
+            stalled = False
+            progress("upload resumed")
+        progress(stats)
+
+    return report
 
 
 def _rclone_error(result: subprocess.CompletedProcess[bytes]) -> str:
@@ -610,7 +633,7 @@ class R2Store:
                         ),
                         env_kind="storage",
                         timeout=transfer_timeout(sum(ref.size for ref in refs)),
-                        progress=lambda line: _stats(line, progress),
+                        progress=_stats(progress),
                     )
                     if result.returncode:
                         raise UnknownWrite(None, f"{role} upload: {_rclone_error(result)}")

@@ -56,11 +56,20 @@ def printed_result(output: str) -> publish.RunResult:
     """Rebuild the run result from the publish progress lines and summary."""
     lines = output.splitlines()
     assert lines and "{" not in output
-    objects = sum(
-        int(line.split()[2])
-        for line in lines
-        if line.split()[1:2] == ["uploaded"] or "metadata object" in line
-    ) + sum(1 for line in lines if line.endswith(f"wrote {state.INVENTORY_KEY}"))
+    objects = 0
+    uploading = False
+    for line in lines:
+        words = line.split()
+        if words[1:2] == ["uploading"]:
+            uploading = True
+        elif words[1:2] == ["uploaded"]:
+            uploading = False
+            objects += int(words[2])
+        elif line.endswith(f"wrote {state.INVENTORY_KEY}"):
+            uploading = False
+            objects += 1
+        elif not uploading and line.startswith(f"{words[0]:<5}   "):
+            objects += 1
     pending = next((int(line.split()[1]) for line in lines if line.startswith("Skipped ")), 0)
     changed = lines[-1].startswith("Published ")
     assert changed or lines[-1].startswith("Nothing changed in ")

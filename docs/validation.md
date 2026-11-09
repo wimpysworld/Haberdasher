@@ -68,17 +68,19 @@ Keep `HD_PUBLISH_ENABLED` unset until every check in this list is done. Use publ
 
 To do:
 
-- [ ] Real R2: test publisher credentials, conditional create/replace/delete, exact ETags, lock conflicts, and a full rerun after an interruption against disposable buckets.
-- [ ] Production signing: verify that the production key has the full fingerprint in `PRODUCTION_FINGERPRINT`, without exposing private bytes.
+- [ ] Real R2: test lock conflicts, conditional replace and delete, and exact ETags against disposable buckets.
 - [ ] Hosted execution: set the CI secrets, `HD_PUBLISH_ENABLED`, and the `publisher` environment protection, then test hosted permissions.
 - [ ] Public delivery: test HTTPS, content types, cache headers, delayed clients, and split entry/signature reads on the live domains.
-- [ ] Real inputs: run `just plan` and a disposable publish against the latest release of each source.
 - [ ] APK: test real packages with Alpine clients.
 - [ ] Flatpak: install a real bundle from the public bucket, with its runtime from Flathub.
 - [ ] Distribution clients: test official images for each format, including `arm64` APT and `aarch64` packages, separately from the pinned Nix clients.
 
 Done:
 
+- [x] Real R2 publication with publisher credentials: conditional lock writes, lock release, and parallel `rclone` uploads with size and MD5 checks.
+- [x] Real R2 recovery after a network interruption during upload: the first full publish on 2026-11-09 completed after a router restart stalled the APT upload for about 3 minutes.
+- [x] Production signing: `just publish` matched the production key to `PRODUCTION_FINGERPRINT` and signed all five formats.
+- [x] Real inputs: the latest Tailor and Sidra releases published to all five repositories.
 - [x] Domain activation: each custom domain is attached to its bucket, with SSL and ownership `active` and `r2.dev` access off.
 - [x] Native signature checks on pinned Nix clients for all five formats, over loopback HTTP.
 - [x] Latest-release discovery, checksum verification, and cosign verification against recorded GitHub responses.

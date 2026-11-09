@@ -194,7 +194,20 @@ def _write(store: Store, output: OutputObject) -> None:
 def _size(size: int) -> str:
     if size >= 1_000_000:
         return f"{size / 1_000_000:.0f} MB"
-    return f"{size / 1_000:.0f} kB" if size >= 1_000 else plural(size, "byte")
+    return f"{size / 1_000:.0f} KB" if size >= 1_000 else f"{size} B"
+
+
+def _listing(name: str, refs: Sequence[ObjectRef]) -> list[str]:
+    """Name each object and its size in key order, with Flatpak `objects/` as one line."""
+    lines: dict[str, str] = {}
+    objects = [ref for ref in refs if name == "flatpak" and ref.key.startswith("objects/")]
+    for ref in refs:
+        if ref not in objects:
+            lines[ref.key] = f"{ref.key} ({_size(ref.size)})"
+    if objects:
+        size = _size(sum(ref.size for ref in objects))
+        lines["objects/"] = f"objects/ {plural(len(objects), 'file')} ({size})"
+    return [f"  {lines[key]}" for key in sorted(lines)]
 
 
 def _duration(seconds: float) -> str:
@@ -361,6 +374,8 @@ def _reconcile(
                 step(
                     report, item.format, f"uploading {plural(len(batch), 'object')} ({_size(size)})"
                 )
+                for line in _listing(item.format, [output.ref for output in batch]):
+                    step(report, item.format, line)
                 started = time.monotonic()
                 store.upload(
                     batch, progress=lambda line, name=item.format: step(report, name, line)
@@ -368,7 +383,6 @@ def _reconcile(
                 elapsed = _duration(time.monotonic() - started)
                 step(report, item.format, f"uploaded {plural(len(batch), 'object')} in {elapsed}")
                 count += len(batch)
-            written = 0
             for output in outputs:
                 if output in batch:
                     continue
@@ -378,17 +392,9 @@ def _reconcile(
                     and datetime.fromisoformat(item.expires_at) <= utc_now()
                 ):
                     raise StateError("APT metadata expired before publication; rerun")
-                if output.ref.size > 1_000_000:
-                    step(
-                        report,
-                        item.format,
-                        f"uploading {output.ref.key} ({_size(output.ref.size)})",
-                    )
+                step(report, item.format, f"  {output.ref.key} ({_size(output.ref.size)})")
                 _write(store, output)
-                written += 1
-            if written:
-                step(report, item.format, f"wrote {plural(written, 'metadata object')}")
-            count += written
+                count += 1
             state.write_inventory(store, current, data)
             step(report, item.format, f"wrote {state.INVENTORY_KEY}")
             count += 1

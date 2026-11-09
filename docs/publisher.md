@@ -106,15 +106,32 @@ apt   locked
 apt   preparing 18 new packages
 apt   signed metadata
 ...
-apt   uploading 18 objects (214 MB)
-apt   107.000 MiB / 204.090 MiB, 52%, 10.512 MiB/s, ETA 9s
-apt   uploaded 18 objects in 21s
-apt   wrote 7 metadata objects
+apt   uploading 10 objects (214 MB)
+apt     keys/haberdasher.asc (3 KB)
+apt     pool/main/s/sidra/sidra_1.3.0_amd64.deb (104 MB)
+...
+apt   138.106 MiB / 204.513 MiB, 68%, 156.941 KiB/s, ETA 7m13s
+apt   upload stalled, waiting
+apt   upload resumed
+apt   204.513 MiB / 204.513 MiB, 100%, 10.512 MiB/s, ETA 0s
+apt   uploaded 10 objects in 5m11s
+apt     dists/stable/main/binary-amd64/Packages (2 KB)
+...
+apt     dists/stable/InRelease (4 KB)
 apt   wrote haberdasher.json
+...
+flatpak uploading 530 objects (226 MB)
+flatpak   keys/haberdasher.asc (2 KB)
+flatpak   objects/ 522 files (225 MB)
+...
+flatpak uploaded 530 objects in 1m02s
+flatpak   refs/heads/app/world.wimpys.Sidra/x86_64/stable (65 B)
 ...
 apt   unlocked
 Published 72 packages to 4 repositories.
 ```
+
+Each upload lists every object by key and size before `rclone` starts. Flatpak lists OSTree `objects/` as one line. Each metadata line names the key before its write. `rclone` reports progress every 10 seconds. When the byte count does not change, one `upload stalled, waiting` line replaces the repeated progress lines until the upload continues.
 
 When nothing is new, each format prints `unchanged` and the summary is `Nothing changed in 4 repositories.`
 

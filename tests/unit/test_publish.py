@@ -560,9 +560,12 @@ def test_publish_reports_each_step_and_an_unchanged_rerun(
         "arch  locked",
         "arch  preparing 1 new package",
         "arch  signed metadata",
-        f"arch  uploading 3 objects ({2 * len(EXPORT) + 18} bytes)",
+        f"arch  uploading 3 objects ({2 * len(EXPORT) + 18} B)",
+        f"arch    keys/haberdasher.asc ({len(EXPORT)} B)",
+        f"arch    keys/haberdasher.gpg ({len(EXPORT)} B)",
+        "arch    x86_64/tool-1.pkg (18 B)",
         "arch  uploaded 3 objects in 3m12s",
-        "arch  wrote 1 metadata object",
+        "arch    x86_64/db (7 B)",
         "arch  wrote haberdasher.json",
         "arch  unlocked",
     ]
@@ -571,16 +574,44 @@ def test_publish_reports_each_step_and_an_unchanged_rerun(
     assert lines == ["arch  locked", "arch  unchanged", "arch  unlocked"]
 
 
-def test_publish_reports_batch_size_and_large_entries(
+def test_publish_reports_batch_size_in_readable_units(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = Fixture(tmp_path, monkeypatch, ("arch",))
     fixture.releases.add("big", "1", b"x" * 2_000_000)
+    fixture.releases.add("mid", "1", b"x" * 4_000)
     lines: list[str] = []
     fixture.run(lines.append)
-    assert [line.rsplit(" in ", 1)[0] for line in lines if "upload" in line] == [
-        "arch  uploading 3 objects (2 MB)",
-        "arch  uploaded 3 objects",
+    assert [
+        line.rsplit(" in ", 1)[0] for line in lines if "x86_64/" in line or "upload" in line
+    ] == [
+        "arch  uploading 4 objects (2 MB)",
+        "arch    x86_64/big-1.pkg (2 MB)",
+        "arch    x86_64/mid-1.pkg (4 KB)",
+        "arch  uploaded 4 objects",
+        "arch    x86_64/db (12 B)",
+    ]
+
+
+def test_flatpak_listing_summarises_objects() -> None:
+    def ref(key: str, size: int) -> ObjectRef:
+        return ObjectRef("flatpak", key, "package", size, "0" * 64, "a/b", "no-cache")
+
+    refs = [
+        ref("summary", 900),
+        ref("objects/ab/cd.filez", 1_500_000),
+        ref("deltas/x/superblock", 2_000),
+        ref("objects/01/23.commit", 600_000),
+        ref("refs/heads/app", 65),
+    ]
+    assert publish._listing("flatpak", refs) == [  # pyright: ignore[reportPrivateUsage]
+        "  deltas/x/superblock (2 KB)",
+        "  objects/ 2 files (2 MB)",
+        "  refs/heads/app (65 B)",
+        "  summary (900 B)",
+    ]
+    assert publish._listing("apt", refs[1:2]) == [  # pyright: ignore[reportPrivateUsage]
+        "  objects/ab/cd.filez (2 MB)"
     ]
 
 
