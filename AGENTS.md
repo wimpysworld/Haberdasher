@@ -58,7 +58,7 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
   Create each lock with a conditional write, in a fixed bucket order, and delete the locks when the run ends.
   Release a stale lock only with `just unlock`.
 - Publish immutable packages and dependency metadata before each format's entry metadata.
-- Upload packages and other content-addressed objects in parallel with one `rclone` run per format.
+- Upload packages and other content-addressed objects in parallel with one `rclone` run per content type and cache policy.
   Keep conditional single-object writes for locks, entry metadata, and `haberdasher.json`.
 - Publish each format's allow-listed inventory after its entry metadata.
 - Recover from an interrupted run with a full rerun.
