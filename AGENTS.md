@@ -39,7 +39,7 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
 - Keep `haberdasher.yaml` to a list of GitHub repositories, for example `sources: [wimpysworld/tailor]`.
   Do not add per-project settings. Haberdasher must handle dozens of projects with different release layouts.
 - Derive formats from asset types, and architectures from package metadata.
-  Verify a cosign bundle when a release has one. Keep bucket names and public URLs in code.
+  Verify the cosign bundle of a checksum file when the release has one. Keep bucket names and public URLs in code.
 - Do not add a separate policy file, or approval gates in code or configuration.
 - Publish every format that the sources provide, plus formats already published, in one run.
 - Verify each package against a release checksum file or its GitHub asset digest before import.
