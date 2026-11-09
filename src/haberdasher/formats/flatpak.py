@@ -92,16 +92,19 @@ def _string(value: JSONValue) -> str:
 def _runtime_repo(value: JSONValue) -> str:
     if value is None:
         return FLATHUB
-    parsed = urlsplit(_string(value))
+    url = _string(value)
+    # urlsplit drops control characters, but the key files keep the original value.
+    parsed = urlsplit(url)
     if (
-        parsed.scheme not in {"https", "http"}
+        any(char <= " " or char == "\x7f" for char in url)
+        or parsed.scheme not in {"https", "http"}
         or not parsed.hostname
         or parsed.username
         or parsed.password
         or (parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"})
     ):
         raise FlatpakFailure("Runtime repository must be an HTTPS URL")
-    return _string(value)
+    return url
 
 
 def _runtime_repos(history: Sequence[AdmittedAsset]) -> str:

@@ -512,6 +512,11 @@ def test_application_extensions_need_only_a_safe_directory(
         ("http://repo.example.invalid/x.flatpakrepo", None),
         ("https://user:secret@repo.example.invalid/x", None),
         ("file:///etc/passwd", None),
+        ("https://repo.example.invalid/x\nGPGKey=AAAA", None),
+        ("https://repo.example.invalid/x\r", None),
+        ("https://repo.example.invalid/x\tx", None),
+        ("https://repo.example.invalid/x\x7f", None),
+        (" https://repo.example.invalid/x", None),
         ("", None),
     ],
 )
