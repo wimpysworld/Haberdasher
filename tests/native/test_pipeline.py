@@ -40,7 +40,13 @@ from haberdasher.runtime import Runtime, private_workspace
 from haberdasher.signing import signing_session
 from haberdasher.storage import LocalStore
 from tests.native.fixtures import apk, apt, arch, flatpak, rpm
-from tests.native.test_flatpak import add_remotes, client_run, installed
+from tests.native.test_flatpak import (
+    add_remotes,
+    client_run,
+    installed,
+    payload_objects,
+    published_remote,
+)
 from tests.support.http import serve
 from tests.support.keys import DisposableKey, disposable_key, run
 from tests.support.native import NativeClient
@@ -832,3 +838,117 @@ def test_public_bootstrap_interruption_converges_with_a_full_rerun(
         with serve(fixtures.root / "store/public") as http:
             client = native_client("apt", fixtures, "rerun", http.url("apt"), key, "", ("", ""))
             client(retained, 1)
+
+
+def test_flatpak_runs_download_only_the_working_set() -> None:
+    """Three runs: an app, its second version, a second app. Later runs skip earlier payloads."""
+    other = "world.wimpress.HaberdasherOther"
+    with private_workspace() as fixtures, disposable_key() as key, ExitStack() as stack:
+        assets = [
+            flatpak.bundle(fixtures, fixtures.root, "1", 1),
+            flatpak.bundle(fixtures, fixtures.root, "2", 2),
+            flatpak.bundle(fixtures, fixtures.root, "1", 3, app=other),
+        ]
+        recorded = RecordedGitHub(assets)
+        storage = StoragePolicy("local", {"flatpak": str(fixtures.root / "store/public/flatpak")})
+        bucket = Path(storage.public["flatpak"])
+        store = InterruptedStore(storage)
+        (fixtures.root / "http").mkdir()
+        with signing_session(
+            fixtures, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as signer:
+            runtime_commits = flatpak.runtime_repo(
+                fixtures, fixtures.root / "http", signer.fingerprint, signer.gnupghome
+            )
+        http = stack.enter_context(serve(fixtures.root / "http"))
+        config = Config(("wimpysworld/fixture",))
+        policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
+        client = NativeClient(fixtures, "incremental")
+        downloads: list[tuple[int, int]] = []
+        with patch.dict(os.environ, {"HD_SIGNING_KEY_FILE": str(key.key_file)}):
+            for number in range(1, 4):
+                heads = (
+                    {
+                        path.relative_to(bucket / "refs/heads").as_posix(): path.read_text().strip()
+                        for path in (bucket / "refs/heads").rglob("*")
+                        if path.is_file()
+                    }
+                    if bucket.exists()
+                    else {}
+                )
+                earlier = set[str]().union(
+                    *(
+                        payload_objects(fixtures, bucket, ref)
+                        for ref in heads
+                        if ref.startswith("app/")
+                    )
+                )
+                recorded.visible = recorded.checksummed = number
+                store.downloads.clear()
+                with private_workspace() as runtime:
+                    recorded.bind(runtime)
+                    result = publish.reconcile(
+                        config, policy, store=store, runtime=runtime, now=datetime.now(UTC)
+                    )
+                assert result.changed
+                keys = {ref.key for ref in store.downloads}
+                assert len(keys) == len(store.downloads)
+                assert not keys & earlier
+                assert {key for key in keys if key.endswith(".commit")} == {
+                    f"objects/{commit[:2]}/{commit[2:]}.commit" for commit in heads.values()
+                }
+                downloads.append((len(keys), sum(ref.size for ref in store.downloads)))
+                public = fixtures.root / "http/flatpak"
+                shutil.copytree(bucket, public, dirs_exist_ok=True)
+                http.set_generation_mtime(
+                    [path for path in public.rglob("*") if path.is_file()], number
+                )
+                if number == 1:
+                    client_run(
+                        client,
+                        "remote-add",
+                        f"--gpg-import={key.public_file}",
+                        "provider",
+                        http.url("runtime-repo"),
+                    )
+                    repofile = published_remote(
+                        http.url("flatpak"), client.path("config/publisher.flatpakrepo")
+                    )
+                    client_run(client, "remote-add", "--from", "publisher", str(repofile))
+                    assert (
+                        "no-gpg-verify"
+                        not in client_run(client, "remotes", "--columns=name,options").decode()
+                    )
+                    client_run(client, "install", "--noninteractive", "publisher", flatpak.APP)
+                elif number == 2:
+                    client_run(client, "update", "--noninteractive")
+                else:
+                    client_run(client, "install", "--noninteractive", "publisher", other)
+                    client_run(client, "update", "--noninteractive")
+                with private_workspace() as runtime:
+                    retained = committed(store, runtime, "flatpak")
+                commit = next(
+                    identity.source_commit
+                    for identity in retained.active_identities
+                    if identity.name == flatpak.REF
+                )
+                assert commit is not None
+                if number < 3:
+                    installed(client, commit, str(number), runtime_commits)
+                else:
+                    assert (
+                        client_run(client, "info", "--show-commit", flatpak.APP).strip().decode()
+                        == commit
+                    )
+                    assert (
+                        client_run(client, "info", "--show-origin", other).strip() == b"publisher"
+                    )
+                    assert {
+                        f"{flatpak.APP}.flatpakref",
+                        f"{other}.flatpakref",
+                    } <= {path.name for path in bucket.glob("*.flatpakref")}
+        assert downloads[0] == (0, 0)
+        published = sum(path.stat().st_size for path in bucket.rglob("*") if path.is_file())
+        for count, size in downloads[1:]:
+            assert 0 < count < 100 and size < published / 2
+        print(f"Flatpak working-set downloads per run (objects, bytes): {downloads}")

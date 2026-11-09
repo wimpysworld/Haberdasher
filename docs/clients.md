@@ -116,7 +116,15 @@ RSA256 signs the index with SHA256. Native v2 `Q1` control identity still uses S
 
 ## Flatpak
 
-Add the publisher from its remote description. The file holds the Haberdasher public key, so no separate key import is necessary:
+Install an application with one command from its `.flatpakref` file at the bucket root. For Sidra:
+
+```sh
+flatpak --user install https://flatpak.wimpys.world/world.wimpys.sidra.flatpakref
+```
+
+The file holds the Haberdasher public key, so no separate key import is necessary. Flatpak adds the `wimpysworld` remote. It also adds the runtime repository from the file's `RuntimeRepo` key, which is Flathub for Sidra, when the runtime is not already installed. Each application has its own `<app-id>.flatpakref` file.
+
+To add only the remote, use its remote description. `flatpak remote-add` does not act on `RuntimeRepo`, so add Flathub first:
 
 ```sh
 flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
@@ -124,9 +132,7 @@ flatpak --user remote-add --from wimpysworld https://flatpak.wimpys.world/wimpys
 flatpak --user install wimpysworld APP_ID
 ```
 
-Applications such as Sidra need a runtime from Flathub. The `RuntimeRepo` key in `wimpysworld.flatpakrepo` names that repository, but `flatpak remote-add` does not act on it. Add Flathub first.
-
-Haberdasher signs every commit and the summary with its own key, and removes any upstream commit signature. Do not disable commit or summary verification. `tests/native/test_flatpak.py` adds the publisher from the published file, with a local runtime provider that has a separate key, and checks the remote configuration and deployed data. No installed application executes.
+Haberdasher signs every commit and the summary with its own key, and removes any upstream commit signature. Do not disable commit or summary verification. `tests/native/test_flatpak.py` adds the publisher from the published file, with a local runtime provider that has a separate key, and checks the remote configuration and deployed data. It also installs from a `.flatpakref` file whose `RuntimeRepo` names a loopback runtime repository, and checks that Flatpak adds that runtime remote with GPG verification. No installed application executes.
 
 ## Qualification
 

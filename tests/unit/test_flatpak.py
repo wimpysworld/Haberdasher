@@ -196,10 +196,13 @@ def test_summary_dependencies_are_immutable() -> None:
         "config",
         "refs/heads/" + REF,
         flatpak.FLATPAKREPO,
+        "world.example.Test.flatpakref",
     ):
         assert flatpak._classify(key)[1] is True
-    with pytest.raises(flatpak.FlatpakFailure):
-        flatpak._classify("unapproved-secret")
+    assert flatpak._classify("world.example.Test.flatpakref") == ("entry", True, 9)
+    for key in ("unapproved-secret", "Test.flatpakref", "keys/world.example.Test.flatpakref"):
+        with pytest.raises(flatpak.FlatpakFailure):
+            flatpak._classify(key)
 
 
 def test_empty_state_is_not_missing_state(runtime: Runtime) -> None:
@@ -248,7 +251,7 @@ def relocated(runtime: Runtime, monkeypatch: pytest.MonkeyPatch) -> PreparedForm
     )
     files: dict[str, JSONValue] = {}
     outputs: list[OutputObject] = []
-    for ordinal, key in enumerate(("config", "summary")):
+    for ordinal, key in enumerate(("config", "summary", "world.example.Test.flatpakref")):
         native = runtime.root / "flatpak/native" / key
         output = runtime.root / "flatpak/outputs" / str(ordinal)
         for path in (native, output):
@@ -553,3 +556,38 @@ def test_one_runtime_repository_for_the_published_remote(tmp_path: Path) -> None
     )
     with pytest.raises(flatpak.FlatpakFailure, match="different runtime repositories"):
         flatpak._runtime_repos((*one, admitted(3, "https://other.invalid/r.flatpakrepo")))
+
+
+def test_flatpakref_installs_one_application_with_its_runtime_source(
+    runtime: Runtime, tmp_path: Path
+) -> None:
+    text = flatpak._flatpakref(
+        "world.example.Test", "stable", "Test App", b"key", flatpak.FLATHUB
+    ).decode()
+    assert text == (
+        "[Flatpak Ref]\nName=world.example.Test\nBranch=stable\nTitle=Test App\n"
+        "Url=https://flatpak.wimpys.world/\nGPGKey=a2V5\nIsRuntime=false\n"
+        f"RuntimeRepo={flatpak.FLATHUB}\nSuggestRemoteName=wimpysworld\n"
+    )
+    path = tmp_path / "appstream.xml"
+    path.write_text(
+        '<component><id>world.example.Test</id><name xml:lang="de">Prüfung</name>'
+        "<name>\n  Test\n  App </name></component>"
+    )
+    assert flatpak._title(path, REF) == "Test App"
+    path.write_text("<component><id>world.example.Test</id></component>")
+    assert flatpak._title(path, REF) == "world.example.Test"
+
+
+def test_missing_flatpakref_renews_published_state() -> None:
+    identity = NativeIdentity("flatpak", REF, "x86_64", "1", source_commit="c" * 64)
+
+    def ref(key: str) -> ObjectRef:
+        return ObjectRef(
+            "flatpak", key, "entry", 1, "a" * 64, "application/octet-stream", "no-cache"
+        )
+
+    retained = RetainedFormat("flatpak", None, (), (identity,), {}, (ref("summary"),))
+    assert flatpak.missing_entries(retained)
+    retained = replace(retained, objects=(*retained.objects, ref("world.example.Test.flatpakref")))
+    assert not flatpak.missing_entries(retained)

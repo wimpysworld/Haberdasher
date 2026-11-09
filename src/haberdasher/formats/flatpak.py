@@ -44,10 +44,14 @@ _SUMMARY = re.compile(
     r"summaries/(?:[0-9a-f]{64}\.(?:gz|idx|idx\.sig)|[0-9a-f]{64}-[0-9a-f]{64}\.delta)"
 )
 _ENTRIES = ("config", "summary", "summary.sig", "summary.idx", "summary.idx.sig")
+_FLATPAKREF = re.compile(r"([A-Za-z0-9_]+(?:\.[A-Za-z0-9_-]+){2,})\.flatpakref")
 # Runtime source for bundles that do not name one. Electron and Freedesktop runtimes live there.
 FLATHUB = "https://dl.flathub.org/repo/flathub.flatpakrepo"
-FLATPAKREPO = "wimpysworld.flatpakrepo"
+REMOTE = "wimpysworld"
+FLATPAKREPO = f"{REMOTE}.flatpakrepo"
 TITLE = "Wimpy's World"
+# Preparation reads only these paths of an application head. AppStream regeneration needs them.
+_APP_PATHS = ("/metadata", "/files/share/app-info")
 
 
 class FlatpakFailure(ValueError):
@@ -115,6 +119,47 @@ def _flatpakrepo(public: bytes, runtime_repo: str) -> bytes:
     ).encode()
 
 
+def _flatpakref(app: str, branch: str, title: str, public: bytes, runtime_repo: str) -> bytes:
+    """The install file for one application, which adds the remote and the runtime source."""
+    return (
+        f"[Flatpak Ref]\nName={app}\nBranch={branch}\nTitle={title}\n"
+        f"Url={PUBLIC['flatpak'][1]}/\nGPGKey={base64.b64encode(public).decode()}\n"
+        f"IsRuntime=false\nRuntimeRepo={runtime_repo}\nSuggestRemoteName={REMOTE}\n"
+    ).encode()
+
+
+def _flatpakrefs(
+    runtime: Runtime, repo: Path, history: Sequence[AdmittedAsset], public: bytes, work: Path
+) -> dict[str, bytes]:
+    """Expected install files, from each application head and its bundle's runtime source."""
+    apps: dict[str, set[tuple[str, str, str]]] = {}
+    for ref, commit in _heads(runtime, repo).items():
+        if not ref.startswith("app/"):
+            continue
+        _, app, _, branch = ref.split("/")
+        info = _app_info(runtime, repo, commit, work / f"flatpakref-{commit}")
+        runtime_repo = _runtime_repos(
+            [item for item in history if item.inspected.identity.name == ref]
+        )
+        apps.setdefault(app, set()).add((branch, _title(_catalogue(info), ref), runtime_repo))
+    result: dict[str, bytes] = {}
+    for app, values in apps.items():
+        if len(values) != 1:
+            raise FlatpakFailure(f"{app}: architectures differ in branch, name or runtime")
+        branch, title, runtime_repo = values.pop()
+        result[f"{app}.flatpakref"] = _flatpakref(app, branch, title, public, runtime_repo)
+    return result
+
+
+def missing_entries(retained: RetainedFormat) -> bool:
+    """Whether published state lacks an application's flatpakref, so a run must add it."""
+    keys = {ref.key for ref in retained.objects}
+    return any(
+        f"{identity.name.split('/')[1]}.flatpakref" not in keys
+        for identity in retained.active_identities
+    )
+
+
 def compare(left: NativeIdentity, right: NativeIdentity, *, runtime: Runtime) -> int | None:
     if (left.format, left.name, left.architecture) != (
         right.format,
@@ -150,14 +195,28 @@ def _xml(path: Path) -> ET.Element:
         raise FlatpakFailure("Invalid AppStream metadata") from error
 
 
-def _version(path: Path, ref: str, runtime: Runtime) -> str:
+def _component(path: Path, ref: str) -> ET.Element:
     xml = _xml(path)
     app = ref.split("/")[1]
     components = [xml] if xml.tag == "component" else list(xml.findall("component"))
     matches = [node for node in components if node.findtext("id") in {app, app + ".desktop"}]
     if len(matches) != 1 or len(components) != 1:
         raise FlatpakFailure("AppStream must identify exactly one application")
-    component = matches[0]
+    return matches[0]
+
+
+def _title(path: Path, ref: str) -> str:
+    """The untranslated AppStream name on one line, or the app ID when there is none."""
+    names = [
+        " ".join((node.text or "").split())
+        for node in _component(path, ref).findall("name")
+        if "{http://www.w3.org/XML/1998/namespace}lang" not in node.attrib
+    ]
+    return next((name for name in names if name), ref.split("/")[1])
+
+
+def _version(path: Path, ref: str, runtime: Runtime) -> str:
+    component = _component(path, ref)
     if any(
         bundle.get("type") != "flatpak" or bundle.text != ref
         for bundle in component.findall("bundle")
@@ -213,12 +272,32 @@ def _checkout(runtime: Runtime, repo: Path, commit: str, target: Path) -> None:
     _run(runtime, "ostree", f"--repo={repo}", "checkout", "--user-mode", commit, str(target))
 
 
-def _appstream(tree: Path, ref: str, runtime: Runtime) -> str:
-    directory = safe_path(tree, "files/share/app-info/xmls")
+def _app_info(runtime: Runtime, repo: Path, commit: str, target: Path) -> Path:
+    """Check out only the AppStream directory, which a restored application head keeps."""
+    _run(
+        runtime,
+        "ostree",
+        f"--repo={repo}",
+        "checkout",
+        "--user-mode",
+        "--disable-cache",
+        f"--subpath={_APP_PATHS[1]}",
+        commit,
+        str(target),
+    )
+    return target
+
+
+def _catalogue(info: Path) -> Path:
+    directory = safe_path(info, "xmls")
     files = list(directory.iterdir()) if directory.is_dir() else []
     if len(files) != 1 or files[0].suffix not in {".gz", ".xml"}:
         raise FlatpakFailure("One native AppStream catalogue is required")
-    return _version(safe_path(tree, str(files[0].relative_to(tree))), ref, runtime)
+    return safe_path(info, str(files[0].relative_to(info)))
+
+
+def _appstream(info: Path, ref: str, runtime: Runtime) -> str:
+    return _version(_catalogue(info), ref, runtime)
 
 
 def inspect(
@@ -265,7 +344,7 @@ def inspect(
         _checkout(runtime, repo, commit, tree)
         if safe_path(tree, "metadata").read_text() != bundle.get("metadata"):
             raise FlatpakFailure("Commit metadata and payload differ")
-        version = _appstream(tree, ref, runtime)
+        version = _appstream(safe_path(tree, _APP_PATHS[1].lstrip("/")), ref, runtime)
     # Preparation replaces any upstream signature with the publisher signature.
     signed = bool(data.pop("signatures", None))
     return InspectedAsset(
@@ -300,7 +379,7 @@ def _classify(key: str) -> tuple[str, bool, int]:
         return "entry", True, 3
     if key in _ENTRIES[1:]:
         return "entry", True, 4 + _ENTRIES.index(key)
-    if key == FLATPAKREPO:
+    if key == FLATPAKREPO or _FLATPAKREF.fullmatch(key):
         return "entry", True, 4 + len(_ENTRIES)
     raise FlatpakFailure(f"Unexpected public repository file: {key}")
 
@@ -394,15 +473,20 @@ def _validate_repo(
         expected_repo = _flatpakrepo(public.read_bytes(), _runtime_repos(retained.accepted_history))
         if (repo / FLATPAKREPO).read_bytes() != expected_repo:
             raise FlatpakFailure(f"Retained {FLATPAKREPO} differs from the signing key or runtime")
+        refs = _flatpakrefs(runtime, repo, retained.accepted_history, public.read_bytes(), work)
+        for path in repo.glob("*.flatpakref"):
+            if refs.get(path.name) != path.read_bytes():
+                raise FlatpakFailure(f"Retained {path.name} differs from its application")
         for index, (ref, commit) in enumerate(heads.items()):
             data = _native(runtime, repository=str(repo), commit=commit)
             source = safe_path(repo, f"objects/{commit[:2]}/{commit[2:]}.commit")
             _verify_signatures(runtime, source, data.get("signatures"), public, fingerprint, work)
             tree = work / f"tree-{index}"
-            _checkout(runtime, repo, commit, tree)
-            if ref in expected:
+            if ref not in expected:
+                _checkout(runtime, repo, commit, tree)
+            else:
                 _check_metadata(_metadata(runtime, repo, commit), ref)
-                version = _appstream(tree, ref, runtime)
+                version = _appstream(_app_info(runtime, repo, commit, tree), ref, runtime)
                 if version != next(
                     identity.version
                     for identity in retained.active_identities
@@ -428,11 +512,15 @@ def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime
     if retained.metadata.get("policy") != json.loads(canonical_json(policy)):
         raise FlatpakFailure("Retained policy changed")
     files = _mapping(retained.metadata.get("files"))
-    if set(files) != {ref.key for ref in retained.objects}:
+    objects = {ref.key: ref for ref in retained.objects}
+    # The files are the working set that the next preparation restores, not every object.
+    if not set(files) <= set(objects) or any(
+        _classify(key)[0] == "entry" and key not in files for key in objects
+    ):
         raise FlatpakFailure("Retained object closure is incomplete")
-    for ref in retained.objects:
-        _classify(ref.key)
-        if sha256_file(Path(_string(files[ref.key]))) != (ref.sha256, ref.size):
+    for key, ref in objects.items():
+        _classify(key)
+        if key in files and sha256_file(Path(_string(files[key]))) != (ref.sha256, ref.size):
             raise FlatpakFailure("Retained file is missing or corrupt")
     active = {identity.name: identity for identity in retained.active_identities}
     if len(active) != len(retained.active_identities):
@@ -457,10 +545,43 @@ def _restore(runtime: Runtime, retained: RetainedFormat, repo: Path) -> None:
     _run(runtime, "ostree", f"--repo={repo}", "init", "--mode=archive-z2")
     if retained.objects:
         files = _mapping(retained.metadata.get("files"))
-        for ref in retained.objects:
-            target = safe_path(repo, ref.key)
+        for key, path in files.items():
+            target = safe_path(repo, key)
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            shutil.copyfile(Path(_string(files[ref.key])), target)
+            shutil.copyfile(Path(_string(path)), target)
+        # Restored application heads hold only their AppStream and metadata paths.
+        # The partial marker makes fsck verify what is present instead of failing on the rest.
+        for ref, commit in _mapping(retained.metadata.get("heads", {})).items():
+            if ref.startswith("app/"):
+                commit = digest(commit)
+                safe_path(repo, f"state/{commit}.commitpartial").write_bytes(b"")
+
+
+def _working_set(runtime: Runtime, repo: Path, public: Path, work: Path) -> set[str]:
+    """Keys that the next run restores: entries, summaries, heads and the paths that update reads.
+
+    A native pull of the signed repository selects the head commits, their signatures, the
+    AppStream trees and each application's metadata and AppStream paths. Payload files and
+    earlier commits stay published but are not downloaded again.
+    """
+    scratch = work / "working-set"
+    ostree = ("ostree", f"--repo={scratch}")
+    _run(runtime, *ostree, "init", "--mode=archive-z2")
+    _run(runtime, *ostree, "remote", "add", f"--gpg-import={public}", "origin", repo.as_uri())
+    heads = _heads(runtime, repo)
+    apps = [ref for ref in heads if ref.startswith("app/")]
+    _run(runtime, *ostree, "pull", "--depth=0", "origin", *sorted(set(heads) - set(apps)))
+    paths = [f"--subpath={path}" for path in _APP_PATHS]
+    _run(runtime, *ostree, "pull", "--depth=0", *paths, "origin", *apps)
+    keys = {
+        path.relative_to(scratch).as_posix()
+        for path in (scratch / "objects").rglob("*")
+        if path.is_file()
+    }
+    if not all(_OBJECT.fullmatch(key) for key in keys):
+        raise FlatpakFailure("Unexpected object in the working set")
+    keys |= {f"objects/{commit[:2]}/{commit[2:]}.commitmeta" for commit in heads.values()}
+    return keys | {key for key in _files(repo) if not key.startswith("objects/")}
 
 
 def prepare(
@@ -537,20 +658,27 @@ def prepare(
     if not public:
         raise FlatpakFailure("Missing public signing key")
     (repo / FLATPAKREPO).write_bytes(_flatpakrepo(public, _runtime_repos(history)))
+    with tempfile.TemporaryDirectory(dir=out, prefix="entries-") as directory:
+        work = Path(directory)
+        for name, data in _flatpakrefs(runtime, repo, history, public, work).items():
+            safe_path(repo, name).write_bytes(data)
+        (work / "public.gpg").write_bytes(public)
+        working = _working_set(runtime, repo, work / "public.gpg", work)
     files = _files(repo)
     old = {ref.key: ref for ref in retained.objects}
     oldfiles = _mapping(retained.metadata.get("files", {}))
-    for key in old.keys() - files.keys():
-        if _classify(key)[1]:
-            raise FlatpakFailure("Native update removed a retained mutable entry")
-        target = safe_path(repo, key)
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        shutil.copyfile(Path(_string(oldfiles[key])), target)
-        files[key] = target
+    if any(_classify(key)[1] for key in oldfiles.keys() - files.keys()):
+        raise FlatpakFailure("Native update removed a retained mutable entry")
+    if not working <= files.keys():
+        raise FlatpakFailure("Working set names an absent repository file")
     refs: list[ObjectRef] = []
     outputs: list[OutputObject] = []
     etags = _mapping(retained.metadata.get("etags", {}))
-    for key in sorted(files, key=lambda key: (_classify(key)[2], key)):
+    # Published objects that this run did not restore stay referenced, unchanged.
+    for key in sorted(old.keys() | files.keys(), key=lambda key: (_classify(key)[2], key)):
+        if key not in files:
+            refs.append(old[key])
+            continue
         kind, mutable, _ = _classify(key)
         sha, size = sha256_file(files[key])
         ref = ObjectRef(
@@ -578,7 +706,7 @@ def prepare(
         tuple(history),
         tuple(active.values()),
         {
-            "files": {key: str(path) for key, path in files.items()},
+            "files": {key: str(files[key]) for key in sorted(working)},
             "heads": json_value(_heads(runtime, repo)),
             "public_key": base64.b64encode(public).decode(),
             "fingerprint": signer.fingerprint,
@@ -600,8 +728,11 @@ def validate_prepared(
     files = _mapping(prepared.retained.metadata.get("files"))
     objects = {ref.key: ref for ref in prepared.referenced_objects}
     order = -1
+    apps = {identity.name.split("/")[1] for identity in prepared.retained.active_identities}
+    if any(f"{app}.flatpakref" not in files for app in apps):
+        raise FlatpakFailure("Prepared state lacks an application flatpakref")
     for ordinal, output in enumerate(prepared.outputs):
-        if objects.get(output.ref.key) != output.ref or output.ref.key not in files:
+        if objects.get(output.ref.key) != output.ref:
             raise FlatpakFailure("Output differs from the prepared object manifest")
         rank = _classify(output.ref.key)[2]
         if (

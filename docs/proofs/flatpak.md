@@ -79,8 +79,8 @@ temporarily remove availability. No multi-object atomicity is proved.
 
 `src/haberdasher/formats/flatpak.py` implements approved bundle admission, retained heads/payload, and signed commit/summary output. It rejects signed upstream bundles. It requires explicit source owner, application refs, runtime URL, fingerprint, branch, architecture, remote, refs, and extensions. The collection policy is empty.
 
-`tests/native/test_flatpak.py` checks HTTP search, install/update, commit/summary trust, approved runtime and extension origins, exact deployed commits, and rejection cases. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and a full rerun after an interruption.
+`tests/native/test_flatpak.py` checks HTTP search, install/update, commit/summary trust, approved runtime and extension origins, exact deployed commits, and rejection cases. `tests/native/test_pipeline.py` adds real CLI publication, served-key bootstrap, no-op, late assets, and a full rerun after an interruption. It also runs three incremental publications and checks that later runs do not download the payload files or earlier commits.
 
-The runtime origin remains separate from the application origin. Arbitrary `RuntimeRepo` selection is not allowed. No production source is automatically added. See [Flatpak setup](../clients.md#flatpak).
+The runtime origin remains separate from the application origin. A `.flatpakref` install adds the runtime repository that the bundle names, or Flathub when it names none. `flatpak remote-add` from `wimpysworld.flatpakrepo` adds no runtime source. See [Flatpak setup](../clients.md#flatpak).
 
 Production source/runtime configuration, real upstream inputs, public HTTPS/cache behaviour, older clients, other architectures, sandbox execution, and production permissions remain pending. Use the [activation checks](../validation.md#remaining-activation-checks) before public use.

@@ -163,6 +163,17 @@ def installed(
     }
 
 
+def payload_objects(runtime: Runtime, repo: Path, ref: str) -> set[str]:
+    """Content objects of a published head outside the paths that preparation restores."""
+    listing = run(runtime, "ostree", f"--repo={repo}", "ls", "-R", "-C", ref).decode()
+    keys: set[str] = set()
+    for line in listing.splitlines():
+        fields = line.split()
+        if fields[0].startswith("-") and not fields[-1].startswith(tuple(flatpak._APP_PATHS)):
+            keys.add(f"objects/{fields[4][:2]}/{fields[4][2:]}.filez")
+    return keys
+
+
 def publish(prepared: PreparedFormat, root: Path) -> RetainedFormat:
     for output in prepared.outputs:
         destination = root / output.ref.key
@@ -268,7 +279,10 @@ def test_native_publication_cold_restore_and_clients() -> None:
                 shutil.rmtree(root / "source")
                 restored_files = {}
                 before = len(http.requests())
+                working = flatpak._mapping(retained1.metadata["files"])
                 for ref in retained1.objects:
+                    if ref.key not in working:
+                        continue
                     destination = root / "cold" / ref.key
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     with urlopen(http.url("publisher/" + ref.key), timeout=10) as response:
@@ -277,9 +291,12 @@ def test_native_publication_cold_restore_and_clients() -> None:
                     restored_files[ref.key] = str(destination)
                 requests = http.requests()[before:]
                 assert sum(record.bytes_sent for record in requests) == sum(
-                    ref.size for ref in retained1.objects
+                    ref.size for ref in retained1.objects if ref.key in working
                 )
-                assert any(record.path.endswith(".filez") for record in requests)
+                # The payload stays published, but only AppStream and metadata files restore.
+                payload = payload_objects(runtime, public_tree / "publisher", REF)
+                assert payload and payload <= {ref.key for ref in retained1.objects}
+                assert not payload & set(restored_files)
                 retained1 = replace(
                     retained1, metadata={**retained1.metadata, "files": restored_files}
                 )
@@ -556,7 +573,10 @@ def test_native_publication_cold_restore_and_clients() -> None:
                     with pytest.raises(flatpak.FlatpakFailure, match="configuration"):
                         flatpak.validate_retained(invalid, policy=policy, runtime=runtime)
                 payload = next(
-                    ref for ref in prepared2.referenced_objects if ref.key.endswith(".filez")
+                    ref
+                    for ref in prepared2.referenced_objects
+                    if ref.key.endswith(".filez")
+                    and ref.key in flatpak._mapping(prepared2.retained.metadata["files"])
                 )
                 path = Path(
                     flatpak._string(
@@ -721,3 +741,46 @@ def test_signed_upstream_apps_and_architectures_share_one_repository() -> None:
                     client_run(client, "info", "--show-commit", RUNTIME).strip().decode()
                     == runtime_commits[0]
                 )
+
+                # One command installs from the flatpakref and adds the runtime source itself.
+                name = f"{other}.flatpakref"
+                text = (public_tree / "publisher" / name).read_text()
+                public_url = f"Url={PUBLIC['flatpak'][1]}/\n"
+                assert text == (
+                    f"[Flatpak Ref]\nName={other}\nBranch=stable\nTitle=Haberdasher Test\n"
+                    f"{public_url}GPGKey={base64.b64encode(key.public_file.read_bytes()).decode()}"
+                    f"\nIsRuntime=false\nRuntimeRepo={runtime_repofile}\n"
+                    "SuggestRemoteName=wimpysworld\n"
+                )
+                assert {path.name for path in (public_tree / "publisher").glob("*.flatpakref")} == {
+                    name,
+                    f"{APP}.flatpakref",
+                }
+                (public_tree / "install").mkdir()
+                (public_tree / "install" / name).write_text(
+                    text.replace(public_url, f"Url={http.url('publisher')}/\n")
+                )
+                single = NativeClient(runtime, "flatpakref")
+                client_run(single, "install", "--noninteractive", http.url(f"install/{name}"))
+                assert client_run(single, "info", "--show-origin", other).strip() == b"wimpysworld"
+                runtime_origin = client_run(single, "info", "--show-origin", RUNTIME).strip()
+                assert runtime_origin != b"wimpysworld"
+                assert (
+                    client_run(single, "info", "--show-commit", RUNTIME).strip().decode()
+                    == runtime_commits[0]
+                )
+                config = flatpak._mapping(
+                    flatpak._native(
+                        single.runtime, metadata=(single.root / "repo/config").read_text()
+                    )["keyfile"]
+                )
+                remotes = {group for group in config if group.startswith("remote ")}
+                assert remotes == {'remote "wimpysworld"', f'remote "{runtime_origin.decode()}"'}
+                for group in remotes:
+                    remote = flatpak._mapping(config[group])
+                    assert remote["gpg-verify"] == "true"
+                    assert remote["gpg-verify-summary"] == "true"
+                runtime_remote = flatpak._mapping(config[f'remote "{runtime_origin.decode()}"'])
+                assert flatpak._string(runtime_remote["url"]).rstrip("/") == http.url(
+                    "runtime-repo"
+                ).rstrip("/")

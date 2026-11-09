@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ from haberdasher.core import (
 )
 from haberdasher.runtime import Runtime
 
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_SECONDS = 2
 MAX_PAGE_BYTES = 8 * 1024 * 1024
 MAX_PAGES = 10_000
 MAX_ITEMS = 100_000
@@ -337,25 +340,33 @@ def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[tu
     with tempfile.TemporaryDirectory(prefix="asset-", dir=root) as directory:
         path = Path(directory) / "payload"
         pattern = "".join("\\" + char if char in "*?[]" else char for char in source.filename)
-        result = runtime.run(
-            [
-                "gh",
-                "release",
-                "download",
-                "--repo",
-                f"https://github.com/{source.repository}",
-                "--pattern",
-                pattern,
-                "--output",
-                str(path),
-                "--",
-                tag,
-            ],
-            env_kind="github",
-            timeout=600,
-        )
-        if result.returncode != 0:
-            raise DiscoveryFailure("GitHub asset download failed")
+        for attempt in range(DOWNLOAD_ATTEMPTS):
+            if attempt:
+                path.unlink(missing_ok=True)
+                time.sleep(DOWNLOAD_RETRY_SECONDS * attempt)
+            result = runtime.run(
+                [
+                    "gh",
+                    "release",
+                    "download",
+                    "--repo",
+                    f"https://github.com/{source.repository}",
+                    "--pattern",
+                    pattern,
+                    "--output",
+                    str(path),
+                    "--",
+                    tag,
+                ],
+                env_kind="github",
+                timeout=600,
+            )
+            if result.returncode == 0:
+                break
+        else:
+            raise DiscoveryFailure(
+                f"GitHub asset download failed after {DOWNLOAD_ATTEMPTS} attempts"
+            )
         safe_path(path.parent, path.name)
         if not path.is_file() or path.stat().st_size != source.size or path.stat().st_size > limit:
             raise DiscoveryFailure("Downloaded asset has an invalid size")

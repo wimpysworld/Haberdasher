@@ -271,6 +271,11 @@ def _reconcile(
             seconds=policies["apt"].renewal_seconds
         ):
             renew.add("apt")
+    if "flatpak" in published and published["flatpak"].retained.metadata:
+        from haberdasher.formats import flatpak
+
+        if flatpak.missing_entries(published["flatpak"].retained):
+            renew.add("flatpak")
     missing_bootstrap: set[str] = (
         {name for name in names if len(published[name].bootstrap) != 2}
         if fingerprint is not None

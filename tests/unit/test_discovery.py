@@ -108,6 +108,10 @@ class RecordedGitHub(Runtime):
         assert path.is_relative_to(self.root)
         assert path.parent.stat().st_mode & 0o777 == 0o700
         data = self.bodies[f"{argv[-1]}/{name}"]
+        if self.download_fault == "transient":
+            self.download_fault = None
+            path.write_bytes(data[:1])
+            return subprocess.CompletedProcess(argv, 1, b"", b"connection reset")
         if self.download_fault == "missing":
             return subprocess.CompletedProcess(argv, 0, b"", b"")
         if self.download_fault == "symlink":
@@ -129,6 +133,14 @@ class RecordedGitHub(Runtime):
         if self.download_fault == "timeout":
             raise RuntimeFailure("injected timeout")
         return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+
+@pytest.fixture(autouse=True)
+def no_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    def sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("haberdasher.discovery.time.sleep", sleep)
 
 
 @pytest.fixture
@@ -520,6 +532,23 @@ def test_download_failure_is_not_verified(github: RecordedGitHub, fault: str) ->
         verify_asset(source, checksum, runtime=github, out=out)
     assert not out.exists()
     assert not list((github.root / "downloads").iterdir())
+
+
+def test_transient_download_failure_is_retried(github: RecordedGitHub) -> None:
+    source, checksum = package(scan(github))
+    github.download_fault = "transient"
+    out = github.root / "verified.deb"
+    verify_asset(source, checksum, runtime=github, out=out)
+    assert out.read_bytes() == b"current-deb"
+    downloads = [call for call in github.calls if call[1:3] == ("release", "download")]
+    assert len(downloads) >= 2
+
+
+def test_repeated_download_failure_names_the_attempts(github: RecordedGitHub) -> None:
+    source, checksum = package(scan(github))
+    github.download_fault = "partial-failure"
+    with pytest.raises(DiscoveryFailure, match="after 3 attempts"):
+        verify_asset(source, checksum, runtime=github, out=github.root / "verified")
 
 
 def test_verification_guards_before_download(github: RecordedGitHub, tmp_path: Path) -> None:
