@@ -1,4 +1,3 @@
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,7 +9,6 @@ from haberdasher.config import (
     Config,
     FormatPolicy,
     Policy,
-    RuntimePolicy,
     StoragePolicy,
     load_config,
 )
@@ -23,11 +21,13 @@ def document(tmp_path: Path, value: str) -> Path:
 
 
 def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
-    assert Path("haberdasher.yaml").read_text() == "sources: [wimpysworld/tailor]\n"
+    assert (
+        Path("haberdasher.yaml").read_text() == "sources: [wimpysworld/tailor, wimpysworld/sidra]\n"
+    )
     config = load_config(Path("haberdasher.yaml"))
-    assert config == Config(("wimpysworld/tailor",))
+    assert config == Config(("wimpysworld/tailor", "wimpysworld/sidra"))
     assert config.format_policy("apt").architectures == ("amd64", "arm64")
-    for name in ("rpm", "arch", "apk"):
+    for name in ("rpm", "arch", "apk", "flatpak"):
         assert config.format_policy(name).architectures == ("x86_64", "aarch64")
     apt = config.format_policy("apt")
     assert (apt.suite, apt.component, apt.validity_seconds, apt.renewal_seconds) == (
@@ -207,33 +207,6 @@ def test_remote_needs_r2_and_production_key(tmp_path: Path) -> None:
     ):
         with pytest.raises(ValueError, match="production signing key"):
             policy.require_remote()
-
-
-def flatpak_runtime() -> RuntimePolicy:
-    return RuntimePolicy(
-        url="http://127.0.0.1:12345/runtime",
-        fingerprint="A" * 40,
-        collection="",
-        branch="stable",
-        architecture="x86_64",
-        remote="synthetic-runtime",
-        refs=("runtime/org.example.Platform/x86_64/stable",),
-    )
-
-
-def test_runtime_policy_http_needs_loopback() -> None:
-    with pytest.raises(ValueError, match="loopback"):
-        replace(flatpak_runtime(), url="http://example.invalid/runtime")
-
-
-@pytest.mark.parametrize("collection", ["", "world.example.Runtime", " "])
-def test_direct_runtime_collection_policy(collection: str) -> None:
-    runtime = flatpak_runtime()
-    if collection:
-        with pytest.raises(ValueError, match="External runtime collection must be empty"):
-            replace(runtime, collection=collection)
-    else:
-        assert replace(runtime, collection=collection).collection == ""
 
 
 def test_direct_policy_validation() -> None:

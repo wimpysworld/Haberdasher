@@ -7,7 +7,6 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
-from urllib.parse import urlsplit
 
 import yaml
 from yaml.events import (
@@ -26,7 +25,6 @@ from haberdasher.core import (
     format_name,
     integer,
     repository_name,
-    safe_key,
     text,
 )
 
@@ -100,56 +98,6 @@ def _token(value: object) -> str:
 
 
 @dataclass(frozen=True)
-class RuntimePolicy(Record):
-    url: str
-    fingerprint: str
-    collection: str
-    branch: str
-    architecture: str
-    remote: str
-    refs: tuple[str, ...]
-    extensions: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        parsed = urlsplit(text(self.url, "runtime URL"))
-        if (
-            parsed.scheme not in {"https", "http"}
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-        ):
-            raise ValueError("Invalid runtime URL")
-        if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-            raise ValueError("HTTP runtime URLs must use loopback")
-        _fingerprint(self.fingerprint)
-        if not isinstance(self.collection, str):
-            raise ValueError("Invalid runtime collection")
-        if self.collection:
-            raise ValueError("External runtime collection must be empty")
-        for value in (self.branch, self.architecture, self.remote):
-            _token(value)
-        if not self.refs:
-            raise ValueError("Runtime refs are required")
-        for ref in (*self.refs, *self.extensions):
-            safe_key(ref)
-
-
-@dataclass(frozen=True)
-class TrustPolicy(Record):
-    source_owner: str | None = None
-    refs: tuple[str, ...] = ()
-    runtime: RuntimePolicy | None = None
-
-    def __post_init__(self) -> None:
-        if self.source_owner is not None:
-            repository_name(f"{self.source_owner}/validation")
-        for ref in self.refs:
-            safe_key(ref)
-        if self.runtime is not None and not isinstance(self.runtime, RuntimePolicy):
-            raise ValueError("Invalid runtime policy")
-
-
-@dataclass(frozen=True)
 class FormatPolicy(Record):
     format: str
     architectures: tuple[str, ...] = ("x86_64",)
@@ -157,7 +105,6 @@ class FormatPolicy(Record):
     component: str = "main"
     validity_seconds: int = 604800
     renewal_seconds: int = 172800
-    trust: TrustPolicy = field(default_factory=TrustPolicy)
 
     def __post_init__(self) -> None:
         format_name(self.format)
@@ -171,8 +118,6 @@ class FormatPolicy(Record):
         integer(self.renewal_seconds, "renewal", 1)
         if self.validity_seconds > 31 * 86400 or self.renewal_seconds >= self.validity_seconds:
             raise ValueError("Invalid validity or renewal window")
-        if not isinstance(self.trust, TrustPolicy):
-            raise ValueError("Invalid trust policy")
 
 
 # Bucket and public URL for each format. Plans read the URL; publication writes the bucket.

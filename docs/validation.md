@@ -73,9 +73,9 @@ This change does not provision secrets, change environment protection, or enable
 | Hosted execution | Configure CI secrets, default-branch policy, environment protection, and hosted permissions |
 | Public delivery | Qualify custom-domain HTTPS, content types, cache headers, delayed clients, and split entry/signature recovery |
 | APK | Accept native v2 SHA1 control identity and test declared real inputs/client compatibility |
-| Flatpak | Derive source owner, application refs, runtime origin, extensions, and empty collection without per-project settings. Until then, discovery skips `.flatpak` assets. |
+| Flatpak | Install a real bundle from the public bucket with its runtime from Flathub |
 | Distribution clients | Test declared official distribution images and architectures separately from pinned Nix clients |
 
-Signed upstream Flatpak bundles remain rejected. Flatpak publication is not supported yet, and there is no automatic source addition. No activation test above ran as part of the local acceptance path.
+No activation test above ran as part of the local acceptance path.
 
 Obtain explicit approval before production credentials, key use, public actions, or external permission tests. No deletion or retention change forms part of activation.

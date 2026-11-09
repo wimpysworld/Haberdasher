@@ -18,13 +18,13 @@ Haberdasher derives every other setting:
 
 | Setting | Source |
 | --- | --- |
-| Format | Asset suffix: `.deb` APT, `.rpm` RPM, `.pkg.tar.zst` and `.pkg.tar.xz` Arch, `.apk` Alpine. Native inspection confirms the type. Other assets are ignored. |
+| Format | Asset suffix: `.deb` APT, `.rpm` RPM, `.pkg.tar.zst` and `.pkg.tar.xz` Arch, `.apk` Alpine, `.flatpak` Flatpak. Native inspection confirms the type. Other assets are ignored. |
 | Architecture | Package metadata, never the file name |
 | Bucket and public URL | The `PUBLIC` table in `src/haberdasher/config.py` |
 | APT suite, component, and validity | Code defaults: `stable`, `main`, seven days, renewal within two days |
-| Upstream signatures | Not checked. RPM inputs lose upstream signatures before Haberdasher signs them. APK inputs lose their `.SIGN.*` stream. Arch ignores release `.sig` assets. APT publishes `.deb` packages unchanged. |
+| Upstream signatures | Not checked. RPM inputs lose upstream signatures before Haberdasher signs them. APK inputs lose their `.SIGN.*` stream. Arch ignores release `.sig` assets. APT publishes `.deb` packages unchanged. Flatpak commits lose their detached upstream signatures. |
 
-A `.flatpak` asset prints `Flatpak not supported yet, skipped`, and the run continues. The Flatpak adapter needs per-project runtime and application settings, which `haberdasher.yaml` does not allow.
+A `.flatpak` bundle supplies its own settings. The application ref gives the app ID, architecture, and branch. The application metadata gives the runtime. The bundle's `runtime-repo` gives the runtime repository, or Flathub (`https://dl.flathub.org/repo/flathub.flatpakrepo`) when the bundle has none. All applications go into one OSTree repository, with `wimpysworld.flatpakrepo` at its root. A run fails when bundles name different runtime repositories, because that file holds one `RuntimeRepo`.
 
 ### Architectures
 

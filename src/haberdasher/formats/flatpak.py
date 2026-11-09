@@ -1,4 +1,4 @@
-"""Publish approved upstream Flatpak commits without rebuilding or rewriting refs."""
+"""Publish upstream Flatpak commits, signed with the publisher key, without rebuilding refs."""
 
 from __future__ import annotations
 
@@ -13,9 +13,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlsplit
 
 from haberdasher.admission import admit
-from haberdasher.config import FormatPolicy
+from haberdasher.config import PUBLIC, FormatPolicy
 from haberdasher.core import (
     AdmittedAsset,
     InspectedAsset,
@@ -43,6 +44,10 @@ _SUMMARY = re.compile(
     r"summaries/(?:[0-9a-f]{64}\.(?:gz|idx|idx\.sig)|[0-9a-f]{64}-[0-9a-f]{64}\.delta)"
 )
 _ENTRIES = ("config", "summary", "summary.sig", "summary.idx", "summary.idx.sig")
+# Runtime source for bundles that do not name one. Electron and Freedesktop runtimes live there.
+FLATHUB = "https://dl.flathub.org/repo/flathub.flatpakrepo"
+FLATPAKREPO = "wimpysworld.flatpakrepo"
+TITLE = "Wimpy's World"
 
 
 class FlatpakFailure(ValueError):
@@ -78,31 +83,36 @@ def _string(value: JSONValue) -> str:
     return value
 
 
-def _policy(policy: FormatPolicy) -> None:
-    trust = policy.trust
+def _runtime_repo(value: JSONValue) -> str:
+    if value is None:
+        return FLATHUB
+    parsed = urlsplit(_string(value))
     if (
-        policy.format != "flatpak"
-        or not trust.source_owner
-        or not trust.refs
-        or trust.runtime is None
+        parsed.scheme not in {"https", "http"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or (parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"})
     ):
-        raise FlatpakFailure("Flatpak trust requires a source owner, refs and a runtime")
-    runtime = trust.runtime
-    for ref in trust.refs:
-        match = _REF.fullmatch(ref)
-        if match is None or match[2] not in policy.architectures:
-            raise FlatpakFailure("Unqualified application ref")
-    refs = (*runtime.refs, *runtime.extensions)
-    if len(set(refs)) != len(refs) or len(set(trust.refs)) != len(trust.refs):
-        raise FlatpakFailure("Policy contains duplicate refs")
-    for ref in refs:
-        match = _REF.fullmatch(ref.replace("runtime/", "app/", 1))
-        if (
-            not ref.startswith("runtime/")
-            or match is None
-            or (match[2], match[3]) != (runtime.architecture, runtime.branch)
-        ):
-            raise FlatpakFailure("Runtime policy has an unqualified ref")
+        raise FlatpakFailure("Runtime repository must be an HTTPS URL")
+    return _string(value)
+
+
+def _runtime_repos(history: Sequence[AdmittedAsset]) -> str:
+    repos = sorted({_string(item.inspected.evidence.get("runtime_repo")) for item in history})
+    if len(repos) != 1:
+        raise FlatpakFailure(
+            "Flatpak bundles name different runtime repositories: " + ", ".join(repos)
+        )
+    return repos[0]
+
+
+def _flatpakrepo(public: bytes, runtime_repo: str) -> bytes:
+    """The remote description that users add, with the publisher key and the runtime source."""
+    return (
+        f"[Flatpak Repo]\nTitle={TITLE}\nUrl={PUBLIC['flatpak'][1]}/\n"
+        f"GPGKey={base64.b64encode(public).decode()}\nRuntimeRepo={runtime_repo}\n"
+    ).encode()
 
 
 def compare(left: NativeIdentity, right: NativeIdentity, *, runtime: Runtime) -> int | None:
@@ -146,10 +156,12 @@ def _version(path: Path, ref: str, runtime: Runtime) -> str:
     components = [xml] if xml.tag == "component" else list(xml.findall("component"))
     matches = [node for node in components if node.findtext("id") in {app, app + ".desktop"}]
     if len(matches) != 1 or len(components) != 1:
-        raise FlatpakFailure("AppStream must identify exactly one approved application")
+        raise FlatpakFailure("AppStream must identify exactly one application")
     component = matches[0]
-    bundles = component.findall("bundle")
-    if len(bundles) != 1 or bundles[0].get("type") != "flatpak" or bundles[0].text != ref:
+    if any(
+        bundle.get("type") != "flatpak" or bundle.text != ref
+        for bundle in component.findall("bundle")
+    ):
         raise FlatpakFailure("AppStream ref differs from the upstream ref")
     releases = component.findall("releases/release")
     if not releases or len(releases) > 1000:
@@ -171,43 +183,30 @@ def _metadata(runtime: Runtime, repo: Path, commit: str) -> dict[str, JSONValue]
     return _native(runtime, repository=str(repo), commit=commit, metadata=metadata.decode())
 
 
-def _check_metadata(data: dict[str, JSONValue], ref: str, policy: FormatPolicy) -> None:
+def _check_metadata(data: dict[str, JSONValue], ref: str) -> str:
+    """Return the runtime ref that the application metadata names for the bundle's architecture."""
     commit = _mapping(data.get("commit"))
     keyfile = _mapping(data.get("keyfile"))
     application = _mapping(keyfile.get("Application"))
-    runtime = policy.trust.runtime
-    if runtime is None:
-        raise FlatpakFailure("Missing runtime policy")
-    runtime_ref = "runtime/" + _string(application.get("runtime"))
+    runtime = _string(application.get("runtime"))
+    match = _REF.fullmatch("app/" + runtime)
     if (
         commit.get("ostree.ref-binding") != [ref]
         or commit.get("ostree.collection-binding") != ""
         or application.get("name") != ref.split("/")[1]
-        or runtime_ref not in runtime.refs
-        or ref.split("/")[2] != runtime.architecture
+        or match is None
+        or match[2] != ref.split("/")[2]
         or data.get("extra_data") is not False
         or any(group.lower() == "extra data" for group in keyfile)
+        or "extra-data" in application
     ):
-        raise FlatpakFailure("Unapproved ref, collection, runtime, extension or extra-data")
+        raise FlatpakFailure("Invalid ref, collection, runtime or extra-data")
     for group, values in keyfile.items():
-        if not group.startswith("Extension "):
-            continue
-        extension = _mapping(values)
-        extension_ref = f"runtime/{group.removeprefix('Extension ')}/{runtime.architecture}/{_string(extension.get('version'))}"
-        if (
-            extension_ref not in runtime.extensions
-            or extension.keys() - {"directory", "version", "no-autodownload", "autodelete"}
-            or any(
-                extension.get(key, "false") not in ("true", "false")
-                for key in ("no-autodownload", "autodelete")
-            )
-        ):
-            raise FlatpakFailure("Unapproved or conditional extension")
-        safe_key(_string(extension.get("directory")))
+        if group.startswith("Extension "):
+            safe_key(_string(_mapping(values).get("directory")))
     if "Runtime" in keyfile or "ExtensionOf" in keyfile:
         raise FlatpakFailure("Only application bundles are qualified")
-    if any(key in application for key in ("runtime-repo", "extra-data")):
-        raise FlatpakFailure("Embedded providers are not authority")
+    return "runtime/" + runtime
 
 
 def _checkout(runtime: Runtime, repo: Path, commit: str, target: Path) -> None:
@@ -225,16 +224,23 @@ def _appstream(tree: Path, ref: str, runtime: Runtime) -> str:
 def inspect(
     asset: VerifiedAsset, *, policy: FormatPolicy, runtime: Runtime, out: Path
 ) -> InspectedAsset:
-    _policy(policy)
-    if asset.source.repository.split("/")[0] != policy.trust.source_owner:
-        raise FlatpakFailure("Source owner is not approved")
     if sha256_file(asset.local_path) != (asset.sha256, asset.size):
         raise FlatpakFailure("Bundle bytes differ from verified input")
     bundle = _mapping(_native(runtime, bundle=str(asset.local_path)).get("bundle"))
     ref = _string(bundle.get("ref"))
     commit = digest(bundle.get("commit"))
-    if ref not in policy.trust.refs or bundle.get("collection") != "":
-        raise FlatpakFailure("Bundle ref or collection is not approved")
+    match = _REF.fullmatch(ref)
+    if match is None:
+        raise FlatpakFailure(f"{asset.source.filename}: not an application bundle: {ref!r}")
+    if match[2] not in policy.architectures:
+        raise FlatpakFailure(
+            f"{asset.source.filename}: unsupported Flatpak architecture {match[2]!r}"
+        )
+    if bundle.get("collection") != "":
+        raise FlatpakFailure(
+            f"{asset.source.filename}: bundles with a collection ID are not supported"
+        )
+    runtime_repo = _runtime_repo(bundle.get("runtime_repo"))
     out.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out, prefix="quarantine-") as work:
         repo = Path(work) / "repo"
@@ -251,7 +257,7 @@ def inspect(
             raise FlatpakFailure("Imported refs differ from bundle identity")
         _run(runtime, "ostree", f"--repo={repo}", "fsck")
         data = _metadata(runtime, repo, commit)
-        _check_metadata(data, ref, policy)
+        runtime_ref = _check_metadata(data, ref)
         native_commit = _mapping(data.get("commit"))
         if native_commit.get("xa.metadata") != bundle.get("metadata"):
             raise FlatpakFailure("Bundle and commit metadata differ")
@@ -260,17 +266,18 @@ def inspect(
         if safe_path(tree, "metadata").read_text() != bundle.get("metadata"):
             raise FlatpakFailure("Commit metadata and payload differ")
         version = _appstream(tree, ref, runtime)
-        if data.get("signatures"):
-            raise FlatpakFailure("Signed upstream bundles require separate trust qualification")
+    # Preparation replaces any upstream signature with the publisher signature.
+    signed = bool(data.pop("signatures", None))
     return InspectedAsset(
         asset,
-        NativeIdentity("flatpak", ref, ref.split("/")[2], version, source_commit=commit),
+        NativeIdentity("flatpak", ref, match[2], version, source_commit=commit),
         {"bundle": bundle, "native": data},
         {
-            "runtime_policy": json.loads(canonical_json(policy.trust.runtime)),
+            "runtime": runtime_ref,
+            "runtime_repo": runtime_repo,
             "version_source": "commit-appstream",
         },
-        "unsigned",
+        "signed" if signed else "unsigned",
     )
 
 
@@ -293,6 +300,8 @@ def _classify(key: str) -> tuple[str, bool, int]:
         return "entry", True, 3
     if key in _ENTRIES[1:]:
         return "entry", True, 4 + _ENTRIES.index(key)
+    if key == FLATPAKREPO:
+        return "entry", True, 4 + len(_ENTRIES)
     raise FlatpakFailure(f"Unexpected public repository file: {key}")
 
 
@@ -382,6 +391,9 @@ def _validate_repo(
             base64.b64decode(_string(retained.metadata.get("public_key")), validate=True)
         )
         fingerprint = _string(retained.metadata.get("fingerprint"))
+        expected_repo = _flatpakrepo(public.read_bytes(), _runtime_repos(retained.accepted_history))
+        if (repo / FLATPAKREPO).read_bytes() != expected_repo:
+            raise FlatpakFailure(f"Retained {FLATPAKREPO} differs from the signing key or runtime")
         for index, (ref, commit) in enumerate(heads.items()):
             data = _native(runtime, repository=str(repo), commit=commit)
             source = safe_path(repo, f"objects/{commit[:2]}/{commit[2:]}.commit")
@@ -389,7 +401,7 @@ def _validate_repo(
             tree = work / f"tree-{index}"
             _checkout(runtime, repo, commit, tree)
             if ref in expected:
-                _check_metadata(_metadata(runtime, repo, commit), ref, policy)
+                _check_metadata(_metadata(runtime, repo, commit), ref)
                 version = _appstream(tree, ref, runtime)
                 if version != next(
                     identity.version
@@ -405,8 +417,7 @@ def _validate_repo(
 
 
 def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
-    _policy(policy)
-    if retained.format != "flatpak":
+    if policy.format != "flatpak" or retained.format != "flatpak":
         raise FlatpakFailure("Wrong retained format")
     if retained.prior_generation is None and not retained.accepted_history and not retained.objects:
         if retained.metadata or retained.active_identities:
@@ -487,12 +498,23 @@ def prepare(
             "flatpak",
             "build-import-bundle",
             "--no-update-summary",
-            *sign,
             str(repo),
             str(inspected.verified.local_path),
         )
-        if _heads(runtime, repo).get(inspected.identity.name) != inspected.identity.source_commit:
+        commit = digest(inspected.identity.source_commit)
+        if _heads(runtime, repo).get(inspected.identity.name) != commit:
             raise FlatpakFailure("Import changed the source commit")
+        # Detached metadata holds the upstream signatures. Replace it with the publisher signature.
+        safe_path(repo, f"objects/{commit[:2]}/{commit[2:]}.commitmeta").unlink(missing_ok=True)
+        _run(
+            runtime,
+            "ostree",
+            f"--repo={repo}",
+            "gpg-sign",
+            f"--gpg-homedir={signer.gnupghome}",
+            commit,
+            f"{signer.fingerprint}!",
+        )
         if sha256_file(inspected.verified.local_path) != (
             inspected.verified.sha256,
             inspected.verified.size,
@@ -514,6 +536,7 @@ def prepare(
     )
     if not public:
         raise FlatpakFailure("Missing public signing key")
+    (repo / FLATPAKREPO).write_bytes(_flatpakrepo(public, _runtime_repos(history)))
     files = _files(repo)
     old = {ref.key: ref for ref in retained.objects}
     oldfiles = _mapping(retained.metadata.get("files", {}))

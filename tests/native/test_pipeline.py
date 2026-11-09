@@ -22,14 +22,11 @@ from urllib.request import urlopen
 
 import pytest
 
-from haberdasher import cli, discovery, publish, state
+from haberdasher import cli, publish, state
 from haberdasher.config import (
     Config,
-    FormatPolicy,
     Policy,
-    RuntimePolicy,
     StoragePolicy,
-    TrustPolicy,
 )
 from haberdasher.core import (
     ObjectRef,
@@ -164,13 +161,6 @@ class RecordedGitHub:
         else:
             value = release
         return CompletedProcess(argv, 0, json.dumps(value).encode(), b"")
-
-
-def use_policy(monkeypatch: pytest.MonkeyPatch, policy: FormatPolicy) -> None:
-    def format_policy(self: Config, name: str) -> FormatPolicy:
-        return policy
-
-    monkeypatch.setattr(Config, "format_policy", format_policy)
 
 
 def apply_cli(
@@ -555,34 +545,7 @@ def test_recorded_pipeline_and_full_rerun(
                     fixtures, fixtures.root / "http", signer.fingerprint, signer.gnupghome
                 )
         http = stack.enter_context(serve(fixtures.root / "http"))
-        format_policy = apt.policy() if name == "apt" else FormatPolicy(name)
-        if name == "flatpak":
-            format_policy = replace(
-                format_policy,
-                trust=TrustPolicy(
-                    source_owner="wimpysworld",
-                    refs=(flatpak.REF,),
-                    runtime=RuntimePolicy(
-                        http.url("runtime-repo"),
-                        key.fingerprint,
-                        "",
-                        "stable",
-                        "x86_64",
-                        "provider",
-                        (flatpak.RREF,),
-                        (flatpak.EREF,),
-                    ),
-                ),
-            )
         config = Config(("wimpysworld/fixture",))
-        if name == "flatpak":
-            # Flatpak needs per-project settings, so discovery skips it. Exercise the adapter
-            # in process with the loopback runtime, never through the CLI subprocess.
-            use_policy(monkeypatch, format_policy)
-            monkeypatch.setattr(discovery, "UNSUPPORTED_SUFFIXES", {})
-            monkeypatch.setattr(
-                discovery, "PACKAGE_SUFFIXES", (*discovery.PACKAGE_SUFFIXES, ".flatpak")
-            )
         policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
         monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
         (fixtures.root / "work").mkdir()
@@ -597,7 +560,7 @@ def test_recorded_pipeline_and_full_rerun(
                 yield runtime
 
         def reconcile() -> publish.RunResult:
-            if not interrupted and name != "flatpak":
+            if not interrupted:
                 return apply_cli(
                     recorded,
                     fixtures.root,

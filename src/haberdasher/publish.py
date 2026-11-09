@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -370,15 +371,39 @@ def _prepare(
     adapter = _adapter(name)
     adapter.validate_retained(retained, policy=policy, runtime=runtime)
     additions: list[AdmittedAsset] = []
+    inspected_assets: list[InspectedAsset] = []
     for index, item in enumerate(changed):
         if item.checksum is None:
             raise StateError("Changed input lacks a verified checksum")
         verified = discovery.verify_asset(
             item.source, item.checksum, runtime=runtime, out=out.with_name(f"{name}-{index}-asset")
         )
-        inspected = adapter.inspect(
-            verified, policy=policy, runtime=runtime, out=out.with_name(f"{name}-{index}-inspect")
+        inspected_assets.append(
+            adapter.inspect(
+                verified,
+                policy=policy,
+                runtime=runtime,
+                out=out.with_name(f"{name}-{index}-inspect"),
+            )
         )
+    # Releases arrive newest first. Admit each package's versions in ascending native order,
+    # so that a Flatpak head moves forwards through every release of one run.
+    groups: dict[str, list[InspectedAsset]] = {}
+    for inspected in inspected_assets:
+        groups.setdefault(inspected.identity.name, []).append(inspected)
+    ordered = [
+        inspected
+        for group in groups.values()
+        for inspected in sorted(
+            group,
+            key=functools.cmp_to_key(
+                lambda left, right: (
+                    adapter.compare(left.identity, right.identity, runtime=runtime) or 0
+                )
+            ),
+        )
+    ]
+    for inspected in ordered:
         accepted = admission.admit(
             inspected,
             (*retained.accepted_history, *additions),

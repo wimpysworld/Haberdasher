@@ -52,47 +52,75 @@ def png(size: int) -> bytes:
     )
 
 
-def bundle(runtime: Runtime, root: Path, version: str, number: int) -> VerifiedAsset:
+def bundle(
+    runtime: Runtime,
+    root: Path,
+    version: str,
+    number: int,
+    *,
+    app: str = APP,
+    arch: str = ARCH,
+    runtime_repo: str | None = None,
+    upstream: tuple[str, Path, Path] | None = None,
+) -> VerifiedAsset:
+    """Build a data-only bundle. Upstream is a fingerprint, GnuPG home and public key file."""
+    ref = f"app/{app}/{arch}/stable"
     tree = root / f"app-{number}"
     files = tree / "files"
     (files / "share/applications").mkdir(parents=True)
     (files / "share/app-info/xmls").mkdir(parents=True)
     (tree / "metadata").write_text(
-        f"[Application]\nname={APP}\nruntime={RUNTIME}/{ARCH}/stable\n"
-        f"sdk={RUNTIME}/{ARCH}/stable\n[Context]\nshared=\n"
+        f"[Application]\nname={app}\nruntime={RUNTIME}/{arch}/stable\n"
+        f"sdk={RUNTIME}/{arch}/stable\n[Context]\nshared=\n"
         "[Instance]\nversion=not-the-native-version\n"
+        f"[Extension {app}.Debug]\ndirectory=lib/debug\nautodelete=true\nno-autodownload=true\n"
     )
     (files / "version").write_text(version + "\n")
-    (files / "share/applications" / f"{APP}.desktop").write_text(
-        f"[Desktop Entry]\nType=Application\nName=Haberdasher Test\nExec=not-executable\nIcon={APP}\n"
+    (files / "share/applications" / f"{app}.desktop").write_text(
+        f"[Desktop Entry]\nType=Application\nName=Haberdasher Test\nExec=not-executable\nIcon={app}\n"
     )
+    # electron-builder omits the AppStream bundle element, so only the first app carries one.
+    element = f'<bundle type="flatpak">{ref}</bundle>' if app == APP else ""
     xml = f'''<components version="0.8"><component type="desktop-application">
-<id>{APP}</id><name>Haberdasher Test</name><summary>Local data only test</summary>
+<id>{app}</id><name>Haberdasher Test</name><summary>Local data only test</summary>
 <metadata_license>CC0-1.0</metadata_license><project_license>CC0-1.0</project_license>
-<launchable type="desktop-id">{APP}.desktop</launchable>
-<icon type="cached" width="64" height="64">{APP}.png</icon>
-<icon type="cached" width="128" height="128">{APP}.png</icon>
+<launchable type="desktop-id">{app}.desktop</launchable>
+<icon type="cached" width="64" height="64">{app}.png</icon>
+<icon type="cached" width="128" height="128">{app}.png</icon>
 <releases><release version="{version}" timestamp="1700000000"/></releases>
-<bundle type="flatpak">{REF}</bundle></component></components>'''
-    (files / "share/app-info/xmls" / f"{APP}.xml.gz").write_bytes(
+{element}</component></components>'''
+    (files / "share/app-info/xmls" / f"{app}.xml.gz").write_bytes(
         gzip.compress(xml.encode(), mtime=0)
     )
     for size in (64, 128):
         directory = files / f"share/app-info/icons/flatpak/{size}x{size}"
         directory.mkdir(parents=True)
-        (directory / f"{APP}.png").write_bytes(png(size))
+        (directory / f"{app}.png").write_bytes(png(size))
     source = root / "source"
     target = root / f"app-{number}.flatpak"
+    sign = (f"--gpg-sign={upstream[0]}!", f"--gpg-homedir={upstream[1]}") if upstream else ()
     run(runtime, "flatpak", "build-finish", str(tree))
-    run(runtime, "flatpak", "build-export", "--no-update-summary", str(source), str(tree), "stable")
+    run(
+        runtime,
+        "flatpak",
+        "build-export",
+        f"--arch={arch}",
+        "--no-update-summary",
+        *sign,
+        str(source),
+        str(tree),
+        "stable",
+    )
     run(
         runtime,
         "flatpak",
         "build-bundle",
-        f"--arch={ARCH}",
+        f"--arch={arch}",
+        *((f"--runtime-repo={runtime_repo}",) if runtime_repo else ()),
+        *((f"--gpg-keys={upstream[2]}",) if upstream else ()),
         str(source),
         str(target),
-        APP,
+        app,
         "stable",
     )
     sha, size = sha256_file(target)

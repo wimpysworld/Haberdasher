@@ -40,8 +40,7 @@ MAX_CHECKSUM_BYTES = 1024 * 1024
 MAX_CHECKSUM_ENTRIES = 10_000
 MAX_BUNDLE_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 5 * 1024 * 1024 * 1024 - 1
-PACKAGE_SUFFIXES = (".deb", ".rpm", ".apk", ".pkg.tar.zst", ".pkg.tar.xz")
-UNSUPPORTED_SUFFIXES = {".flatpak": "Flatpak"}
+PACKAGE_SUFFIXES = (".deb", ".rpm", ".apk", ".pkg.tar.zst", ".pkg.tar.xz", ".flatpak")
 PER_ASSET_SUFFIXES = (".sha256", ".sha256sum")
 COSIGN_BUNDLE_SUFFIX = ".sigstore.json"
 COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
@@ -477,19 +476,7 @@ def scan_releases(
             packages = 0
             missing = 0
             digests = 0
-            unsupported: list[str] = []
             for source in sorted(group, key=lambda item: item.asset_id):
-                kind = next(
-                    (
-                        label
-                        for suffix, label in UNSUPPORTED_SUFFIXES.items()
-                        if source.filename.endswith(suffix)
-                    ),
-                    None,
-                )
-                if kind is not None:
-                    unsupported.append(f"    {source.filename}: {kind} not supported yet, skipped")
-                    continue
                 if not source.filename.endswith(PACKAGE_SUFFIXES):
                     continue
                 packages += 1
@@ -529,8 +516,6 @@ def scan_releases(
             if missing:
                 line += f", {missing} without a checksum (skipped)"
             report(line)
-            for item in unsupported:
-                report(item)
     state = DiscoveryState(tuple(records), tuple(assets.values()), config.sources)
     disappeared = tuple(asset for asset in previous.assets if _asset_key(asset) not in assets)
     return CompleteScan(state, tuple(changed), tuple(unchanged), tuple(pending), disappeared)

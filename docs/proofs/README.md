@@ -51,4 +51,4 @@ These controls do not provide multi-object atomicity. Older referenced objects r
 
 Use [publisher operations](../publisher.md) for the real CLI and configuration schema. [Client setup](../clients.md) is the setup document, not a separate implemented website.
 
-Production permission tests, production key use, protected CI secrets, public HTTPS/cache qualification, and official distribution clients remain to do. APK SHA1 acceptance and Flatpak source/runtime configuration remain pending. See [validation and activation](../validation.md) before any external action.
+Production permission tests, production key use, protected CI secrets, public HTTPS/cache qualification, and official distribution clients remain to do. APK SHA1 acceptance remains pending. Flatpak reads its runtime and source from each bundle. See [validation and activation](../validation.md) before any external action.

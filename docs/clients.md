@@ -116,42 +116,17 @@ RSA256 signs the index with SHA256. Native v2 `Q1` control identity still uses S
 
 ## Flatpak
 
-Approve application refs and a separate runtime origin before setup. Verify each origin's public key through its independent full fingerprint. Runtime policy must bind URL, remote, branch, architecture, refs, extensions, and collection.
-
-The current adapter supports an empty collection binding. It rejects unapproved extensions, extra-data, source owners, refs, and signed upstream bundles. Do not add an arbitrary `RuntimeRepo` from an application bundle or descriptor.
-
-Use separate deny-by-default filter files. Save the approved application filter as `/approved/app.filter`:
-
-```text
-deny *
-allow app/APP_ID/x86_64/stable
-```
-
-Save the separately approved runtime and extension filter as `/approved/runtime.filter`:
-
-```text
-deny *
-allow runtime/APPROVED_RUNTIME_ID/APPROVED_ARCH/APPROVED_RUNTIME_BRANCH
-allow runtime/APPROVED_EXTENSION_ID/APPROVED_ARCH/APPROVED_EXTENSION_BRANCH
-```
-
-Replace each ref placeholder with an exact approved value, without wildcards.
-The runtime URL and `/verified/runtime.gpg` are operator-supplied placeholders for the approved provider and its verified public key.
-Verify that key against the provider's independently approved full fingerprint, not the Haberdasher fingerprint.
-This example grants no runtime approval.
-
-After replacing the placeholders with approved values, add the two origins explicitly:
+Add the publisher from its remote description. The file holds the Haberdasher public key, so no separate key import is necessary:
 
 ```sh
-flatpak --user remote-add --gpg-import=/verified/runtime.gpg \
-  --filter=/approved/runtime.filter provider https://APPROVED_RUNTIME_ORIGIN
-flatpak --user remote-add --gpg-import=/verified/haberdasher.gpg \
-  --filter=/approved/app.filter publisher https://flatpak.wimpys.world
+flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak --user remote-add --from wimpysworld https://flatpak.wimpys.world/wimpysworld.flatpakrepo
+flatpak --user install wimpysworld APP_ID
 ```
 
-Do not disable commit or summary verification. Check remote URLs, imported fingerprints, filters, and collection settings before `flatpak --user install publisher APP_ID`. After an update, check exact ref, commit, runtime, extension, and origin.
+Applications such as Sidra need a runtime from Flathub. The `RuntimeRepo` key in `wimpysworld.flatpakrepo` names that repository, but `flatpak remote-add` does not act on it. Add Flathub first.
 
-The fixture approves a separate local runtime and extension. It does not add a production source or use Flathub implicitly. `tests/native/test_flatpak.py` checks the exact remote configuration and deployed data. No installed application executes.
+Haberdasher signs every commit and the summary with its own key, and removes any upstream commit signature. Do not disable commit or summary verification. `tests/native/test_flatpak.py` adds the publisher from the published file, with a local runtime provider that has a separate key, and checks the remote configuration and deployed data. No installed application executes.
 
 ## Qualification
 

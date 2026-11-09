@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from email.message import Message
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -353,6 +353,25 @@ def test_asset_added_to_existing_release_publishes_only_the_change(
     assets = cast(list[dict[str, object]], fixture.inventory()["assets"])
     assert len(assets) == 2
     assert_published(fixture)
+
+
+def test_newest_first_releases_are_admitted_in_version_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    for version in ("3", "1", "2"):
+        fixture.releases.add("tool", version)
+    fixture.releases.add("helper", "1")
+    admitted: list[str] = []
+    admit = publish.admission.admit
+
+    def record(inspected: InspectedAsset, *args: Any, **kwargs: Any) -> AdmittedAsset:
+        admitted.append(f"{inspected.identity.name}-{inspected.identity.version}")
+        return admit(inspected, *args, **kwargs)
+
+    monkeypatch.setattr(publish.admission, "admit", record)
+    assert fixture.run().changed
+    assert admitted == ["tool-1", "tool-2", "tool-3", "helper-1"]
 
 
 def test_interrupted_run_converges_with_a_full_rerun(

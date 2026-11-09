@@ -724,8 +724,12 @@ class OtherLayout(RecordedGitHub):
                 f"{hashlib.sha256(b'rpm-noarch').hexdigest()}  other-1.2.3-1.noarch.rpm\n"
             ).encode(),
             "SHA256SUMS": "".join(
-                f"{hashlib.sha256(packages[name]).hexdigest()}  {name}\n"
-                for name in ("other-1.2.3-1-any.pkg.tar.xz", "other-1.2.3-r0.apk")
+                f"{hashlib.sha256(data).hexdigest()}  {name}\n"
+                for name, data in (
+                    ("other-1.2.3-1-any.pkg.tar.xz", packages["other-1.2.3-1-any.pkg.tar.xz"]),
+                    ("other-1.2.3-r0.apk", packages["other-1.2.3-r0.apk"]),
+                    ("org.example.Other.flatpak", b"flatpak"),
+                )
             ).encode(),
         }
         self.pages = {
@@ -770,17 +774,17 @@ def test_second_source_with_a_different_release_layout(tmp_path: Path) -> None:
             "other-1.2.3-1.noarch.rpm",
             "other-1.2.3-1-any.pkg.tar.xz",
             "other-1.2.3-r0.apk",
+            "org.example.Other.flatpak",
             "other_1.2.1_arm64.deb",
         }
         assert {item.source.filename for item in result.pending} == {
             "other_1.2.2_amd64.deb",
             "other-1.2.2-1.x86_64.rpm",
         }
-        assert publish.provided(result) == {"apt", "rpm", "arch", "apk"}
+        assert publish.provided(result) == {"apt", "rpm", "arch", "apk", "flatpak"}
         assert lines == [
             "example/other: 3 releases",
-            "  1.2.3  checksums OK  no cosign bundle  4 packages",
-            "    org.example.Other.flatpak: Flatpak not supported yet, skipped",
+            "  1.2.3  checksums OK  no cosign bundle  5 packages",
             "  1.2.2  no checksums  no cosign bundle  2 packages, 2 without a checksum (skipped)",
             "  1.2.1  GitHub digests OK  no cosign bundle  1 package",
         ]
