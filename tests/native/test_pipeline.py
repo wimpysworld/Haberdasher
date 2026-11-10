@@ -529,7 +529,8 @@ def check_page(bucket: Path, name: str, fingerprint: str) -> str:
         ) in page
     assert fingerprint in page and f'href="{state.INVENTORY_KEY}"' in page
     if name == "flatpak":
-        assert "<p>Local data only test</p>" in page and "objects/</span>" in page
+        assert '<p class="desc">Local data only test</p>' in page
+        assert 'objects/<span class="meta">' in page and "content-addressed" in page
     inventory = json.loads((bucket / state.INVENTORY_KEY).read_bytes())
     assert site.PAGE_KEY not in {item["key"] for item in inventory["objects"]}
     digest = site.content_hash(data)

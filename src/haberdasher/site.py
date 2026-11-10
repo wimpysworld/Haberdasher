@@ -16,6 +16,19 @@ from haberdasher.config import PUBLIC
 from haberdasher.core import AdmittedAsset, ObjectRef, plural, size_text
 from haberdasher.formats.apt import COMPONENT, SUITE
 from haberdasher.formats.flatpak import FLATHUB, FLATPAKREPO, REMOTE, TITLE
+from haberdasher.site_style import (
+    BASE_CSS,
+    BRAND_MARK,
+    CHEVRON,
+    COPY_ICON,
+    FILE_ICON,
+    FOLDER_CLOSED,
+    FOLDER_OPEN,
+    GITHUB_ICON,
+    JS,
+    STYLES,
+    THEMES,
+)
 
 PAGE_KEY = "index.html"
 MAX_PAGE_BYTES = 4 * 1024 * 1024
@@ -25,145 +38,7 @@ APT_KEYRING = "/etc/apt/keyrings/haberdasher.gpg"
 _HASH = re.compile(rb'<meta name="haberdasher-content" content="([0-9a-f]{64})">')
 _CDN = "https://cdn.jsdelivr.net/npm/"
 _ICONS = _CDN + "simple-icons@16.37.0/icons/"
-# Exact jsDelivr paths and the SRI digests of their served bytes.
-STYLES = {
-    "@digicreon/mucss@1.4.9/dist/mu.orange.css": (
-        "sha384-RWjv5U5P9qrGA/d0BeUQffNMBO0uWgdz6pOWxLoZkWXfLENNQJXKt7dr7g8Khb1C"
-    ),
-    "@digicreon/mucss@1.4.9/dist/mu.red.css": (
-        "sha384-T8B/jJxtffli4kRoMnNnM9r6sTPwB//d2IyD27RoJ8s/GKBtbB9NzOj326GthqyJ"
-    ),
-    "@digicreon/mucss@1.4.9/dist/mu.azure.css": (
-        "sha384-YjTpibR/F7FR3aIGG2zomRYyj5iVUC8YZMDXyEpUjoYzvnA+xRlC57sqqdhse4si"
-    ),
-    "@fontsource/ubuntu@5.3.0/latin-400.css": (
-        "sha384-Hmj8OALUB6aIikG4YVYkzbyKw1t3gdv7IYgzpt+5zEAmMwYM05vjN5KqGgXRudKz"
-    ),
-    "@fontsource/ubuntu@5.3.0/latin-500.css": (
-        "sha384-2XRgRUz0XLG8Db6rua4zUxXUcvMtPOHp8NTrP0m2txLuzoF2jJauRxRzyDzLBIpv"
-    ),
-    "@fontsource/red-hat-display@5.3.0/latin-700.css": (
-        "sha384-+5KZTNIZygIXY/HKL9IMr8E8KXyHWLcLXq20QErBF6HFBp1rCUKoYYwTRMus5J2n"
-    ),
-    "@fontsource/red-hat-text@5.3.0/latin-400.css": (
-        "sha384-tp/ewtWBoD+TTx4nbbBgWqUxB7pAGpx2dDIWhUB7RAAZQfVsOZE9BJQ/+2ocys8v"
-    ),
-    "@fontsource/red-hat-text@5.3.0/latin-500.css": (
-        "sha384-7/1FKLV8SzgEjbxZi00WTSdfok5BobgjT41ugDfDlruA4nOC5bB9xqUuR4j98Fkx"
-    ),
-    "@fontsource/inter@5.3.0/latin-400.css": (
-        "sha384-zc+mzApNgdFM05uzzG/c/4wVZ4LHLa0ZrZyeZYh4tq7GukSAQ2T6xYGTgE+mssl6"
-    ),
-    "@fontsource/inter@5.3.0/latin-600.css": (
-        "sha384-sIxfdbMxNyRS8ALLKQtuDA2c/167yRmp3egSBaxjFVG167V3b1JFy7HPQdrxziBJ"
-    ),
-}
-_SANS = "var(--mu-font-family-sans-serif)"
-
-
-@dataclass(frozen=True)
-class Theme:
-    """Colours are heading, accent, and action for light mode, then for dark mode.
-
-    Action is the link and button colour. Button text is white in light mode and dark in dark
-    mode, so each action colour keeps 4.5:1 against both the page and the button text.
-    """
-
-    label: str
-    styles: tuple[str, ...]
-    body: str
-    display: str
-    light: tuple[str, str, str]
-    dark: tuple[str, str, str]
-    works: tuple[tuple[str, str], ...]
-    vendors: str
-
-
-THEMES: dict[str, Theme] = {
-    "apt": Theme(
-        "APT",
-        (
-            "@digicreon/mucss@1.4.9/dist/mu.orange.css",
-            "@fontsource/ubuntu@5.3.0/latin-400.css",
-            "@fontsource/ubuntu@5.3.0/latin-500.css",
-        ),
-        f"Ubuntu, {_SANS}",
-        f"Ubuntu, {_SANS}",
-        ("#77216F", "#E95420", "#C34113"),
-        ("#F99B78", "#E95420", "#F47B4F"),
-        (
-            ("ubuntu", "Ubuntu"),
-            ("debian", "Debian"),
-            ("linuxmint", "Linux Mint"),
-            ("popos", "Pop!_OS"),
-        ),
-        "Canonical or the Debian Project",
-    ),
-    "rpm": Theme(
-        "RPM",
-        (
-            "@digicreon/mucss@1.4.9/dist/mu.red.css",
-            "@fontsource/red-hat-display@5.3.0/latin-700.css",
-            "@fontsource/red-hat-text@5.3.0/latin-400.css",
-            "@fontsource/red-hat-text@5.3.0/latin-500.css",
-        ),
-        f'"Red Hat Text", {_SANS}',
-        f'"Red Hat Display", {_SANS}',
-        ("#A60000", "#EE0000", "#C9190B"),
-        ("#FF8C8C", "#EE0000", "#F56E6E"),
-        (
-            ("fedora", "Fedora"),
-            ("redhat", "Red Hat Enterprise Linux"),
-            ("opensuse", "openSUSE"),
-            ("suse", "SUSE"),
-        ),
-        "Red Hat, the Fedora Project, or SUSE",
-    ),
-    "arch": Theme(
-        "Arch Linux",
-        ("@digicreon/mucss@1.4.9/dist/mu.azure.css",),
-        _SANS,
-        _SANS,
-        ("#0B5F8A", "#1793D1", "#0F6A99"),
-        ("#7DC4EB", "#1793D1", "#4DB0E6"),
-        (
-            ("archlinux", "Arch Linux"),
-            ("manjaro", "Manjaro"),
-            ("endeavouros", "EndeavourOS"),
-        ),
-        "Arch Linux",
-    ),
-    "apk": Theme(
-        "Alpine Linux",
-        ("@digicreon/mucss@1.4.9/dist/mu.azure.css",),
-        _SANS,
-        _SANS,
-        ("#0D597F", "#1078A8", "#0D597F"),
-        ("#6FB9E1", "#2D8EC4", "#5BB0DD"),
-        (("alpinelinux", "Alpine Linux"),),
-        "Alpine Linux",
-    ),
-    "flatpak": Theme(
-        "Flatpak",
-        (
-            "@digicreon/mucss@1.4.9/dist/mu.azure.css",
-            "@fontsource/inter@5.3.0/latin-400.css",
-            "@fontsource/inter@5.3.0/latin-600.css",
-        ),
-        f"Inter, {_SANS}",
-        f"Inter, {_SANS}",
-        ("#1F5EA8", "#4A90D9", "#2B65A8"),
-        ("#8FBDEE", "#4A90D9", "#6FA8E6"),
-        (
-            ("flatpak", "Flatpak"),
-            ("flathub", "Flathub"),
-            ("fedora", "Fedora"),
-            ("ubuntu", "Ubuntu"),
-            ("linuxmint", "Linux Mint"),
-        ),
-        "the Flatpak project or Flathub",
-    ),
-}
+_PM = {"dnf": "DNF", "zypper": "zypper"}
 
 
 def apt_sources(url: str, keyring: str, architecture: str) -> str:
@@ -204,129 +79,233 @@ def _runtime_remotes(history: Sequence[AdmittedAsset]) -> list[str]:
     ]
 
 
-def setup(name: str, history: Sequence[AdmittedAsset]) -> list[tuple[str, str]]:
-    """The common setup steps of one format, as a caption and a command."""
-    url = PUBLIC[name][1]
-    key = f"{url}/keys/haberdasher.asc"
-    match name:
-        case "apt":
-            return [
-                (
-                    "Install the signing key.",
-                    "sudo install -d -m 0755 /etc/apt/keyrings\n"
-                    f"curl -fsSL {url}/keys/haberdasher.gpg | sudo tee {APT_KEYRING} > /dev/null",
-                ),
-                (
-                    "Add the repository, then update the package lists.",
-                    _heredoc(
-                        "sudo tee",
-                        "/etc/apt/sources.list.d/haberdasher.sources",
-                        apt_sources(url, APT_KEYRING, "$(dpkg --print-architecture)"),
-                        expand=True,
-                    )
-                    + "\nsudo apt-get update",
-                ),
-            ]
-        case "rpm":
-            return [
-                (
-                    "Fedora, Red Hat Enterprise Linux, and other systems with DNF:",
-                    f"sudo rpm --import {key}\n"
-                    + _heredoc("sudo tee", "/etc/yum.repos.d/haberdasher.repo", rpm_repo(url, key)),
-                ),
-                (
-                    "openSUSE and SUSE Linux Enterprise, with zypper:",
-                    f"sudo rpm --import {key}\n"
-                    f"sudo zypper addrepo --gpgcheck --refresh {url} haberdasher\n"
-                    "sudo zypper refresh",
-                ),
-            ]
-        case "arch":
-            return [
-                (
-                    "Add the signing key to the pacman keyring, and sign it locally.",
-                    f"curl -fsSL {key} | sudo pacman-key --add -\n"
-                    "sudo pacman-key --lsign-key {fingerprint}",
-                ),
-                (
-                    "Add the repository to /etc/pacman.conf.",
-                    _heredoc("sudo tee -a", "/etc/pacman.conf", "\n" + pacman_repo(url + "/$arch")),
-                ),
-            ]
-        case "apk":
-            return [
-                (
-                    "Run these commands as root.",
-                    f"wget -qO /etc/apk/keys/haberdasher.rsa.pub {url}/keys/haberdasher.rsa.pub\n"
-                    f"echo {url} >> /etc/apk/repositories\napk update",
-                ),
-            ]
-        case _:
-            return [
-                (
-                    "Add Flathub for the runtime, then add this repository.",
-                    "\n".join(
-                        [
-                            *_runtime_remotes(history),
-                            f"flatpak --user remote-add --if-not-exists {REMOTE} {url}/{FLATPAKREPO}",
-                        ]
-                    ),
-                ),
-            ]
+type Command = tuple[str | None, str]
+"""A package manager variant, or None for every client, and the command text."""
 
 
-def remove(name: str) -> list[tuple[str, str]]:
-    url = PUBLIC[name][1]
-    match name:
-        case "apt":
-            return [
-                (
-                    "",
-                    "sudo rm /etc/apt/sources.list.d/haberdasher.sources " + APT_KEYRING + "\n"
-                    "sudo apt-get update",
-                )
-            ]
-        case "rpm":
-            return [
-                ("DNF:", "sudo rm /etc/yum.repos.d/haberdasher.repo\nsudo rpm -e {keyid}"),
-                ("zypper:", "sudo zypper removerepo haberdasher\nsudo rpm -e {keyid}"),
-            ]
-        case "arch":
-            return [
-                (
-                    "",
-                    "sudo sed -i '/^\\[haberdasher\\]$/,/^Server = /d' /etc/pacman.conf\n"
-                    "sudo pacman-key --delete {fingerprint}",
-                )
-            ]
-        case "apk":
-            return [
-                (
-                    "Run these commands as root.",
-                    f"sed -i '\\|^{url}$|d' /etc/apk/repositories\n"
-                    "rm /etc/apk/keys/haberdasher.rsa.pub",
-                )
-            ]
-        case _:
-            return [("Uninstall its applications first.", f"flatpak --user remote-delete {REMOTE}")]
+@dataclass(frozen=True)
+class Step:
+    """One numbered install step. The note is trusted markup from this module."""
+
+    title: str
+    note: str
+    commands: tuple[Command, ...]
+    check: bool = False
+    check_note: bool = True
+    switch: bool = False
 
 
-def install(name: str, packages: Sequence[str]) -> list[tuple[str, str]]:
+def check_command(name: str) -> str:
+    """The command that prints the fingerprint of the published signing key."""
+    fetch = "wget -qO-" if name == "apk" else "curl -fsSL"
+    return f"{fetch} {PUBLIC[name][1]}/keys/haberdasher.asc | gpg --show-keys"
+
+
+def install(name: str, packages: Sequence[str]) -> list[Command]:
+    """The install commands for the packages of one project."""
     names = " ".join(packages)
     match name:
         case "apt":
-            return [("", f"sudo apt-get install {names}")]
+            return [(None, f"sudo apt-get install {names}")]
         case "rpm":
             return [
-                ("DNF:", f"sudo dnf install {names}"),
-                ("zypper:", f"sudo zypper install {names}"),
+                ("dnf", f"sudo dnf install {names}"),
+                ("zypper", f"sudo zypper install {names}"),
             ]
         case "arch":
-            return [("", f"sudo pacman -Syu {names}")]
+            return [(None, f"sudo pacman -Syu {names}")]
         case "apk":
-            return [("As root:", f"apk add {names}")]
+            return [(None, f"apk add {names}")]
         case _:
-            return [("", f"flatpak --user install {REMOTE} {app}") for app in packages]
+            return [(None, f"flatpak --user install {REMOTE} {app}") for app in packages]
+
+
+def steps(
+    name: str, history: Sequence[AdmittedAsset], packages: Sequence[str], fingerprint: str
+) -> list[Step]:
+    """Trust the key, add the repository, and install the packages of one project."""
+    url = PUBLIC[name][1]
+    key = f"{url}/keys/haberdasher.asc"
+    trust = "Trust the signing key"
+    add = "Add the repository"
+    last = Step(f"Install {' '.join(packages)}", "", tuple(install(name, packages)))
+    match name:
+        case "apt":
+            sources = _heredoc(
+                "sudo tee",
+                "/etc/apt/sources.list.d/haberdasher.sources",
+                apt_sources(url, APT_KEYRING, "$(dpkg --print-architecture)"),
+                expand=True,
+            )
+            return [
+                Step(
+                    trust,
+                    "Install the key into the APT keyring, then check that the fingerprint "
+                    "matches.",
+                    (
+                        (
+                            None,
+                            "sudo install -d -m 0755 /etc/apt/keyrings\n"
+                            f"curl -fsSL {url}/keys/haberdasher.gpg | sudo tee {APT_KEYRING} "
+                            "> /dev/null",
+                        ),
+                    ),
+                    check=True,
+                ),
+                Step(
+                    add,
+                    "Write the deb822 source for your architecture, then update the package lists.",
+                    ((None, f"{sources}\nsudo apt-get update"),),
+                ),
+                last,
+            ]
+        case "rpm":
+            repo = _heredoc("sudo tee", "/etc/yum.repos.d/haberdasher.repo", rpm_repo(url, key))
+            return [
+                Step(
+                    trust,
+                    "Import the key into RPM, then check that the fingerprint matches.",
+                    ((None, f"sudo rpm --import {key}"),),
+                    check=True,
+                ),
+                Step(
+                    add,
+                    "The switch also changes the install and remove commands.",
+                    (
+                        ("dnf", repo),
+                        (
+                            "zypper",
+                            f"sudo zypper addrepo --gpgcheck --refresh {url} haberdasher\n"
+                            "sudo zypper refresh",
+                        ),
+                    ),
+                    switch=True,
+                ),
+                last,
+            ]
+        case "arch":
+            section = _heredoc(
+                "sudo tee -a", "/etc/pacman.conf", "\n" + pacman_repo(url + "/$arch")
+            )
+            return [
+                Step(
+                    trust,
+                    "Add the key to the pacman keyring and sign it locally, then check that the "
+                    "fingerprint matches.",
+                    (
+                        (
+                            None,
+                            f"curl -fsSL {key} | sudo pacman-key --add -\n"
+                            f"sudo pacman-key --lsign-key {fingerprint}",
+                        ),
+                    ),
+                    check=True,
+                ),
+                Step(
+                    add,
+                    "Append the section to /etc/pacman.conf. SigLevel = Required keeps signature "
+                    "checks on.",
+                    ((None, section),),
+                ),
+                last,
+            ]
+        case "apk":
+            return [
+                Step(
+                    trust,
+                    'Run these commands as root. APK trusts the PEM file <a href="keys/'
+                    'haberdasher.rsa.pub"><code class="nw">keys/haberdasher.rsa.pub</code></a>, '
+                    "the same RSA key.",
+                    (
+                        (
+                            None,
+                            "wget -qO /etc/apk/keys/haberdasher.rsa.pub "
+                            f"{url}/keys/haberdasher.rsa.pub",
+                        ),
+                    ),
+                    check=True,
+                ),
+                Step(
+                    add,
+                    "Append the repository URL and refresh the index.",
+                    ((None, f"echo {url} >> /etc/apk/repositories\napk update"),),
+                ),
+                last,
+            ]
+        case _:
+            remotes = [
+                *_runtime_remotes(history),
+                f"flatpak --user remote-add --if-not-exists {REMOTE} {url}/{FLATPAKREPO}",
+            ]
+            return [
+                Step(
+                    trust,
+                    "The .flatpakrepo file carries the signing key, so Flatpak checks every "
+                    "commit and summary. This command prints the fingerprint to compare.",
+                    (),
+                    check=True,
+                    check_note=False,
+                ),
+                Step(
+                    add,
+                    "Add Flathub for the runtime, then add this repository. Both are user remotes.",
+                    ((None, "\n".join(remotes)),),
+                ),
+                last,
+            ]
+
+
+def remove(name: str, fingerprint: str) -> tuple[str, list[Command]]:
+    """A caption and the commands that undo the setup steps."""
+    url = PUBLIC[name][1]
+    keyid = f"gpg-pubkey-{fingerprint[-8:].lower()}"
+    match name:
+        case "apt":
+            return (
+                "",
+                [
+                    (
+                        None,
+                        f"sudo rm /etc/apt/sources.list.d/haberdasher.sources {APT_KEYRING}\n"
+                        "sudo apt-get update",
+                    )
+                ],
+            )
+        case "rpm":
+            return (
+                "",
+                [
+                    ("dnf", f"sudo rm /etc/yum.repos.d/haberdasher.repo\nsudo rpm -e {keyid}"),
+                    ("zypper", f"sudo zypper removerepo haberdasher\nsudo rpm -e {keyid}"),
+                ],
+            )
+        case "arch":
+            return (
+                "",
+                [
+                    (
+                        None,
+                        "sudo sed -i '/^\\[haberdasher\\]$/,/^Server = /d' /etc/pacman.conf\n"
+                        f"sudo pacman-key --delete {fingerprint}",
+                    )
+                ],
+            )
+        case "apk":
+            return (
+                "Run these commands as root.",
+                [
+                    (
+                        None,
+                        f"sed -i '\\|^{url}$|d' /etc/apk/repositories\n"
+                        "rm /etc/apk/keys/haberdasher.rsa.pub",
+                    )
+                ],
+            )
+        case _:
+            return (
+                "Uninstall its applications first.",
+                [(None, f"flatpak --user remote-delete {REMOTE}")],
+            )
 
 
 def _field(pattern: str, value: object) -> str:
@@ -409,25 +388,80 @@ def _e(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _commands(steps: Sequence[tuple[str, str]], values: Mapping[str, str]) -> str:
-    parts: list[str] = []
-    for caption, command in steps:
-        if caption:
-            parts.append(f"<p>{_e(caption)}</p>")
-        text = command.replace("{fingerprint}", values["fingerprint"]).replace(
-            "{keyid}", values["keyid"]
-        )
-        parts.append(
-            f'<div class="command"><pre><code>{_e(text)}</code></pre>'
-            '<button type="button" class="copy" hidden>Copy</button></div>'
-        )
-    return "\n".join(parts)
+def _copy_button(label: str, data: str | None = None) -> str:
+    extra = f' data-copy="{_e(data)}"' if data else ""
+    return (
+        f'<button type="button" class="copy"{extra} aria-label="{_e(label)}">'
+        f"{COPY_ICON}<span>Copy</span></button>"
+    )
 
 
-def _tree(files: Mapping[str, int], prefix: str, fold: bool) -> str:
+def _token(token: str) -> str:
+    """Keep a token whole. Long paths and URLs may break before each / outside ://."""
+    if token.startswith("-") or len(token) < 28 or "/" not in token:
+        return f'<span class="tok">{token}</span>'
+    parts = re.split(r"(?<![/:])(?=/)", token)
+    inner = "<wbr>".join(f'<span class="tok">{part}</span>' for part in parts if part)
+    return f'<span class="tok br">{inner}</span>'
+
+
+def _code(command: str, variant: str | None = None, label: str = "Copy command") -> str:
+    tag = f'<span class="pm-tag" aria-hidden="true">{_PM[variant]}</span>' if variant else ""
+    classes = "code" + (f" tagged for-{variant}" if variant else "")
+    name = f"{label} ({_PM[variant]})" if variant else label
+    text = re.sub(r"(\S+)", lambda match: _token(match[1]), _e(command))
+    return (
+        f'<div class="{classes}">{tag}<pre><code translate="no">{text}</code></pre>'
+        f"{_copy_button(name)}</div>"
+    )
+
+
+def _fingerprint(fingerprint: str) -> str:
+    groups = [fingerprint[i : i + 4] for i in range(0, len(fingerprint), 4)]
+    spans = "".join(
+        f'<span class="tail">{_e(group)}</span>'
+        if i >= len(groups) - 2
+        else f"<span>{_e(group)}</span>"
+        for i, group in enumerate(groups)
+    )
+    return (
+        '<div class="fp"><div><p class="fp-label">Expected fingerprint</p>'
+        f'<p class="groups" translate="no" aria-hidden="true">{spans}</p>'
+        f'<span class="vh">{_e(" ".join(groups))}</span>'
+        '<p class="fp-note">The last eight characters are the key ID.</p></div>'
+        f"{_copy_button('Copy fingerprint', fingerprint)}</div>"
+    )
+
+
+def _switch(slug: str) -> str:
+    slug = _e(slug)
+    return (
+        '<fieldset class="pm"><legend>Package manager</legend>'
+        f'<input type="radio" name="pm-{slug}" id="pm-{slug}-dnf" value="dnf" checked>'
+        f'<label for="pm-{slug}-dnf">DNF</label>'
+        f'<input type="radio" name="pm-{slug}" id="pm-{slug}-zypper" value="zypper">'
+        f'<label for="pm-{slug}-zypper">zypper</label></fieldset>'
+    )
+
+
+def _breakable(name: str) -> str:
+    """Break hashes every 16 characters and long names after . _ or -."""
+    if re.fullmatch(r"[0-9a-f]{40,}", name):
+        return "<wbr>".join(_e(name[i : i + 16]) for i in range(0, len(name), 16))
+    return re.sub(r"([._-])(?=.)", r"\1<wbr>", _e(name)) if len(name) > 14 else _e(name)
+
+
+def files(objects: Sequence[ObjectRef], inventory_size: int) -> dict[str, int]:
+    """The size of every published file, with the inventory."""
+    result = {ref.key: ref.size for ref in objects}
+    result[state.INVENTORY_KEY] = inventory_size
+    return result
+
+
+def _tree(sizes: Mapping[str, int], prefix: str, fold: bool) -> str:
     directories: dict[str, dict[str, int]] = {}
     leaves: list[tuple[str, int]] = []
-    for key, size in files.items():
+    for key, size in sizes.items():
         head, separator, rest = key.partition("/")
         if separator:
             directories.setdefault(head, {})[rest] = size
@@ -436,78 +470,34 @@ def _tree(files: Mapping[str, int], prefix: str, fold: bool) -> str:
     items: list[str] = []
     for directory in sorted(directories):
         inner = directories[directory]
-        label = f"{_e(directory)}/"
-        detail = f"{plural(len(inner), 'file')} ({size_text(sum(inner.values()))})"
+        total = size_text(sum(inner.values()))
         if fold and not prefix and directory == "objects":
-            items.append(f'<li><span class="folder">{label}</span> {detail}</li>')
+            items.append(
+                f'<li><div class="frow"><span></span>{FOLDER_CLOSED}<span class="name">'
+                f'{_e(directory)}/<span class="meta">{plural(len(inner), "OSTree object")}, '
+                f'content-addressed</span></span><span class="size">{total}</span></div></li>'
+            )
             continue
         items.append(
-            f"<li><details><summary>{label} <small>{detail}</small></summary>"
-            f"{_tree(inner, f'{prefix}{directory}/', fold)}</details></li>"
+            f"<li><details><summary>{CHEVRON}{FOLDER_CLOSED}{FOLDER_OPEN}"
+            f'<span class="name">{_e(directory)}/<span class="meta">'
+            f'{plural(len(inner), "file")}</span></span><span class="size">{total}</span>'
+            f"</summary>{_tree(inner, f'{prefix}{directory}/', fold)}</details></li>"
         )
     for name, size in sorted(leaves):
-        href = quote(prefix + name)
+        aux = ' class="aux"' if name.endswith((".sig", ".asc")) and len(leaves) > 2 else ""
         items.append(
-            f'<li><a href="{_e(href)}">{_e(name)}</a> <small>{size_text(size)}</small></li>'
+            f'<li{aux}><a href="{_e(quote(prefix + name))}"><span></span>{FILE_ICON}'
+            f'<span class="name">{_breakable(name)}</span>'
+            f'<span class="size">{size_text(size)}</span></a></li>'
         )
-    return f"<ul>{''.join(items)}</ul>"
+    body = "".join(items)
+    return f"<ul>{body}</ul>" if prefix else f'<ul class="tree">{body}</ul>'
 
 
-def tree(name: str, objects: Sequence[ObjectRef], inventory_size: int) -> str:
-    """Nested disclosures of the published files, with Flatpak objects/ on one line."""
-    files = {ref.key: ref.size for ref in objects}
-    files[state.INVENTORY_KEY] = inventory_size
-    return _tree(files, "", name == "flatpak")
-
-
-_CSS = """body{--mu-font-family:var(--hd-body);--mu-primary:var(--hd-action);\
---mu-primary-hover:var(--hd-heading);--mu-primary-underline:var(--hd-accent);\
---mu-primary-background:var(--hd-action);--mu-primary-border:var(--hd-action);\
---mu-primary-hover-background:var(--hd-heading);--mu-primary-hover-border:var(--hd-heading);\
---mu-primary-inverse:var(--hd-on-action);--mu-primary-focus:var(--hd-accent);\
---mu-h1-color:var(--hd-heading);--mu-h2-color:var(--hd-heading);--mu-h3-color:var(--hd-heading);\
---mu-accordion-active-summary-color:var(--hd-action);--mu-code-color:var(--mu-color);\
---hd-on-action:#fff}
-@media (prefers-color-scheme:dark){body{--hd-on-action:#13171f}.works img{filter:invert(1)}}
-body{font-family:var(--hd-body)}h1,h2,h3{font-family:var(--hd-display);text-wrap:balance}
-pre,code{font-family:var(--mu-font-family-monospace)}
-body>header{border-top:.5rem solid var(--hd-accent);padding-top:1.5rem}
-body>main{padding-top:0}h2{margin-top:2rem;padding-bottom:.25rem;border-bottom:.125rem solid var(--hd-accent)}
-.skip{position:absolute;left:-100vw}.skip:focus{left:1rem;top:1rem;z-index:1;padding:.5rem 1rem;\
-background:var(--mu-background-color)}
-.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);\
-white-space:nowrap}
-.sites{display:flex;flex-wrap:wrap;gap:.25rem 1.25rem;margin:0 0 1.5rem;padding:0;list-style:none}
-.sites li{margin:0;padding:0;list-style:none}.sites [aria-current]{font-weight:600;\
-text-decoration:underline;text-decoration-thickness:.15em;text-decoration-color:var(--hd-accent)}
-.lead{font-size:1.125rem}
-.works{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1.25rem;margin-bottom:1rem}
-.works ul{display:contents}.works li{display:flex;align-items:center;gap:.4rem;margin:0;\
-list-style:none}.works img{width:1.25rem;height:1.25rem;opacity:.75}
-.note{color:var(--mu-muted-color)}
-.fingerprint{font-size:1rem;word-break:break-all}
-.command{position:relative;margin-bottom:var(--mu-spacing)}
-.command pre{margin:0;padding:2.75rem 1rem 1rem}.command code{padding:0;background:none}
-.command .copy{position:absolute;top:.5rem;right:.5rem;width:auto;margin:0;padding:.25rem .75rem;\
-font-size:.875rem}
-article{border-top:.25rem solid var(--hd-accent)}article h3{margin-bottom:.5rem}
-.scroll{overflow-x:auto}.scroll table{font-size:.875rem}
-.tree ul{margin:0;padding-left:1.25rem}.tree>ul{padding-left:0}
-.tree li{margin:.2rem 0;list-style:none}.tree details{margin:0;padding:0;border:0}
-.tree summary{display:inline;cursor:pointer}.tree summary::after{display:none}
-.tree summary::before{content:"\\25B8" / "";display:inline-block;width:1rem}
-.tree details[open]>summary::before{content:"\\25BE" / ""}
-.folder{font-weight:500}
-@media (prefers-reduced-motion:reduce){*{transition:none!important}}
-"""
-
-_JS = """const s=document.getElementById("copy-status");\
-for(const b of document.querySelectorAll(".copy")){b.hidden=false;\
-b.addEventListener("click",async()=>{try{\
-await navigator.clipboard.writeText(b.previousElementSibling.textContent);\
-b.textContent="Copied";s.textContent="Command copied to the clipboard."}catch{\
-b.textContent="Copy failed";s.textContent="Copy failed. Select the command and copy it."}\
-setTimeout(()=>{b.textContent="Copy"},2000)})}"""
+def tree(name: str, sizes: Mapping[str, int]) -> str:
+    """Nested disclosures of the published files, with Flatpak objects/ on one row."""
+    return _tree(sizes, "", name == "flatpak")
 
 
 def _favicon(colour: str) -> str:
@@ -520,30 +510,124 @@ def _favicon(colour: str) -> str:
     return "data:image/svg+xml," + quote(svg)
 
 
-def _project(name: str, project: Project, refs: set[str], values: Mapping[str, str]) -> str:
+def _mark(path: str, classes: str = "") -> str:
+    attrs = f' class="{classes}"' if classes else ""
+    return (
+        f'<svg{attrs} viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
+        f'<path d="{path}"/></svg>'
+    )
+
+
+def _title(project: Project) -> tuple[str, str]:
+    """The display name and the fragment id of a project, from its repository name."""
     short = project.repository.split("/")[1]
-    title = short[:1].upper() + short[1:]
-    rows = "".join(
-        f"<tr><td><code>{_e(package)}</code></td><td>{_e(version)}</td>"
-        f"<td>{_e(', '.join(architectures))}</td></tr>"
+    return short[:1].upper() + short[1:], short.lower()
+
+
+def _names(project: Project) -> list[str]:
+    return list(dict.fromkeys(package for package, _, _ in project.packages))
+
+
+def _panel(
+    name: str,
+    project: Project,
+    history: Sequence[AdmittedAsset],
+    refs: set[str],
+    fingerprint: str,
+    *,
+    hidden: bool,
+) -> str:
+    title, slug = _title(project)
+    names = _names(project)
+    tiles = "".join(
+        f"<div><dt>Package</dt><dd>{_e(package)}</dd></div>"
+        f"<div><dt>Version</dt><dd>{_e(version)}</dd></div>"
+        f"<div><dt>Architectures</dt><dd>{_e(', '.join(architectures))}</dd></div>"
         for package, version, architectures in project.packages
     )
-    names = list(dict.fromkeys(package for package, _, _ in project.packages))
-    extra = ""
-    if name == "flatpak":
-        files = [f"{app}.flatpakref" for app in names if f"{app}.flatpakref" in refs]
-        if files:
-            links = ", ".join(f'<a href="{_e(quote(file))}">{_e(file)}</a>' for file in files)
-            extra = f"<p>Or open {links} in a software centre.</p>"
-    about = f"<p>{_e(project.description)}</p>" if project.description else ""
+    quick = ""
+    flatpakrefs = [f"{app}.flatpakref" for app in names if f"{app}.flatpakref" in refs]
+    if name == "flatpak" and flatpakrefs:
+        flatpakref = flatpakrefs[0]
+        quick = (
+            '<div class="lead-install"><h4>Quick install</h4>'
+            f'<p class="note">One command installs {_e(names[0])} with the repository and its '
+            f'runtime. Or open <a href="{_e(quote(flatpakref))}">{_e(flatpakref)}</a> in a '
+            "software centre.</p>"
+            f"{_code(f'flatpak --user install {PUBLIC[name][1]}/{flatpakref}')}</div>"
+            '<h4 class="alt">Or add the repository by hand</h4>'
+        )
+    items: list[str] = []
+    for step in steps(name, history, names, fingerprint):
+        blocks = "".join(_code(command, variant) for variant, command in step.commands)
+        check = ""
+        if step.check:
+            intro = (
+                '<p class="note">Check that this command prints the same fingerprint.</p>'
+                if step.check_note
+                else ""
+            )
+            check = (
+                f"{intro}{_code(check_command(name), label='Copy check command')}"
+                f"{_fingerprint(fingerprint)}"
+            )
+        note = f'<p class="note">{step.note}</p>' if step.note else ""
+        head = f"<h4>{_e(step.title)}</h4>"
+        if step.switch:
+            head = f'<div class="step-head">{head}{_switch(slug)}</div>'
+        items.append(f"<li>{head}{note}{blocks}{check}</li>")
+    about = f'<p class="desc">{_e(project.description)}</p>' if project.description else ""
     return (
-        f'<article id="{_e(short.lower())}"><h3>{_e(title)}</h3>{about}'
-        f'<p><a href="https://github.com/{_e(project.repository)}">'
-        f"{_e(project.repository)} on GitHub</a></p>"
-        '<div class="scroll"><table><thead><tr><th scope="col">Package</th>'
-        '<th scope="col">Version</th><th scope="col">Architectures</th></tr></thead>'
-        f"<tbody>{rows}</tbody></table></div>"
-        f"{_commands(install(name, names), values)}{extra}</article>"
+        f'<section class="panel{" is-hidden" if hidden else ""}" id="{_e(slug)}" '
+        f'aria-labelledby="{_e(slug)}-title">'
+        f'<div class="project"><div><h3 id="{_e(slug)}-title">{_e(title)}</h3>{about}'
+        f'<a class="gh" href="https://github.com/{_e(project.repository)}">{GITHUB_ICON}'
+        f"{_e(project.repository)} on GitHub</a></div>"
+        f'<dl class="pkg">{tiles}</dl></div>'
+        f'{quick}<ol class="steps">{"".join(items)}</ol></section>'
+    )
+
+
+def _tab(project: Project, *, selected: bool) -> str:
+    title, slug = _title(project)
+    versions = ", ".join(dict.fromkeys(version for _, version, _ in project.packages))
+    return (
+        f'<li><a id="{_e(slug)}-tab" href="#{_e(slug)}" '
+        f'class="{"is-selected" if selected else ""}" data-panel="{_e(slug)}">'
+        f'<span class="t-name">{_e(title)}</span><span class="t-ver">{_e(versions)}</span></a></li>'
+    )
+
+
+def _hero_card(
+    name: str, entries: Sequence[Project], sizes: Mapping[str, int], now: datetime | None
+) -> str:
+    architectures = sorted({a for p in entries for _, _, items in p.packages for a in items})
+    packages = sum(len(project.packages) for project in entries)
+    date = (
+        ""
+        if now is None
+        else f'<time datetime="{now.date().isoformat()}">{now.day} {now:%B}</time> '
+        f"<small>{now.year}</small>"
+    )
+    install_first = ""
+    if entries:
+        title, slug = _title(entries[0])
+        command = install(name, _names(entries[0]))[0][1]
+        install_first = (
+            f'<p class="fp-label" style="margin:0 0 .35rem">After setup, install {_e(title)} '
+            f"with</p>{_code(command, label=f'Copy install command for {title}')}"
+            f'<a href="#{_e(slug)}">Set up the repository first</a>'
+        )
+    return (
+        '<aside class="hero-card" aria-labelledby="hero-card-h">'
+        '<h2 id="hero-card-h">In this repository</h2>'
+        f"<dl><div><dt>Projects</dt><dd>{len(entries)}</dd></div>"
+        f"<div><dt>Packages</dt><dd>{packages} <small>{_e(', '.join(architectures))}</small>"
+        "</dd></div>"
+        f"<div><dt>Files</dt><dd>{len(sizes)} <small>{size_text(sum(sizes.values()))}</small>"
+        "</dd></div>"
+        f"<div><dt>Published</dt><dd>{date}</dd></div></dl>"
+        f"{install_first}</aside>"
     )
 
 
@@ -559,101 +643,115 @@ def _document(
     theme = THEMES[name]
     url = PUBLIC[name][1]
     title = f"{TITLE} {theme.label} repository"
-    lead = f"This is the {theme.label} repository for packages from projects that {OWNER} manages."
-    values = {"fingerprint": fingerprint, "keyid": f"gpg-pubkey-{fingerprint[-8:].lower()}"}
-    styles = "\n".join(
+    lead = f"Packages from projects that {OWNER} manages."
+    links = "\n".join(
         f'<link rel="stylesheet" href="{_e(_CDN + path)}" integrity="{_e(STYLES[path])}" '
         'crossorigin="anonymous">'
         for path in theme.styles
     )
-    light, dark = theme.light, theme.dark
-    tokens = (
-        f"body{{--hd-body:{theme.body};--hd-display:{theme.display};--hd-heading:{light[0]};"
-        f"--hd-accent:{light[1]};--hd-action:{light[2]}}}\n"
-        f"@media (prefers-color-scheme:dark){{body{{--hd-heading:{dark[0]};"
-        f"--hd-accent:{dark[1]};--hd-action:{dark[2]}}}}}\n"
-    )
     sites = "".join(
-        f'<li><a href="{_e(PUBLIC[other][1])}/"{current}>{_e(THEMES[other].label)}</a></li>'
+        f'<li><a href="{_e(PUBLIC[other][1])}/"{current}>{_mark(THEMES[other].icon)}'
+        f'<span class="full">{_e(THEMES[other].label)}</span>'
+        f'<span class="short" aria-hidden="true">{_e(THEMES[other].short)}</span></a></li>'
         for other in PUBLIC
         for current in (' aria-current="page"' if other == name else "",)
     )
     works = "".join(
-        f'<li><img src="{_e(_ICONS + slug)}.svg" alt="" width="20" height="20">{_e(label)}</li>'
+        f'<li><i style="--m:url(&quot;{_ICONS}{slug}.svg&quot;)"></i>{_e(label)}</li>'
+        if slug
+        else f'<li><b class="txt">{_e(label)}</b></li>'
         for slug, label in theme.works
     )
     history = published.retained.accepted_history
     entries = projects(history, fallback)
     refs = {ref.key for ref in published.objects}
-    sections = (
-        "\n".join(_project(name, project, refs, values) for project in entries)
-        or "<p>This repository has no packages yet.</p>"
-    )
-    check = f"{'wget -qO-' if name == 'apk' else 'curl -fsSL'} {url}/keys/haberdasher.asc"
-    key_note = (
-        "<p>APK uses the same RSA key, as the PEM file "
-        '<a href="keys/haberdasher.rsa.pub">keys/haberdasher.rsa.pub</a>.</p>'
-        if name == "apk"
+    sizes = files(published.objects, len(published.data))
+    tabs = (
+        '<ul class="tablist" aria-label="Projects">'
+        + "".join(_tab(project, selected=i == 0) for i, project in enumerate(entries))
+        + "</ul>"
+        if len(entries) > 1
         else ""
     )
-    if now is None:
-        date = ""
-    else:
-        date = f'<time datetime="{now.date().isoformat()}">{now.day} {now:%B %Y}</time>'
+    panels = (
+        "".join(
+            _panel(name, project, history, refs, fingerprint, hidden=i > 0)
+            for i, project in enumerate(entries)
+        )
+        or "<p>This repository has no packages yet.</p>"
+    )
+    caption, commands = remove(name, fingerprint)
+    removal = (f"<p>{_e(caption)}</p>" if caption else "") + "".join(
+        _code(command, variant) for variant, command in commands
+    )
+    published_on = (
+        ""
+        if now is None
+        else f'<time datetime="{now.date().isoformat()}">{now.day} {now:%B %Y}</time>'
+    )
+    total = sum(sizes.values())
     return f"""<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="haberdasher-content" content="{digest}">
-<meta name="description" content="{_e(lead)}">
+<meta name="description" content="{_e(title)}. {_e(lead)}">
 <title>{_e(title)}</title>
-<link rel="icon" href="{_e(_favicon(light[1]))}">
-{styles}
+<link rel="icon" href="{_e(_favicon(theme.favicon))}">
+{links}
 <style>
-{tokens}{_CSS}</style>
+/* ---- shared base ---- */{BASE_CSS}
+/* ---- theme: {name} ---- */{theme.css}</style>
 </head>
 <body>
 <a class="skip" href="#main">Skip to the main content</a>
-<header class="container">
+<header>
+<div class="bar"><div class="wrap">
+<a class="brand" href="{_e(url)}/">{BRAND_MARK}<span>{_e(TITLE)}</span></a>
 <nav aria-label="Repositories"><ul class="sites">{sites}</ul></nav>
-<h1>{_e(title)}</h1>
+</div></div>
+<div class="masthead"><div class="wrap">
+{_mark(theme.icon, "mark")}
+<div>
+<h1><span>{_e(TITLE)}</span> <span>{_e(theme.label)} repository</span></h1>
 <p class="lead">{_e(lead)}</p>
-<div class="works"><span>Works with</span><ul>{works}</ul></div>
-<p class="note"><small>Unofficial repository. Not affiliated with or endorsed by \
-{_e(theme.vendors)}.</small></p>
+<ul class="works" aria-label="Works with"><li class="label">Works with</li>{works}</ul>
+<p class="unofficial">Unofficial repository. Not affiliated with or endorsed by \
+{_e(theme.vendors)}.</p>
+</div>
+{_hero_card(name, entries, sizes, now)}
+</div></div>
 </header>
-<main id="main" class="container">
-<section aria-labelledby="key">
-<h2 id="key">Check the signing key</h2>
-<p>One OpenPGP key signs this repository. Its full fingerprint is:</p>
-<p><code class="fingerprint">{_e(fingerprint)}</code></p>
-<p>Check that this command prints the same fingerprint:</p>
-{_commands([("", f"{check} | gpg --show-keys")], values)}
-{key_note}</section>
-<section aria-labelledby="setup">
-<h2 id="setup">Set up the repository</h2>
-{_commands(setup(name, history), values)}
+<main id="main">
+<section class="section" aria-labelledby="install-h">
+<div class="wrap">
+<h2 id="install-h">Install</h2>
+{tabs}
+{panels}
+<details class="fold"><summary id="remove-h">{CHEVRON}Remove this repository\
+<span class="sub">Undo the steps above</span></summary>
+<div class="body">{removal}</div></details>
+</div>
 </section>
-<section aria-labelledby="projects">
-<h2 id="projects">Install packages</h2>
-{sections}
-</section>
-<section aria-labelledby="remove">
-<h2 id="remove">Remove this repository</h2>
-{_commands(remove(name), values)}
-</section>
-<section aria-labelledby="files">
-<h2 id="files">Published files</h2>
-<div class="tree">{tree(name, published.objects, len(published.data))}</div>
+<section class="section" aria-labelledby="files-h">
+<div class="wrap">
+<h2 id="files-h">Published files</h2>
+<div class="tree-wrap">
+<div class="tree-sum"><span><strong>{plural(len(sizes), "file")}</strong> in this repository\
+</span><span><strong>{size_text(total)}</strong> total</span></div>
+{tree(name, sizes)}
+</div>
+</div>
 </section>
 </main>
-<footer class="container">
-<p><small>Last published {date}. Published with <a href="{SOURCE}">Haberdasher</a>.</small></p>
-</footer>
-<p id="copy-status" class="visually-hidden" aria-live="polite"></p>
-<script>{_JS}</script>
+<footer class="foot"><div class="wrap">
+<p>Last published {published_on}.</p>
+<p>Published with <a href="{SOURCE}">Haberdasher</a>.</p>
+</div></footer>
+<p id="copy-status" class="vh" aria-live="polite"></p>
+<script>{JS}</script>
 </body>
 </html>
 """
