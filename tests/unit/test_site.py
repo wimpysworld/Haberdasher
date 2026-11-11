@@ -58,7 +58,7 @@ def published(
     name: str, history: tuple[AdmittedAsset, ...], objects: tuple[ObjectRef, ...] = ()
 ) -> state.Published:
     retained = RetainedFormat(name, history, (), {}, objects)
-    return state.Published(name, None, "d" * 64, objects, retained, None, b"x" * 1500)
+    return state.Published(name, None, "d" * 64, objects, retained, None)
 
 
 def apt(
@@ -318,6 +318,7 @@ def test_every_format_loads_pinned_assets_with_integrity() -> None:
             f"https://cdn.jsdelivr.net/npm/{path}" for path in theme.styles
         ]
         assert all(re.search(r"@\d+\.\d+\.\d+/", url) for url, _ in links)
+        assert [value for _, value in links] == [site.STYLES[path] for path in theme.styles]
         assert all(value.startswith("sha384-") for _, value in links)
         assert all(
             re.fullmatch(

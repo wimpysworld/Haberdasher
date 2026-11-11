@@ -262,7 +262,6 @@ class Published:
     objects: tuple[ObjectRef, ...]
     retained: RetainedFormat
     record: dict[str, JSONValue] | None = None
-    data: bytes = b""
 
     @property
     def bootstrap(self) -> tuple[ObjectRef, ...]:
@@ -347,7 +346,7 @@ def decode_published(name: str, data: bytes, etag: str | None) -> Published:
         raise StateError(f"The published {name} inventory is invalid: {error}") from error
     if any(ref.bucket_role != name for ref in objects):
         raise StateError(f"The published {name} inventory names another bucket")
-    return Published(name, etag, hashlib.sha256(data).hexdigest(), objects, retained, record, data)
+    return Published(name, etag, hashlib.sha256(data).hexdigest(), objects, retained, record)
 
 
 def materialise(store: Store, published: Published, *, out: Path) -> RetainedFormat:
