@@ -174,8 +174,8 @@ There is no multi-object atomicity. Split entry/signature pairs can temporarily 
 
 Each bucket serves one `index.html` with `Cache-Control: public, max-age=300`. `src/haberdasher/site.py` builds it from the bucket's `haberdasher.json`, with no per-project settings. The page shows, in order:
 
-1. The repository name, links to the five repository sites, a "Works with" row of distribution logos, and an unofficial-repository notice.
-2. The full signing key fingerprint and one command that prints it.
+1. The repository name, links to the seven repository sites, a "Works with" row of distribution logos, and an unofficial-repository notice.
+2. For the signed formats (APT, RPM, Arch, Alpine, and Flatpak), the full signing key fingerprint and one command that prints it. The Homebrew and Scoop pages have no signing-key step, because those repositories are not signed. Their trust comes from HTTPS, the `sha256` in each cask, and the `hash` in each manifest.
 3. The common setup steps for the format. The RPM page has DNF and zypper steps.
 4. One section for each source repository: its name, the package description, a GitHub link, the packages and architectures of its newest published release, and the install command.
 5. The commands that remove the repository.
@@ -200,7 +200,7 @@ A run that stops without cleanup, for example after a killed process, leaves its
 just unlock
 ```
 
-`just unlock` deletes the existing locks in all five buckets and exits without publishing. It prints one line for each bucket:
+`just unlock` deletes the existing locks in all seven buckets and exits without publishing. It prints one line for each bucket:
 
 ```text
 apk   no lock
