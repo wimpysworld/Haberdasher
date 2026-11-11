@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+import shlex
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -80,7 +81,8 @@ def _runtime_remotes(history: Sequence[AdmittedAsset]) -> list[str]:
         if isinstance(value := asset.inspected.evidence.get("runtime_repo"), str)
     } or {FLATHUB}
     return [
-        f"flatpak --user remote-add --if-not-exists {PurePosixPath(urlsplit(repo).path).stem} {repo}"
+        "flatpak --user remote-add --if-not-exists "
+        f"{shlex.quote(PurePosixPath(urlsplit(repo).path).stem)} {shlex.quote(repo)}"
         for repo in sorted(repos)
     ]
 
