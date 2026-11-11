@@ -91,6 +91,11 @@ def test_zip_exe_finds_the_app_executable(tmp_path: Path) -> None:
     assert check(exe_zip(("plugin.dll", pe()))) == ("", "", False)
     assert check(exe_zip(("setup.exe", pe(tail=b"NullsoftInst")))) == ("setup.exe", "", False)
     assert check(b"not a zip") == ("", "", False)
+    unsupported = io.BytesIO()
+    with zipfile.ZipFile(unsupported, "w") as archive:
+        archive.writestr("tool.exe", pe())
+        archive.infolist()[0].compress_type = 99
+    assert check(unsupported.getvalue()) == ("", "", False)
 
 
 def test_zip_exe_picks_the_exe_named_after_the_app(tmp_path: Path) -> None:

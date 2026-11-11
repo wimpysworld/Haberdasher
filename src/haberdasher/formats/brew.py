@@ -71,7 +71,14 @@ def zip_app(path: Path) -> tuple[str, tuple[str, ...]]:
                 return "", ()
             with archive.open(f"{app}/Contents/MacOS/{executable}") as stream:
                 header = stream.read(4096)
-    except KeyError, zipfile.BadZipFile, plistlib.InvalidFileException, ValueError:
+    except (
+        KeyError,
+        zipfile.BadZipFile,
+        plistlib.InvalidFileException,
+        ValueError,
+        NotImplementedError,
+        RuntimeError,
+    ):
         return "", ()
     return app, macho_architectures(header)
 

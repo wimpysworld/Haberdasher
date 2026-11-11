@@ -110,7 +110,7 @@ def zip_exe(path: Path, app: str) -> tuple[str, str, bool]:
                 return "", "", False
             with archive.open(choice[0]) as stream:
                 return choice[0].filename, *_executable(stream)
-    except zipfile.BadZipFile, ValueError:
+    except zipfile.BadZipFile, ValueError, NotImplementedError, RuntimeError:
         return "", "", False
 
 
