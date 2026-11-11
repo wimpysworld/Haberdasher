@@ -8,6 +8,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from importlib.resources import files as resources
 from pathlib import PurePosixPath
 from urllib.parse import quote, urlsplit
 
@@ -32,6 +33,8 @@ from haberdasher.site_style import (
 
 PAGE_KEY = "index.html"
 MAX_PAGE_BYTES = 4 * 1024 * 1024
+IMAGE_KEY = "og.png"
+MAX_IMAGE_BYTES = 1024 * 1024
 OWNER = "Martin Wimpress"
 OWNER_URL = "https://github.com/flexiondotorg"
 SOURCE = "https://github.com/wimpysworld/Haberdasher"
@@ -453,8 +456,9 @@ def _breakable(name: str) -> str:
 
 
 def files(objects: Sequence[ObjectRef]) -> dict[str, int]:
-    """The size of every published package repository file, without the inventory or page."""
-    return {ref.key: ref.size for ref in objects if ref.key not in (state.INVENTORY_KEY, PAGE_KEY)}
+    """The size of every published package repository file, without the inventory, page, or image."""
+    hidden = (state.INVENTORY_KEY, PAGE_KEY, IMAGE_KEY)
+    return {ref.key: ref.size for ref in objects if ref.key not in hidden}
 
 
 def _tree(sizes: Mapping[str, int], prefix: str, fold: bool) -> str:
@@ -618,6 +622,29 @@ def _hero_card(entries: Sequence[Project], sizes: Mapping[str, int], now: dateti
     )
 
 
+def _meta(url: str, title: str, lead: str) -> str:
+    """The description, OpenGraph, and Twitter card tags for the page and its preview image."""
+    image = f"{url}/{IMAGE_KEY}"
+    tags = (
+        ("name", "description", lead),
+        ("property", "og:type", "website"),
+        ("property", "og:site_name", TITLE),
+        ("property", "og:title", title),
+        ("property", "og:description", lead),
+        ("property", "og:url", f"{url}/"),
+        ("property", "og:image", image),
+        ("property", "og:image:width", "1200"),
+        ("property", "og:image:height", "630"),
+        ("property", "og:image:type", "image/png"),
+        ("property", "og:image:alt", f"{title}. {lead}"),
+        ("name", "twitter:card", "summary_large_image"),
+        ("name", "twitter:title", title),
+        ("name", "twitter:description", lead),
+        ("name", "twitter:image", image),
+    )
+    return "\n".join(f'<meta {kind}="{key}" content="{_e(value)}">' for kind, key, value in tags)
+
+
 def _document(
     name: str,
     published: state.Published,
@@ -685,7 +712,7 @@ def _document(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="haberdasher-content" content="{digest}">
-<meta name="description" content="{_e(title)}. {_e(lead)}">
+{_meta(url, title, lead)}
 <title>{_e(title)}</title>
 <link rel="icon" href="{_e(_favicon(theme.favicon))}">
 {links}
@@ -777,4 +804,21 @@ def ref(name: str, data: bytes) -> ObjectRef:
         hashlib.sha256(data).hexdigest(),
         "text/html; charset=utf-8",
         "public, max-age=300",
+    )
+
+
+def image(name: str) -> bytes:
+    """The OpenGraph preview image that the package ships for one format."""
+    return (resources("haberdasher") / "og" / f"{name}.png").read_bytes()
+
+
+def image_ref(name: str, data: bytes) -> ObjectRef:
+    return ObjectRef(
+        name,
+        IMAGE_KEY,
+        "page",
+        len(data),
+        hashlib.sha256(data).hexdigest(),
+        "image/png",
+        "public, max-age=86400",
     )

@@ -129,30 +129,39 @@ def read_published(name: str, url: str) -> state.Published:
     return state.decode_published(name, data, None)
 
 
-def read_page(url: str) -> bytes | None:
-    """Read one bucket's public index.html without credentials. HTTP 404 is None."""
+def read_page(url: str, key: str = site.PAGE_KEY, limit: int = site.MAX_PAGE_BYTES) -> bytes | None:
+    """Read one public bucket object without credentials. HTTP 404 is None."""
     request = urllib.request.Request(
-        f"{url.rstrip('/')}/{site.PAGE_KEY}", headers={"User-Agent": "haberdasher"}
+        f"{url.rstrip('/')}/{key}", headers={"User-Agent": "haberdasher"}
     )
     try:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
-            data = response.read(site.MAX_PAGE_BYTES + 1)
+            data = response.read(limit + 1)
     except urllib.error.HTTPError as error:
         if error.code == 404:
             return None
         raise
-    if len(data) > site.MAX_PAGE_BYTES:
-        raise ValueError(f"{site.PAGE_KEY} exceeds its size limit")
+    if len(data) > limit:
+        raise ValueError(f"{key} exceeds its size limit")
     return data
 
 
 def pending_pages(
     published: Mapping[str, state.Published], urls: Mapping[str, str], fingerprint: str
-) -> list[str]:
-    """Formats whose published index.html is missing or differs from the page that publish writes."""
+) -> tuple[list[str], list[str]]:
+    """Formats whose og.png, then whose index.html, is missing or differs from what publish writes."""
     fallback = site.descriptions(item.retained.accepted_history for item in published.values())
+    images: list[str] = []
     pending: list[str] = []
     for name, item in published.items():
+        try:
+            image = read_page(urls[name], site.IMAGE_KEY, site.MAX_IMAGE_BYTES)
+        except (OSError, ValueError) as error:
+            step(say, name, f"cannot read {site.IMAGE_KEY}: {error}")
+        else:
+            if image != site.image(name):
+                step(say, name, f"would write {site.IMAGE_KEY}")
+                images.append(name)
         _, digest = site.page(name, item, fingerprint=fingerprint, fallback=fallback, now=utc_now())
         try:
             current = read_page(urls[name])
@@ -162,7 +171,7 @@ def pending_pages(
         if site.content_hash(current) != digest:
             step(say, name, f"would write {site.PAGE_KEY}")
             pending.append(name)
-    return pending
+    return images, pending
 
 
 def _urls() -> dict[str, str]:
@@ -218,7 +227,7 @@ def show_plan(
             )
             for name, items in changed.items()
         }
-    pages = pending_pages(
+    images, pages = pending_pages(
         {
             name: published[name]
             for name in names
@@ -248,10 +257,12 @@ def show_plan(
     summary = f"{plural(total, 'new package')}." if total else "No new packages."
     if pages:
         summary += f" {plural(len(pages), 'index page')} to write."
+    if images:
+        summary += f" {plural(len(images), 'preview image')} to write."
     summary += " Nothing written."
     if missing:
         summary += f" Could not read {', '.join(missing)}, so the plan is incomplete."
-    elif total or pages:
+    elif total or pages or images:
         summary += " Run `just publish` to publish them."
     say(summary)
 

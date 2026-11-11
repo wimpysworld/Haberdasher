@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import html
 import re
+import struct
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from pathlib import Path
 
 from haberdasher import site, state
+from haberdasher.config import PUBLIC
 from haberdasher.core import (
     AdmittedAsset,
     InspectedAsset,
@@ -116,6 +119,7 @@ def test_tree_nests_directories_and_folds_flatpak_objects() -> None:
         ref("flatpak", "keys/haberdasher.rsa.pub", 800),
         ref("flatpak", "haberdasher.json", 1500),
         ref("flatpak", "index.html", 4000),
+        ref("flatpak", "og.png", 40_000),
     )
     tree = site.tree("flatpak", site.files(objects))
     assert tree.startswith('<ul class="tree">')
@@ -128,6 +132,7 @@ def test_tree_nests_directories_and_folds_flatpak_objects() -> None:
     assert 'href="refs/heads/app/world.wimpys.tool/x86_64/stable"' in tree
     assert '<a href="summary">' in tree and '<span class="size">900 B</span>' in tree
     assert state.INVENTORY_KEY not in site.files(objects) and site.PAGE_KEY not in tree
+    assert site.IMAGE_KEY not in site.files(objects) and site.IMAGE_KEY not in tree
     assert "haberdasher.<wbr>json" not in tree
     assert '<li class="aux"><a href="keys/haberdasher.asc">' in tree
     apt_tree = site.tree("apt", site.files((ref("apt", "objects/a", 1),)))
@@ -185,6 +190,7 @@ def test_hero_card_counts_the_published_package_files() -> None:
         ref("apt", "dists/Release", 500),
         ref("apt", "haberdasher.json", 9_000),
         ref("apt", "index.html", 9_000),
+        ref("apt", "og.png", 40_000),
     )
     page = render("apt", published("apt", history, objects))
     card = page[page.index('<aside class="hero-card"') : page.index("</aside>")]
@@ -196,6 +202,7 @@ def test_hero_card_counts_the_published_package_files() -> None:
     assert "<strong>2 files</strong> in this repository" in page
     assert "<strong>2 KB</strong> total" in page
     assert "haberdasher.json" not in page and 'href="index.html"' not in page
+    assert 'href="og.png"' not in page
 
 
 def test_every_hero_links_the_maintainer() -> None:
@@ -323,3 +330,52 @@ def test_every_format_loads_pinned_assets_with_integrity() -> None:
         assert page.count('aria-current="page"') == 1
         assert "fonts.googleapis" not in page
     assert site.ref("apt", b"page").cache_control == "public, max-age=300"
+
+
+class _Head(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.meta: dict[str, str] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        key = values.get("property") or values.get("name")
+        if tag == "meta" and key is not None:
+            self.meta[key] = values.get("content") or ""
+
+
+def head(page: str) -> dict[str, str]:
+    parser = _Head()
+    parser.feed(page[: page.index("</head>")])
+    return parser.meta
+
+
+def test_every_page_has_absolute_preview_tags_for_its_host() -> None:
+    lead = "Packages for projects managed and maintained by Martin Wimpress."
+    for name, (_, url) in PUBLIC.items():
+        meta = head(render(name, published(name, ())))
+        title = f"Wimpy's World {site.THEMES[name].label} repository"
+        assert meta["og:url"] == f"{url}/" and url.startswith("https://")
+        assert meta["og:image"] == meta["twitter:image"] == f"{url}/og.png"
+        assert meta["og:title"] == meta["twitter:title"] == title
+        assert meta["description"] == meta["og:description"] == meta["twitter:description"] == lead
+        assert meta["og:image:alt"] == f"{title}. {lead}"
+        assert (meta["og:type"], meta["og:site_name"]) == ("website", "Wimpy's World")
+        assert (meta["og:image:width"], meta["og:image:height"]) == ("1200", "630")
+        assert (meta["og:image:type"], meta["twitter:card"]) == ("image/png", "summary_large_image")
+    page = render("apt", published("apt", ()))
+    assert '<meta property="og:site_name" content="Wimpy&#x27;s World">' in page
+    assert "pkg.wimpys.world/og.png" in render("arch", published("arch", ()))
+
+
+def test_package_ships_one_preview_image_per_format() -> None:
+    for name in PUBLIC:
+        data = site.image(name)
+        assert data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) < site.MAX_IMAGE_BYTES
+        assert struct.unpack(">II", data[16:24]) == (1200, 630)
+        ref = site.image_ref(name, data)
+        assert (ref.key, ref.content_type, ref.cache_control) == (
+            "og.png",
+            "image/png",
+            "public, max-age=86400",
+        )

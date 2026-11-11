@@ -223,18 +223,31 @@ def write_page(
     fallback: Mapping[str, str],
     now: datetime,
     report: Report = quiet,
-) -> bool:
-    """Write a format's index.html when it is missing or its content hash differs."""
+) -> int:
+    """Write a format's og.png and index.html when each is missing or differs. Count the writes."""
+    count = write_image(store, published.format, report=report)
     data, digest = site.page(
         published.format, published, fingerprint=fingerprint, fallback=fallback, now=now
     )
     current = store.read(published.format, site.PAGE_KEY, max_bytes=site.MAX_PAGE_BYTES)
     if current is not None and site.content_hash(current[0]) == digest:
-        return False
+        return count
     expected = None if current is None else current[1].etag
     state.write_object(store, site.ref(published.format, data), data, expected)
     step(report, published.format, f"wrote {site.PAGE_KEY}")
-    return True
+    return count + 1
+
+
+def write_image(store: Store, name: str, *, report: Report = quiet) -> int:
+    """Write a format's og.png when it is missing or its bytes differ."""
+    data = site.image(name)
+    current = store.read(name, site.IMAGE_KEY, max_bytes=site.MAX_IMAGE_BYTES)
+    if current is not None and current[0] == data:
+        return 0
+    expected = None if current is None else current[1].etag
+    state.write_object(store, site.image_ref(name, data), data, expected)
+    step(report, name, f"wrote {site.IMAGE_KEY}")
+    return 1
 
 
 def _unchanged(published: Published) -> PreparedFormat:
@@ -355,10 +368,8 @@ def _reconcile(
             fallback = site.descriptions(
                 item.retained.accepted_history for item in published.values()
             )
-            pages = tuple(
-                name
-                for name in names
-                if write_page(
+            writes = {
+                name: write_page(
                     store,
                     published[name],
                     fingerprint=fingerprint,
@@ -366,8 +377,10 @@ def _reconcile(
                     now=now,
                     report=report,
                 )
-            )
-            return RunResult(bool(pages), len(pages), len(scan.pending), pages=pages)
+                for name in names
+            }
+            pages = tuple(name for name in names if writes[name])
+            return RunResult(bool(pages), sum(writes.values()), len(scan.pending), pages=pages)
         if fingerprint is None:
             raise ValueError("Publication requires the expected signing fingerprint")
         prepared: list[PreparedFormat] = []
@@ -416,7 +429,7 @@ def _reconcile(
                 *item.outputs,
             )
             if not outputs and hashlib.sha256(data).hexdigest() == current.sha256:
-                if write_page(
+                if wrote := write_page(
                     store,
                     current,
                     fingerprint=fingerprint,
@@ -425,7 +438,7 @@ def _reconcile(
                     report=report,
                 ):
                     written.append(item.format)
-                    count += 1
+                    count += wrote
                 continue
             batch = [
                 output
@@ -459,7 +472,7 @@ def _reconcile(
             count += 1
             repositories.append(item.format)
             packages += len(item.retained.accepted_history) - len(current.retained.accepted_history)
-            if write_page(
+            if wrote := write_page(
                 store,
                 state.decode_published(item.format, data, None),
                 fingerprint=fingerprint,
@@ -468,7 +481,7 @@ def _reconcile(
                 report=report,
             ):
                 written.append(item.format)
-                count += 1
+                count += wrote
         return RunResult(
             True, count, len(scan.pending), packages, tuple(repositories), tuple(written)
         )

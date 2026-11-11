@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Wimpy's World RPM repository - OpenGraph preview</title>
+<style>
+/* Fonts: @fontsource/red-hat-display, red-hat-text, red-hat-mono @5.3.0 (latin), from jsDelivr. */
+@font-face{font-family:"Red Hat Display";font-weight:700;font-display:block;src:url(fonts/red-hat-display-latin-700-normal.woff2) format("woff2")}
+@font-face{font-family:"Red Hat Text";font-weight:400;font-display:block;src:url(fonts/red-hat-text-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"Red Hat Text";font-weight:500;font-display:block;src:url(fonts/red-hat-text-latin-500-normal.woff2) format("woff2")}
+@font-face{font-family:"Red Hat Mono";font-weight:400;font-display:block;src:url(fonts/red-hat-mono-latin-400-normal.woff2) format("woff2")}
+html,body{margin:0;padding:0}
+body{width:1200px;height:630px;overflow:hidden;background:#151515;color:#fff;font-family:"Red Hat Text",serif;-webkit-font-smoothing:antialiased}
+.card{position:relative;width:1200px;height:630px;overflow:hidden}
+/* The red rule that closes the live hero. */
+.card::after{content:"";position:absolute;left:0;right:0;bottom:0;height:12px;background:#ee0000}
+.grid{position:absolute;left:80px;top:0;height:618px;display:grid;grid-template-columns:168px 1fr;column-gap:52px;align-items:center}
+.mark{width:168px;height:168px;fill:#ee0000}
+.text{padding-bottom:6px}
+h1{margin:0 0 22px;font-family:"Red Hat Display",serif;font-size:80px;line-height:1;font-weight:700;letter-spacing:-.02em}
+h1 span{display:block}
+p.lead{margin:0 0 30px;font-size:33px;line-height:1.32;font-weight:400;max-width:660px;color:#fff}
+p.lead b{font-weight:500;text-decoration:underline;text-decoration-color:#ee0000;text-decoration-thickness:3px;text-underline-offset:.16em}
+.domain{display:inline-block;font-family:"Red Hat Mono",monospace;font-size:29px;color:#c7c7c7}
+</style>
+<body>
+<div class="card">
+  <div class="grid">
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.009 13.386c1.577 0 3.86-.326 3.86-2.202a1.765 1.765 0 0 0-.04-.431l-.94-4.08c-.216-.898-.406-1.305-1.982-2.093-1.223-.625-3.888-1.658-4.676-1.658-.733 0-.947.946-1.822.946-.842 0-1.467-.706-2.255-.706-.757 0-1.25.515-1.63 1.576 0 0-1.06 2.99-1.197 3.424a.81.81 0 0 0-.028.245c0 1.162 4.577 4.974 10.71 4.974m4.101-1.435c.218 1.032.218 1.14.218 1.277 0 1.765-1.984 2.745-4.593 2.745-5.895.004-11.06-3.451-11.06-5.734a2.326 2.326 0 0 1 .19-.925C2.746 9.415 0 9.794 0 12.217c0 3.969 9.405 8.861 16.851 8.861 5.71 0 7.149-2.582 7.149-4.62 0-1.605-1.387-3.425-3.887-4.512"/></svg>
+    <div class="text">
+      <h1><span>Wimpy's World</span><span>RPM repository</span></h1>
+      <p class="lead">Packages for projects managed and maintained by <b>Martin Wimpress</b>.</p>
+      <span class="domain">rpm.wimpys.world</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

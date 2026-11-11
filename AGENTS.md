@@ -122,6 +122,8 @@ Treat the five package buckets as public:
   It holds the setup steps, one install section per project, and a fold-down tree of the published files.
   Theme it with µCSS and each distribution's colours, fonts, and logos, loaded from pinned jsDelivr URLs with SRI hashes.
   Do not add per-project settings for the page.
+- Permit one public `og.png` preview image per bucket, which the page names in its OpenGraph and Twitter tags.
+  Generate it from the hero design of the page with the sources in `og/`, and ship it in the Python package.
 - Keep secrets and credentials out of these buckets.
 - Read publisher credentials only from the runtime environment:
   `HD_CLOUDFLARE_S3_API_ENDPOINT`, `HD_CLOUDFLARE_ACCESS_KEY_ID`, and `HD_CLOUDFLARE_SECRET_ACCESS_KEY`.

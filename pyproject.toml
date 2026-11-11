@@ -15,6 +15,9 @@ dev = ["pytest>=8", "types-PyYAML>=6.0.12"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+haberdasher = ["og/*.png"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
 addopts = "-ra --strict-markers"
