@@ -1,4 +1,4 @@
-"""The shared stylesheet, the six brand themes, the script, and the inline icons of the pages."""
+"""The shared stylesheet, the seven brand themes, the script, and the inline icons of the pages."""
 
 from __future__ import annotations
 
@@ -40,6 +40,10 @@ MARKS = {
     "flatpak": "M12 0c-.556 0-1.111.144-1.61.432l-7.603 4.39a3.217 3.217 0 0 0-1.61 2.788v8.78c0 1.151.612 2.212 1.61 2.788l7.603 4.39a3.217 3.217 0 0 0 3.22 0l7.603-4.39a3.217 3.217 0 0 0 1.61-2.788V7.61a3.217 3.217 0 0 0-1.61-2.788L13.61.432A3.218 3.218 0 0 0 12 0Zm0 2.358c.15 0 .299.039.431.115l7.604 4.39c.132.077.24.187.315.316L12 12v9.642a.863.863 0 0 1-.431-.116l-7.604-4.39a.866.866 0 0 1-.431-.746V7.61c0-.153.041-.302.116-.43L12 12Z",
     "brew": "M7.938 0a.214.214 0 0 0-.206.156c-.316 1.104.179 2.15.838 2.935.153.181.313.347.476.501a2.039 2.039 0 0 0-.665.02c-1.184.233-2.193.985-2.74 2.532a3.893 3.893 0 0 0-.2 1.466 1.565 1.565 0 0 0-1.156 1.504 1.59 1.59 0 0 0 1.227 1.541l.026 12.046c0 .195.1.377.264.482a.214.214 0 0 0 .008.005c.537.31 2.047.812 5.21.812 3.238 0 4.7-.678 5.181-1.04a.214.214 0 0 0 .008-.007.571.571 0 0 0 .206-.439c.002-.344.002-1.136.002-1.604a.143.143 0 0 1 .147-.144c.397.006.869.006 1.318.005a1.826 1.826 0 0 0 1.832-1.825v-5.804a1.826 1.826 0 0 0-1.825-1.826H16.56a.14.14 0 0 1-.143-.144V10.6h.007v-.001a1.573 1.573 0 0 0 1.356-1.556c0-.816-.627-1.489-1.424-1.563-.025-1.438-.437-2.126-.736-2.58a.214.214 0 0 0-.005-.007c-.364-.51-1.193-1.282-2.275-1.316-.503-.016-.842.124-1.125.254-.217.1-.42.177-.67.22.002-1.286.945-1.981.945-1.981a.214.214 0 0 0 .05-.298s-.087-.122-.21-.26c-.121-.136-.269-.294-.47-.378a.214.214 0 0 0-.079-.017.214.214 0 0 0-.145.055 4.308 4.308 0 0 0-.875 1.101 3.42 3.42 0 0 0-.133.273 3.497 3.497 0 0 0-.381-.846C9.794.978 9.063.436 8.017.016A.214.214 0 0 0 7.939 0zm.156.524c.85.378 1.43.83 1.79 1.403.274.438.426.962.484 1.584a3.07 3.07 0 0 0-.012.462 6.897 6.897 0 0 1-.168-.052 5.487 5.487 0 0 1-1.29-1.106c-.551-.657-.935-1.46-.804-2.291zM11.8 1.618c.07.054.141.101.212.18.034.039.032.04.058.073-.332.308-1.07 1.144-.952 2.453a.214.214 0 0 0 .222.195c.469-.017.782-.172 1.056-.299.273-.126.508-.228.931-.214.875.027 1.639.715 1.939 1.134.295.449.65 1 .663 2.36a1.66 1.66 0 0 0-.41.142 1.938 1.938 0 0 0-1.77-1.16 1.94 1.94 0 0 0-1.87 1.448 1.783 1.783 0 0 0-1.356-.64c-.484 0-.91.205-1.233.517a1.873 1.873 0 0 0-1.85-1.625c-.649 0-1.218.335-1.552.84a3.1 3.1 0 0 1 .157-.735c.51-1.437 1.355-2.045 2.42-2.254.367-.073.664-.011.99.095.325.106.671.262 1.094.342a.214.214 0 0 0 .252-.245c-.112-.67.073-1.266.336-1.744a3.71 3.71 0 0 1 .663-.863zM7.44 6.611a1.442 1.442 0 0 1 1.363 1.925.214.214 0 0 0 .168.283h.005a.214.214 0 0 0 .238-.146 1.373 1.373 0 0 1 2.613-.01.214.214 0 0 0 .417-.09 1.509 1.509 0 0 1 1.504-1.664c.678 0 1.249.445 1.442 1.056a.214.214 0 0 0 .259.143l.15-.04a.214.214 0 0 0 .051-.02 1.139 1.139 0 0 1 1.702.995 1.14 1.14 0 0 1-.985 1.131.214.214 0 0 0-.001 0 2.215 2.215 0 0 0-.485.126 10.65 10.65 0 0 1-1.176.365.214.214 0 0 0-.162.186 1.276 1.276 0 0 1-.146.478 2.07 2.07 0 0 0-.239 1.111l.001.151a.438.438 0 0 1-.16.36.665.665 0 0 1-.43.14.586.586 0 0 1-.588-.59.803.803 0 0 0-.38-.681.214.214 0 0 0-.002-.002c-.24-.145-.43-.37-.532-.636a.214.214 0 0 0-.207-.138 19.469 19.469 0 0 1-5.37-.6l-.003-.002a9.007 9.007 0 0 0-.838-.194h.003a1.16 1.16 0 0 1-.937-1.134c0-.619.488-1.118 1.101-1.14a.214.214 0 0 0 .204-.176 1.443 1.443 0 0 1 1.42-1.187zm8.549 4.106v.455c0 .314.259.573.572.573h1.329a1.397 1.397 0 0 1 1.397 1.397v5.804a1.396 1.396 0 0 1-1.402 1.396.214.214 0 0 0-.002 0c-.448.002-.918 0-1.31-.005a.573.573 0 0 0-.584.573c0 .468 0 1.262-.002 1.603a.214.214 0 0 0 0 .001c0 .042-.019.08-.05.107-.346.26-1.75.95-4.915.95-3.107 0-4.587-.52-4.99-.752a.143.143 0 0 1-.065-.118l-.025-11.955c.145.033.288.07.431.11a.214.214 0 0 0 .003 0c.115.031.246.064.383.097v10.37c0 .129.069.247.18.31.453.217 1.767.732 4.071.732 2.32 0 3.595-.626 4.022-.884a.357.357 0 0 0 .164-.3l.001-10.21c.267-.075.531-.158.792-.254zm-7.99.894a.493.493 0 0 1 .494.493v8.578a.493.493 0 0 1-.493.493.493.493 0 0 1-.494-.493v-8.578A.493.493 0 0 1 8 11.611zm8.652 1.14a.663.663 0 0 0-.662.662v5.208a.663.663 0 0 0 .662.662h1.14a.663.663 0 0 0 .662-.662v-5.209a.663.663 0 0 0-.662-.662zm0 .428h1.14a.233.233 0 0 1 .233.233v5.21a.233.233 0 0 1-.233.232h-1.14a.233.233 0 0 1-.233-.233v-5.209a.233.233 0 0 1 .233-.233z",
 }
+
+
+# simple-icons has no Scoop mark, so this is a drawn ice cream bowl after the Scoop logo.
+SCOOP_MARK = "M7.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0zM2.5 8.5a4 4 0 1 0 8 0a4 4 0 1 0-8 0zM13.5 8.5a4 4 0 1 0 8 0a4 4 0 1 0-8 0zM1.5 13.5h21a10.5 5.5 0 0 1-21 0zM8.5 20h7a1 1 0 0 1 1 1v1h-9v-1a1 1 0 0 1 1-1z"
 
 
 @dataclass(frozen=True)
@@ -315,6 +319,37 @@ a{font-weight:600}
             """SEL body{--hd-bg:#2e2a24;--hd-fg:#ffd79a;--hd-muted:#d1b98a;--hd-surface:#38332b;--hd-border:#574c3b;--hd-guide:#7a6a50;--hd-link:#e2a843;--hd-focus:#87c7d8;--hd-h2-color:#ffd79a;--hd-card-bg:#38332b;--hd-hero-bg:#24201b;--hd-code-bg:#1f1c18;--hd-code-border:#4a4135;--hd-inline-code-bg:#1f1c18;--hd-fp-tail:#f7c96c;--hd-tab-active-bg:#e2a843;--hd-tab-active-fg:#2e2a24;--hd-step-bg:#e2a843;--hd-step-fg:#2e2a24}"""
         ),
     ),
+    "scoop": Theme(
+        label="Scoop",
+        short="Scoop",
+        icon=SCOOP_MARK,
+        mu="@digicreon/mucss@1.4.9/dist/mu.azure.css",
+        fonts=(),
+        works=(
+            (None, "Scoop"),
+            (None, "Windows"),
+        ),
+        favicon="#4D4A52",
+        css="""
+body{--hd-font-body:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;--hd-font-display:var(--hd-font-body);--hd-font-mono:SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+--hd-h-weight:500;--hd-h1-weight:700;--hd-h3-weight:600;--hd-h4-weight:600;--hd-radius:.375rem;--hd-btn-radius:.375rem;--hd-pill:.375rem;--hd-step-radius:50%;
+--hd-bg:#fff;--hd-fg:#212529;--hd-muted:#5c5866;--hd-surface:#f8f9fa;--hd-border:#dee2e6;--hd-link:#0a58ca;--hd-focus:#86b7fe;--hd-accent:#f77fb5;--hd-h2-color:#6b4fa3;
+--hd-bar-bg:#2b2930;--hd-bar-fg:#fff;--hd-bar-hover:rgba(255,255,255,.1);--hd-bar-current-bg:#f77fb5;--hd-bar-current-fg:#2b2930;
+--hd-hero-bg:#4d4a52;--hd-hero-fg:#fff;--hd-hero-muted:#d9d6dc;--hd-hero-mark:#f77fb5;--hd-hero-link:#e9ee9e;--hd-hero-rule:#e9ee9e;
+--hd-code-bg:#f8f9fa;--hd-code-fg:#212529;--hd-code-border:#dee2e6;--hd-code-btn-bg:#e9ecef;--hd-code-btn-fg:#212529;--hd-code-btn-border:#e9ecef;--hd-code-btn-hover:#dee2e6;--hd-tag-fg:#212529;--hd-tag-bg:#e9ecef;
+--hd-btn-bg:#6b4fa3;--hd-btn-fg:#fff;--hd-btn-hover:#58408a;--hd-step-bg:#8a6ac0;--hd-step-fg:#fff;--hd-fp-tail:#6b4fa3;
+--hd-tab-active-bg:#4d4a52;--hd-tab-active-fg:#fff}
+.masthead{border-bottom:4px solid var(--hd-accent);box-shadow:inset 0 -8px 0 #8a6ac0,inset 0 -12px 0 #e9ee9e}
+.hero-card{border:0;border-top:4px solid var(--hd-accent)}
+h2{color:var(--hd-h2-color)}
+a:not([class]){text-decoration:none}a:not([class]):hover{text-decoration:underline}
+.tablist a{border-bottom-width:3px}
+.pkg div{border-top:3px solid var(--hd-accent)}
+"""
+        + dark(
+            """SEL body{--hd-bg:#222;--hd-fg:#e1e1e1;--hd-muted:#b4b0bb;--hd-surface:#2b2930;--hd-border:#495057;--hd-guide:#6c757d;--hd-link:#6ea8fe;--hd-h2-color:#c9b3f0;--hd-card-bg:#38353e;--hd-hero-bg:#2b2930;--hd-code-bg:#343a40;--hd-code-fg:#e1e1e1;--hd-code-border:#495057;--hd-code-btn-bg:#495057;--hd-code-btn-fg:#e1e1e1;--hd-code-btn-border:#495057;--hd-code-btn-hover:#6c757d;--hd-inline-code-bg:#343a40;--hd-tag-fg:#e1e1e1;--hd-tag-bg:#495057;--hd-fp-tail:#c9b3f0;--hd-tab-active-bg:#f77fb5;--hd-tab-active-fg:#2b2930;--hd-btn-bg:#8a6ac0;--hd-btn-hover:#a68ad6;--hd-tree-head:#2b2930}"""
+        ),
+    ),
 }
 
 BASE_CSS = """
@@ -506,11 +541,11 @@ html.no-js .tablist{border:0;gap:1rem;margin-bottom:1rem}html.no-js .tablist::be
 .brand span{display:none}
 .bar .wrap{gap:.5rem}
 .bar nav{flex:1;min-width:0}
-.bar .sites{gap:.1rem;justify-content:space-between;flex-wrap:nowrap}
-.bar .sites li a{padding:.45rem .4rem;font-size:.82rem;gap:.25rem}
+.bar .sites{gap:0;justify-content:space-between;flex-wrap:wrap}
+.bar .sites li a{padding:.45rem .28rem;font-size:.8rem;gap:.25rem}
 .works{gap:.4rem .7rem;font-size:.9rem}
 .works .label{flex-basis:100%}
-.sites a:not([aria-current]) svg{display:none}
+.sites svg{display:none}
 .sites .full{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.sites .short{display:inline}
 .masthead .wrap{grid-template-columns:1fr;gap:1rem}
 .hero-card{display:none}

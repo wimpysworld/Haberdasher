@@ -18,6 +18,7 @@ from haberdasher.core import AdmittedAsset, ObjectRef, plural, size_text
 from haberdasher.formats.apt import COMPONENT, SUITE
 from haberdasher.formats.brew import TAP, TAP_NAME
 from haberdasher.formats.flatpak import FLATHUB, FLATPAKREPO, REMOTE, TITLE
+from haberdasher.formats.scoop import BUCKET, REPO
 from haberdasher.site_style import (
     BASE_CSS,
     BRAND_MARK,
@@ -123,8 +124,19 @@ def install(name: str, packages: Sequence[str]) -> list[Command]:
             return [(None, f"apk add {names}")]
         case "brew":
             return [(None, "\n".join(f"brew install --cask {TAP_NAME}/{p}" for p in packages))]
+        case "scoop":
+            return [(None, "\n".join(f"scoop install {BUCKET}/{p}" for p in packages))]
         case _:
             return [(None, f"flatpak --user install {REMOTE} {app}") for app in packages]
+
+
+def scoop_step() -> Step:
+    """Add the Scoop bucket, which Scoop clones with Git."""
+    return Step(
+        "Add the bucket",
+        "Scoop clones the bucket over HTTPS with Git and checks the SHA-256 of each download.",
+        ((None, f"scoop bucket add {BUCKET} {PUBLIC['scoop'][1]}/{REPO}"),),
+    )
 
 
 def steps(
@@ -137,6 +149,8 @@ def steps(
     add = "Add the repository"
     last = Step(f"Install {' '.join(packages)}", "", tuple(install(name, packages)))
     match name:
+        case "scoop":
+            return [scoop_step(), last]
         case "brew":
             return [
                 Step(
@@ -313,6 +327,8 @@ def remove(name: str, fingerprint: str) -> tuple[str, list[Command]]:
             )
         case "brew":
             return ("Uninstall its casks first.", [(None, f"brew untap {TAP_NAME}")])
+        case "scoop":
+            return ("Uninstall its apps first.", [(None, f"scoop bucket rm {BUCKET}")])
         case "apk":
             return (
                 "Run these commands as root.",
@@ -348,7 +364,7 @@ def description(asset: AdmittedAsset) -> str:
             return _field(r"^%DESC%\n(.*)$", metadata.get("desc"))
         case "apk":
             return _field(r"^T:(.*)$", metadata.get("stanza"))
-        case "brew":
+        case "brew" | "scoop":
             return _field(r"(.+)", metadata.get("desc"))
         case _:
             return _field(r"(.+)", metadata.get("summary"))
@@ -486,6 +502,7 @@ def files(objects: Sequence[ObjectRef]) -> dict[str, int]:
 FOLDS = {
     "flatpak": ("objects", "OSTree object", "content-addressed"),
     "brew": (TAP, "file", "Git repository"),
+    "scoop": (REPO.split("/")[0], "file", "Git repository"),
 }
 
 
@@ -619,6 +636,18 @@ def _panel(
     )
 
 
+def _empty(name: str) -> str:
+    if name != "scoop":
+        return "<p>This repository has no packages yet.</p>"
+    step = scoop_step()
+    blocks = "".join(_code(command, variant) for variant, command in step.commands)
+    return (
+        '<section class="panel"><p class="desc">No Windows packages are published yet.</p>'
+        f'<ol class="steps"><li><h4>{_e(step.title)}</h4><p class="note">{step.note}</p>'
+        f"{blocks}</li></ol></section>"
+    )
+
+
 def _tab(project: Project, *, selected: bool) -> str:
     title, slug = _title(project)
     versions = ", ".join(dict.fromkeys(version for _, version, _ in project.packages))
@@ -716,13 +745,10 @@ def _document(
         if len(entries) > 1
         else ""
     )
-    panels = (
-        "".join(
-            _panel(name, project, history, refs, fingerprint, hidden=i > 0)
-            for i, project in enumerate(entries)
-        )
-        or "<p>This repository has no packages yet.</p>"
-    )
+    panels = "".join(
+        _panel(name, project, history, refs, fingerprint, hidden=i > 0)
+        for i, project in enumerate(entries)
+    ) or _empty(name)
     caption, commands = remove(name, fingerprint)
     removal = (f"<p>{_e(caption)}</p>" if caption else "") + "".join(
         _code(command, variant) for variant, command in commands

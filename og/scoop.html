@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Wimpy's World Scoop repository - OpenGraph preview</title>
+<style>
+/* scoop.sh uses the system UI fonts. Inter and JetBrains Mono (latin, from jsDelivr) stand in for them. */
+@font-face{font-family:"Inter Variable";font-weight:100 900;font-display:block;src:url(fonts/inter-latin-wght-normal.woff2) format("woff2-variations")}
+@font-face{font-family:"JetBrains Mono";font-weight:400;font-display:block;src:url(fonts/jetbrains-mono-latin-400-normal.woff2) format("woff2")}
+html,body{margin:0;padding:0}
+body{width:1200px;height:630px;overflow:hidden;background:#4d4a52;color:#fff;font-family:"Inter Variable",serif;-webkit-font-smoothing:antialiased}
+.card{position:relative;width:1200px;height:630px;overflow:hidden;box-sizing:border-box;border-bottom:12px solid #f77fb5;box-shadow:inset 0 -10px 0 #8a6ac0,inset 0 -20px 0 #e9ee9e}
+.grid{position:absolute;left:80px;top:0;height:608px;display:grid;grid-template-columns:168px 1fr;column-gap:52px;align-items:center}
+.mark{width:168px;height:168px;fill:#f77fb5}
+.text{padding-bottom:10px}
+h1{margin:0 0 22px;font-size:74px;line-height:.98;font-weight:700;letter-spacing:-.01em}
+h1 span{display:block}
+p.lead{margin:0 0 30px;font-size:33px;line-height:1.3;font-weight:400;max-width:640px;color:#eceaee}
+p.lead b{font-weight:700;color:#e9ee9e;text-decoration:underline;text-decoration-color:#f77fb5;text-decoration-thickness:3px;text-underline-offset:.16em}
+.domain{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:29px;color:#2b2930;background:#f77fb5;padding:4px 14px;border-radius:.375rem;letter-spacing:.01em}
+</style>
+<body>
+<div class="card">
+  <div class="grid">
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0zM2.5 8.5a4 4 0 1 0 8 0a4 4 0 1 0-8 0zM13.5 8.5a4 4 0 1 0 8 0a4 4 0 1 0-8 0zM1.5 13.5h21a10.5 5.5 0 0 1-21 0zM8.5 20h7a1 1 0 0 1 1 1v1h-9v-1a1 1 0 0 1 1-1z"/></svg>
+    <div class="text">
+      <h1><span>Wimpy's World</span><span>Scoop repository</span></h1>
+      <p class="lead">Packages for projects managed and maintained by <b>Martin Wimpress</b>.</p>
+      <span class="domain">scoop.wimpys.world</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

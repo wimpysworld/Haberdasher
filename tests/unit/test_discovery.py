@@ -385,6 +385,58 @@ def add_checksum(github: RecordedGitHub, identifier: int, name: str, body: bytes
     github.bodies[f"v2/{name}"] = body
 
 
+def test_self_updating_release_skips_only_the_named_installer_without_download(
+    github: RecordedGitHub,
+) -> None:
+    digest = "sha256:" + hashlib.sha256(b"installer").hexdigest()
+    names = ((204, "App-1.0-win-x64.exe"), (205, "App-1.0-win-x64.zip"))
+    for identifier, name in names:
+        add_checksum(github, identifier, name, b"installer")
+        github.update(identifier, digest=digest)
+    lines: list[str] = []
+    plain = scan_releases(CONFIG, runtime=github, report=lines.append)
+    assert {item.source.asset_id for item in plain.checksummed} == {201, 204, 205}
+    feed = b"version: 1.0\nfiles:\n  - url: App-1.0-win-x64.exe\npath: App-1.0-win-x64.exe\n"
+    add_checksum(github, 206, "latest.yml", feed)
+    github.update(206, digest="sha256:" + hashlib.sha256(feed).hexdigest())
+    github.calls.clear()
+    lines.clear()
+    updater = scan_releases(CONFIG, runtime=github, report=lines.append)
+    assert {item.source.asset_id for item in updater.checksummed} == {201, 205}
+    assert 204 in {record.source.asset_id for record in updater.state.records}
+    assert (
+        "scoop skipped example/tool v2 App-1.0-win-x64.exe: a self-updating installer (latest.yml)"
+        in lines
+    )
+    calls = list(map(" ".join, github.calls))
+    assert any("--pattern latest.yml" in call for call in calls)
+    assert not any("App-1.0-win-x64.exe" in call for call in calls)
+
+
+def test_self_updating_release_without_a_feed_checksum_skips_every_windows_asset(
+    github: RecordedGitHub,
+) -> None:
+    add_checksum(github, 205, "App-1.0-win-x64.zip", b"portable")
+    github.update(205, digest="sha256:" + hashlib.sha256(b"portable").hexdigest())
+    add_checksum(github, 206, "latest.yml", b"path: App-1.0-win-x64.exe\n")
+    github.update(206, digest=None)
+    lines: list[str] = []
+    result = scan_releases(CONFIG, runtime=github, report=lines.append)
+    assert {item.source.asset_id for item in result.checksummed} == {201}
+    assert "scoop skipped example/tool v2: the app updates itself (latest.yml has no checksum)" in (
+        lines
+    )
+    assert not any("--pattern" in call and "App-1.0" in " ".join(call) for call in github.calls)
+
+
+def test_self_updating_release_rejects_a_changed_feed(github: RecordedGitHub) -> None:
+    add_checksum(github, 205, "App-1.0-win-x64.zip", b"portable")
+    add_checksum(github, 206, "latest.yml", b"path: App-1.0-win-x64.exe\n")
+    github.update(206, digest="sha256:" + "0" * 64)
+    with pytest.raises(DiscoveryFailure, match="latest.yml: Downloaded asset differs"):
+        scan(github)
+
+
 def test_agreeing_checksum_sources(github: RecordedGitHub) -> None:
     add_checksum(github, 204, "SHA256SUMS", github.bodies["v2/checksums.txt"])
     digest = github.bodies["v2/checksums.txt"].split()[0]

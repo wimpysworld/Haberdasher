@@ -561,6 +561,7 @@ def test_unlock_deletes_existing_locks_only_on_request(
         "brew  no lock",
         "flatpak no lock",
         "rpm   no lock",
+        "scoop no lock",
         "Removed 1 lock.",
     ]
     assert not any((root / "public" / name / state.LOCK_KEY).exists() for name in core.FORMATS)

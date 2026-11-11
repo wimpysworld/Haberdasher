@@ -88,7 +88,7 @@ printf '%s\n' "$*" >native.log
 EOF
 chmod +x "$fixture/project/.venv/bin/python"
 router x86_64-linux all
-[[ $(cat "$fixture/project/native.log") == '-m pytest -p no:cacheprovider tests/native/test_apt.py tests/native/test_rpm.py tests/native/test_arch.py tests/native/test_apk.py tests/native/test_flatpak.py tests/native/test_brew.py tests/native/test_signing.py tests/native/test_http.py tests/native/test_storage_clients.py tests/native/test_pipeline.py' ]]
+[[ $(cat "$fixture/project/native.log") == '-m pytest -p no:cacheprovider tests/native/test_apt.py tests/native/test_rpm.py tests/native/test_arch.py tests/native/test_apk.py tests/native/test_flatpak.py tests/native/test_brew.py tests/native/test_scoop.py tests/native/test_signing.py tests/native/test_http.py tests/native/test_storage_clients.py tests/native/test_pipeline.py' ]]
 rm "$fixture/project/native.log"
 if router aarch64-linux all; then
     printf 'FAIL: unqualified native architecture accepted.\n' >&2

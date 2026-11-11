@@ -2,8 +2,8 @@
 set -euo pipefail
 
 case "${1:-all}" in
-    all) formats=(apt rpm arch apk flatpak brew) ;;
-    apt | rpm | arch | apk | flatpak | brew) formats=("$1") ;;
+    all) formats=(apt rpm arch apk flatpak brew scoop) ;;
+    apt | rpm | arch | apk | flatpak | brew | scoop) formats=("$1") ;;
     *)
         printf 'Error: unknown proof format: %s\n' "$1" >&2
         exit 1

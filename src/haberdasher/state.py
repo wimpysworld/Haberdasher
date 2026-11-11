@@ -281,6 +281,7 @@ def _paths(
         "arch": ("paths",),
         "flatpak": ("files",),
         "brew": ("files",),
+        "scoop": ("files",),
     }.get(name, ()):
         result[field] = {
             key: move(text(value, "metadata path"), key)

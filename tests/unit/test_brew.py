@@ -18,7 +18,7 @@ from haberdasher.core import (
     UnsupportedAsset,
     VerifiedAsset,
 )
-from haberdasher.formats import brew
+from haberdasher.formats import brew, mirror
 from haberdasher.runtime import Runtime, private_workspace
 
 POLICY = Config(("example/test",)).format_policy("brew")
@@ -127,7 +127,7 @@ def verified(tmp_path: Path, filename: str, data: bytes, asset_id: int = 1) -> V
 
 def inspect(tmp_path: Path, filename: str, data: bytes, asset_id: int = 1) -> InspectedAsset:
     with patch.object(
-        discovery, "release_details", return_value=("v0.6.0", 'Ready-to-wear "templates" #1')
+        discovery, "release_details", return_value=("v0.6.0", 'Ready-to-wear "templates" #1', "MIT")
     ):
         return brew.inspect(
             verified(tmp_path, filename, data, asset_id),
@@ -216,33 +216,37 @@ def runtime() -> Iterator[Runtime]:
 
 
 def objects(repo: Path) -> dict[str, Path]:
-    files = brew.published_files(repo).items()
-    return {key: path for key, path in files if key not in brew.ENTRIES}
+    files = mirror.published_files(repo).items()
+    return {key: path for key, path in files if key not in mirror.ENTRIES}
 
 
-def test_tap_first_run_later_commit_and_unchanged_run(runtime: Runtime) -> None:
+def repository(
+    objects: dict[str, Path], head: str | None, files: dict[str, str], runtime: Runtime, out: str
+) -> tuple[str, Path]:
+    return mirror.repository(
+        objects, head, files, runtime=runtime, out=runtime.root / out, now=NOW, message="Update"
+    )
+
+
+def test_repository_first_run_later_commit_and_unchanged_run(runtime: Runtime) -> None:
     files = {"README.md": "Tap\n", "Casks/tailor.rb": "one\n"}
-    head, repo = brew.tap({}, None, files, runtime=runtime, out=runtime.root / "a", now=NOW)
-    first = brew.published_files(repo)
-    assert list(first)[-4:] == list(brew.ENTRIES)
+    head, repo = repository({}, None, files, runtime, "a")
+    first = mirror.published_files(repo)
+    assert list(first)[-4:] == list(mirror.ENTRIES)
     assert (repo / "HEAD").read_text() == "ref: refs/heads/main\n"
     assert (repo / "info/refs").read_text() == f"{head}\trefs/heads/main\n"
     log = runtime.run(["git", f"--git-dir={repo}", "log", "--format=%an <%ae> %P", "main"])
     assert log.stdout.decode() == "Haberdasher <code@wimpress.io> \n"
 
-    same, again = brew.tap(
-        objects(repo), head, files, runtime=runtime, out=runtime.root / "b", now=NOW
-    )
+    same, again = repository(objects(repo), head, files, runtime, "b")
     assert same == head
-    assert {key: path.read_bytes() for key, path in brew.published_files(again).items()} == {
+    assert {key: path.read_bytes() for key, path in mirror.published_files(again).items()} == {
         key: path.read_bytes() for key, path in first.items()
     }
 
     changed = {**files, "Casks/tailor.rb": "two\n"}
-    later, repo = brew.tap(
-        objects(repo), head, changed, runtime=runtime, out=runtime.root / "c", now=NOW
-    )
+    later, repo = repository(objects(repo), head, changed, runtime, "c")
     assert later != head
     parents = runtime.run(["git", f"--git-dir={repo}", "rev-list", "--parents", "-n1", later])
     assert parents.stdout.decode().split() == [later, head]
-    assert set(first) - {"info/refs", "refs/heads/main"} <= set(brew.published_files(repo))
+    assert set(first) - {"info/refs", "refs/heads/main"} <= set(mirror.published_files(repo))

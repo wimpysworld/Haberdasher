@@ -84,6 +84,12 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
   Bare binaries carry no package metadata, so the cask name comes from the asset name and the version from the release tag.
   Take each architecture from the Mach-O header, never from the file name.
   Remove the quarantine attribute in each cask's `postflight` until the projects sign and notarise with a Developer ID.
+- For Scoop, publish Windows bare `.exe` files and `.zip` files that hold one `.exe`, mirrored into the bucket.
+  Write one JSON manifest per tool into a bucket repository served over dumb HTTP at `wimpysworld/haberdasher.git`.
+  Scoop requires a `<host>/<user>/<repo>` URL. Scoop verifies the manifest `hash`, not an OpenPGP signature.
+  Name and version each tool the same way as Homebrew. Take each architecture from the PE header, never from the file name.
+  Publish an app's portable zip, never its self-updating installer. Skip the installer that a release's `latest.yml` names, without downloading it.
+  Give a GUI executable a Start Menu shortcut and a console executable a `bin` entry, from the PE subsystem field.
 
 ## Testing
 
@@ -102,7 +108,7 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
 
 ## Security and secrets
 
-Treat the six package buckets as public:
+Treat the seven package buckets as public:
 
 | Domain | Bucket |
 | --- | --- |
@@ -112,6 +118,7 @@ Treat the six package buckets as public:
 | `pkg.wimpys.world` | `haberdasher-pkg` |
 | `flatpak.wimpys.world` | `haberdasher-flatpak` |
 | `brew.wimpys.world` | `haberdasher-brew` |
+| `scoop.wimpys.world` | `haberdasher-scoop` |
 
 - Use one dedicated Haberdasher RSA4096 private primary with signing and certification capabilities, without subkeys or per-format keypairs.
   Sign directly with that primary for APT, RPM, Arch, and Flatpak. Convert the same RSA private numbers to PKCS#8 PEM for Alpine.

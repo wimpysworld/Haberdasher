@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import plistlib
-import re
-import shutil
 import struct
 import zipfile
-from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -20,36 +17,21 @@ from haberdasher.core import (
     InspectedAsset,
     JSONValue,
     NativeIdentity,
-    ObjectRef,
-    OutputObject,
     PreparedFormat,
     RetainedFormat,
     UnsupportedAsset,
     VerifiedAsset,
-    atomic_write,
-    safe_path,
-    sha256_file,
-    stale_entries,
 )
+from haberdasher.formats import mirror
+from haberdasher.formats.mirror import version
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
 
 TAP = "tap.git"
 TAP_NAME = "wimpysworld/haberdasher"
-AUTHOR = ("Haberdasher", "code@wimpress.io")
-# Dumb HTTP clients read these mutable files, in this order, after the immutable objects.
-ENTRIES = ("info/refs", "objects/info/packs", "refs/heads/main", "HEAD")
-_OBJECT = re.compile(r"objects/(?:[0-9a-f]{2}/[0-9a-f]{38}|pack/pack-[0-9a-f]{40}\.(?:pack|idx))")
-_TOKEN = re.compile(r"[a-z0-9][a-z0-9.+-]*")
-_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 _CPU = {0x01000007: "intel", 0x0100000C: "arm"}
 MH_EXECUTE = 2
 MAX_PLIST = 1024 * 1024
-IMMUTABLE = "public, max-age=31536000, immutable"
-
-
-class BrewFailure(ValueError):
-    pass
 
 
 def macho_architectures(header: bytes) -> tuple[str, ...]:
@@ -97,24 +79,15 @@ def zip_app(path: Path) -> tuple[str, tuple[str, ...]]:
 def token(filename: str, app: str = "") -> str:
     """The cask name: the app name, or the asset name before its operating system."""
     if app:
-        return app.removesuffix(".app").lower().replace(" ", "-")
+        return mirror.name(app.removesuffix(".app"))
     match = discovery.MACOS_BINARY.fullmatch(filename)
-    return match[1].lower().replace("_", "-") if match else ""
-
-
-def version(tag: str) -> str:
-    return tag.removeprefix("v")
-
-
-def _check(asset: VerifiedAsset) -> None:
-    if sha256_file(asset.local_path) != (asset.sha256, asset.size):
-        raise BrewFailure("Missing or changed Homebrew input")
+    return mirror.name(match[1]) if match else ""
 
 
 def inspect(
     asset: VerifiedAsset, *, policy: FormatPolicy, runtime: Runtime, out: Path
 ) -> InspectedAsset:
-    _check(asset)
+    mirror.check(asset)
     filename = asset.source.filename
     app = ""
     if filename.endswith(".zip"):
@@ -127,8 +100,8 @@ def inspect(
     if not architectures:
         raise UnsupportedAsset(f"{filename}: not a macOS executable")
     name = token(filename, app)
-    tag, description = discovery.release_details(asset.source, runtime)
-    if _TOKEN.fullmatch(name) is None or _VERSION.fullmatch(version(tag)) is None:
+    tag, description, _ = discovery.release_details(asset.source, runtime)
+    if not mirror.valid(name, version(tag)):
         raise UnsupportedAsset(f"{filename}: no valid cask name or version")
     architecture = _architecture(architectures)
     if architecture not in policy.architectures:
@@ -151,11 +124,6 @@ def compare(left: NativeIdentity, right: NativeIdentity, *, runtime: Runtime) ->
     return 0 if same else None
 
 
-def _key(item: InspectedAsset) -> str:
-    identity = item.identity
-    return f"{identity.name}/{identity.version}/{item.verified.source.filename}"
-
-
 def _ruby(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("#", "\\#")
     return f'"{escaped}"'
@@ -171,7 +139,7 @@ def cask(items: Sequence[InspectedAsset]) -> str:
     architectures = {item.identity.architecture: item for item in items}
 
     def source(item: InspectedAsset, indent: str) -> list[str]:
-        url = f"{PUBLIC['brew'][1]}/{quote(_key(item))}"
+        url = f"{PUBLIC['brew'][1]}/{quote(mirror.key(item))}"
         return [f'{indent}sha256 "{item.verified.sha256}"', f"{indent}url {_ruby(url)}"]
 
     def binary(item: InspectedAsset, indent: str) -> list[str]:
@@ -217,20 +185,7 @@ def cask(items: Sequence[InspectedAsset]) -> str:
 
 def casks(history: Sequence[AdmittedAsset]) -> dict[str, str]:
     """One cask per tool, for the newest published version of each."""
-    latest: dict[str, str] = {}
-    for item in history:
-        latest[item.inspected.identity.name] = item.inspected.identity.version
-    return {
-        name: cask(
-            [
-                item.inspected
-                for item in history
-                if (item.inspected.identity.name, item.inspected.identity.version)
-                == (name, release)
-            ]
-        )
-        for name, release in sorted(latest.items())
-    }
+    return {name: cask(items) for name, items in mirror.latest(history).items()}
 
 
 def readme(names: Sequence[str]) -> str:
@@ -246,139 +201,16 @@ def readme(names: Sequence[str]) -> str:
     )
 
 
-def _git(
-    runtime: Runtime, repo: Path, *args: str, now: datetime | None = None, cwd: Path | None = None
-) -> str:
-    environment = [
-        "GIT_CONFIG_NOSYSTEM=1",
-        "GIT_CONFIG_GLOBAL=/dev/null",
-        f"GIT_INDEX_FILE={repo.parent / 'index'}",
-    ]
-    if now is not None:
-        stamp = now.strftime("%Y-%m-%dT%H:%M:%S+0000")
-        for role in ("AUTHOR", "COMMITTER"):
-            environment += [
-                f"GIT_{role}_NAME={AUTHOR[0]}",
-                f"GIT_{role}_EMAIL={AUTHOR[1]}",
-                f"GIT_{role}_DATE={stamp}",
-            ]
-    result = runtime.run(
-        ["env", *environment, "git", "-c", "gc.auto=0", f"--git-dir={repo}", *args], cwd=cwd
-    )
-    if result.returncode:
-        raise BrewFailure(f"Native git command failed: git {args[0]}")
-    return result.stdout.decode().strip()
-
-
-def tap(
-    objects: Mapping[str, Path],
-    head: str | None,
-    files: Mapping[str, str],
-    *,
-    runtime: Runtime,
-    out: Path,
-    now: datetime,
-) -> tuple[str, Path]:
-    """Restore the tap objects, commit the files on main when they change, and update server info.
-
-    Return the new head and the bare repository. History accumulates, so clients fast-forward.
-    """
-    out.mkdir(mode=0o700, parents=True)
-    repo = out / TAP
-    _git(runtime, repo, "init", "--quiet", "--bare", "--initial-branch=main")
-    for key, path in objects.items():
-        if _OBJECT.fullmatch(key) is None:
-            raise BrewFailure(f"Unexpected tap object: {key}")
-        target = safe_path(repo, key)
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        shutil.copyfile(path, target)
-    if head is not None:
-        _git(runtime, repo, "update-ref", "refs/heads/main", head)
-    work = out / "work"
-    for name, data in files.items():
-        path = safe_path(work, name)
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        atomic_write(path, data.encode())
-    _git(runtime, repo, f"--work-tree={work}", "add", "--all", cwd=work)
-    tree = _git(runtime, repo, "write-tree")
-    if head is None or _git(runtime, repo, "rev-parse", f"{head}^{{tree}}") != tree:
-        parent = ("-p", head) if head is not None else ()
-        head = _git(runtime, repo, "commit-tree", tree, *parent, "-m", "Update casks", now=now)
-        _git(runtime, repo, "update-ref", "refs/heads/main", head)
-    _git(runtime, repo, "update-server-info")
-    return head, repo
-
-
-def published_files(repo: Path) -> dict[str, Path]:
-    """The tap files that dumb HTTP clients read, objects first and then the entries in order."""
-    result = {
-        key: path
-        for path in sorted(repo.rglob("*"))
-        if path.is_file() and _OBJECT.fullmatch(key := path.relative_to(repo).as_posix())
-    }
-    for key in ENTRIES:
-        path = safe_path(repo, key)
-        if not path.is_file():
-            raise BrewFailure(f"Tap lacks {key}")
-        result[key] = path
-    return result
-
-
-def _ref(path: Path, key: str, kind: str) -> ObjectRef:
-    digest, size = sha256_file(path)
-    if kind == "entry":
-        content_type = "text/plain; charset=utf-8"
-    else:
-        content_type = "application/zip" if key.endswith(".zip") else "application/octet-stream"
-    return ObjectRef(
-        "brew", key, kind, size, digest, content_type, "no-cache" if kind == "entry" else IMMUTABLE
-    )
-
-
-def _string(value: JSONValue) -> str:
-    if not isinstance(value, str) or not value:
-        raise BrewFailure("Missing Homebrew retained metadata value")
-    return value
-
-
-def _mapping(value: JSONValue) -> dict[str, JSONValue]:
-    if not isinstance(value, dict):
-        raise BrewFailure("Missing Homebrew retained metadata mapping")
-    return value
+def files(history: Sequence[AdmittedAsset]) -> dict[str, str]:
+    """The tap files: the README and one cask per tool."""
+    tools = casks(history)
+    return {"README.md": readme(list(tools)), **{f"Casks/{n}.rb": t for n, t in tools.items()}}
 
 
 def validate_retained(retained: RetainedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
-    if retained.format != "brew" or policy.format != "brew":
-        raise BrewFailure("Expected Homebrew retained state")
-    if not retained.accepted_history:
-        if retained.metadata or retained.objects or retained.active_identities:
-            raise BrewFailure("Incomplete Homebrew retained state")
-        return
-    if retained.active_identities != tuple(
-        item.inspected.identity for item in retained.accepted_history
-    ):
-        raise BrewFailure("Incomplete retained Homebrew identities")
-    refs = {ref.key: ref for ref in retained.objects}
-    for item in retained.accepted_history:
-        verified = item.inspected.verified
-        ref = refs.get(_key(item.inspected))
-        if (
-            ref is None
-            or ref.object_class != "package"
-            or (ref.sha256, ref.size) != (verified.sha256, verified.size)
-            or item.published_sha256 != verified.sha256
-        ):
-            raise BrewFailure("Missing retained Homebrew package reference")
-    if re.fullmatch(r"[0-9a-f]{40}", _string(retained.metadata.get("head"))) is None:
-        raise BrewFailure("Invalid retained tap head")
-    for key, value in _mapping(retained.metadata.get("files")).items():
-        ref = refs.get(key)
-        if ref is None or ref.object_class != "dependency":
-            raise BrewFailure("Missing retained tap object reference")
-        if sha256_file(Path(_string(value))) != (ref.sha256, ref.size):
-            raise BrewFailure("Retained tap object is missing or corrupt")
-    if any(refs.get(f"{TAP}/{key}") is None for key in ENTRIES):
-        raise BrewFailure("Missing retained tap entry")
+    if policy.format != "brew":
+        raise mirror.MirrorFailure("Expected the Homebrew policy")
+    mirror.validate_retained(retained, "brew", TAP)
 
 
 def prepare(
@@ -391,86 +223,20 @@ def prepare(
     now: datetime,
     out: Path,
 ) -> PreparedFormat:
-    """Mirror new assets, then commit every cask to the tap. Homebrew needs no signatures."""
+    """Copy new assets, then commit every cask to the tap. Homebrew needs no signatures."""
     validate_retained(retained, policy=policy, runtime=runtime)
-    history = list(retained.accepted_history)
-    additions: list[AdmittedAsset] = []
-    for candidate in new:
-        if candidate in history:
-            continue
-        if candidate.transformation_policy != "preserve":
-            raise BrewFailure("Unexpected Homebrew transformation")
-        _check(candidate.inspected.verified)
-        item = replace(candidate, published_sha256=candidate.inspected.verified.sha256)
-        additions.append(item)
-        history.append(item)
-    stale = stale_entries(retained)
-    if not additions and not stale:
-        return PreparedFormat("brew", retained, (), retained.objects)
-    out = safe_path(out, "validation").parent
-    out.mkdir(mode=0o700, parents=True, exist_ok=True)
-    old = {ref.key: ref for ref in retained.objects}
-    refs = dict(old)
-    outputs: list[OutputObject] = []
-    for item in additions:
-        key = _key(item.inspected)
-        path = safe_path(out, key)
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        shutil.copyfile(item.inspected.verified.local_path, path)
-        refs[key] = _ref(path, key, "package")
-        outputs.append(OutputObject(refs[key], path, "create", None, len(outputs)))
-    files = _mapping(retained.metadata.get("files", {}))
-    tools = casks(history)
-    head, repo = tap(
-        {key.removeprefix(f"{TAP}/"): Path(_string(value)) for key, value in files.items()},
-        _string(retained.metadata["head"]) if retained.accepted_history else None,
-        {"README.md": readme(list(tools)), **{f"Casks/{n}.rb": text for n, text in tools.items()}},
+    return mirror.prepare(
+        new,
+        retained,
+        form="brew",
+        root=TAP,
+        files=files,
+        message="Update casks",
         runtime=runtime,
-        out=out / "tap",
         now=now,
+        out=out,
     )
-    etags = _mapping(retained.metadata.get("etags", {}))
-    objects: dict[str, JSONValue] = {}
-    for name, path in published_files(repo).items():
-        key = f"{TAP}/{name}"
-        entry = name in ENTRIES
-        ref = _ref(path, key, "entry" if entry else "dependency")
-        if not entry:
-            objects[key] = str(path)
-        refs[key] = ref
-        prior = old.get(key)
-        if prior is not None and (prior.sha256, prior.size) == (ref.sha256, ref.size):
-            if key not in stale:
-                continue
-        elif prior is not None and not entry:
-            raise BrewFailure("Immutable tap object changed")
-        etag = None if prior is None else _string(etags.get(key))
-        outputs.append(
-            OutputObject(ref, path, "create" if prior is None else "replace", etag, len(outputs))
-        )
-    result = RetainedFormat(
-        "brew",
-        tuple(history),
-        tuple(item.inspected.identity for item in history),
-        {"head": head, "files": objects},
-        tuple(refs.values()),
-    )
-    prepared = PreparedFormat("brew", result, tuple(outputs), result.objects)
-    validate_prepared(prepared, policy=policy, runtime=runtime)
-    return prepared
 
 
 def validate_prepared(prepared: PreparedFormat, *, policy: FormatPolicy, runtime: Runtime) -> None:
-    if prepared.format != "brew" or prepared.referenced_objects != prepared.retained.objects:
-        raise BrewFailure("Prepared Homebrew references differ from retained state")
-    validate_retained(prepared.retained, policy=policy, runtime=runtime)
-    entry_seen = False
-    for output in prepared.outputs:
-        if output.ref not in prepared.referenced_objects:
-            raise BrewFailure("Unreferenced prepared Homebrew output")
-        if sha256_file(output.local_path) != (output.ref.sha256, output.ref.size):
-            raise BrewFailure("Prepared Homebrew output changed")
-        if output.ref.object_class == "entry":
-            entry_seen = True
-        elif entry_seen or output.mode != "create":
-            raise BrewFailure("Homebrew files and tap objects must be new and precede tap entries")
+    mirror.validate_prepared(prepared, "brew", TAP)

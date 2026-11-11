@@ -16,7 +16,7 @@ from typing import ClassVar, cast
 from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
-FORMATS = frozenset({"apt", "rpm", "arch", "apk", "flatpak", "brew"})
+FORMATS = frozenset({"apt", "rpm", "arch", "apk", "flatpak", "brew", "scoop"})
 OBJECT_CLASSES = frozenset({"package", "dependency", "entry", "inventory", "lock", "page"})
 type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 type Report = Callable[[str], None]

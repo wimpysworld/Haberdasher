@@ -90,6 +90,10 @@ def _adapter(name: str) -> Adapter:
             from haberdasher.formats import brew
 
             return brew
+        case "scoop":
+            from haberdasher.formats import scoop
+
+            return scoop
         case _:
             raise ValueError("Unknown publication format")
 
@@ -133,8 +137,8 @@ def new_assets(
     return result
 
 
-# Homebrew trusts HTTPS and the cask sha256, so its bucket holds no public signing keys.
-UNSIGNED = frozenset({"brew"})
+# Homebrew and Scoop trust HTTPS and the manifest hash, so their buckets hold no public keys.
+UNSIGNED = frozenset({"brew", "scoop"})
 
 
 def prepare_bootstrap(
@@ -198,9 +202,13 @@ def _write(store: Store, output: OutputObject) -> None:
 
 
 def _listing(name: str, refs: Sequence[ObjectRef]) -> list[str]:
-    """Name each object and its size in key order, with Flatpak and tap objects as one line."""
+    """Name each object and its size in key order, with Flatpak and Git objects as one line."""
     lines: dict[str, str] = {}
-    folded = {"flatpak": "objects/", "brew": "tap.git/objects/"}.get(name)
+    folded = {
+        "flatpak": "objects/",
+        "brew": "tap.git/objects/",
+        "scoop": "wimpysworld/haberdasher.git/objects/",
+    }.get(name)
     objects = [ref for ref in refs if folded and ref.key.startswith(folded)]
     for ref in refs:
         if ref not in objects:
