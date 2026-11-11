@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import hashlib
@@ -40,6 +41,9 @@ MAX_OBJECT_SIZE = 5368709120
 UPLOAD_TRANSFERS = 16
 WRITE_ATTEMPTS = 3
 WRITE_RETRY_SECONDS = 5
+PRIVATE_KEY_HEADER = re.compile(rb"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY")
+OPENPGP_SUFFIXES = (".asc", ".gpg", ".pgp", ".sig")
+OPENPGP_SECRET_TAGS = frozenset({5, 7})
 
 
 class StorageError(RuntimeError):
@@ -188,6 +192,73 @@ def _snapshot(ref: ObjectRef, source: Path, destination: Path) -> None:
         outgoing.flush()
         os.fsync(outgoing.fileno())
     _verify(ref, destination)
+
+
+def _openpgp_tags(data: bytes) -> Generator[int]:
+    """Yield the packet tags of binary OpenPGP data, and stop at the first malformed header."""
+    position = 0
+    while position < len(data):
+        header = data[position]
+        if not header & 0x80:
+            return
+        position += 1
+        if header & 0x40:
+            yield header & 0x3F
+            while position < len(data):
+                first = data[position]
+                if first < 192:
+                    length, position = first, position + 1
+                elif first < 224 and position + 1 < len(data):
+                    length = ((first - 192) << 8) + data[position + 1] + 192
+                    position += 2
+                elif first == 255 and position + 4 < len(data):
+                    length = int.from_bytes(data[position + 1 : position + 5])
+                    position += 5
+                elif 224 <= first < 255:
+                    position += 1 + (1 << (first & 0x1F))
+                    continue
+                else:
+                    return
+                position += length
+                break
+        else:
+            yield (header >> 2) & 0x0F
+            width = (1, 2, 4, 0)[header & 0x03]
+            if not width:
+                return
+            length = int.from_bytes(data[position : position + width])
+            position += width + length
+
+
+def _dearmour(data: bytes) -> Generator[bytes]:
+    """Yield the decoded body of each ASCII-armoured OpenPGP block."""
+    for block in re.finditer(rb"-----BEGIN PGP [^\r\n]*-----\r?\n(.*?)-----END PGP ", data, re.S):
+        # Base64 holds no colon, and only the checksum line starts with "=".
+        lines = [
+            line.strip()
+            for line in block[1].splitlines()
+            if b":" not in line and not line.startswith(b"=")
+        ]
+        with contextlib.suppress(ValueError):
+            yield base64.b64decode(b"".join(lines), validate=True)
+
+
+def _guard(ref: ObjectRef, path: Path) -> None:
+    """Reject an upload that holds a private key header or an OpenPGP secret-key packet."""
+    refused = StorageError(
+        f"Refuse to upload {ref.bucket_role} object {ref.key}: it holds private key material"
+    )
+    overlap = b""
+    with path.open("rb") as stream:
+        while block := stream.read(1024 * 1024):
+            if PRIVATE_KEY_HEADER.search(overlap + block):
+                raise refused
+            overlap = block[-64:]
+    if ref.key.startswith("keys/") or ref.key.endswith(OPENPGP_SUFFIXES):
+        data = path.read_bytes()
+        for packets in (data, *_dearmour(data)):
+            if OPENPGP_SECRET_TAGS & set(_openpgp_tags(packets)):
+                raise refused
 
 
 def _install(source: Path, destination: Path) -> None:
@@ -354,6 +425,7 @@ class LocalStore:
             try:
                 with _temporary(path.parent) as temporary:
                     _snapshot(ref, source, temporary)
+                    _guard(ref, temporary)
                     started = True
                     _install(temporary, path)
                     _verify(ref, path)
@@ -608,6 +680,7 @@ class R2Store:
                 target = safe_path(staging, ref.key)
                 _mkdir(target.parent)
                 _snapshot(ref, output.local_path, target)
+                _guard(ref, target)
                 with target.open("rb") as stream:
                     expected[ref.key] = ref.size, hashlib.file_digest(stream, "md5").hexdigest()
                 groups.setdefault((ref.content_type, ref.cache_control), []).append(ref)
@@ -749,6 +822,7 @@ class R2Store:
         try:
             with _temporary(self._runtime.root / "tmp") as temporary:
                 _snapshot(ref, source, temporary)
+                _guard(ref, temporary)
                 with temporary.open("rb") as stream:
                     md5 = hashlib.file_digest(stream, "md5").hexdigest()
                 command = self._aws("put-object", parameters, "--body", str(temporary))

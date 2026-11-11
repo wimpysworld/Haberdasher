@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import multiprocessing
@@ -974,3 +975,61 @@ def test_rclone_stats_collapse_a_stall_and_resume() -> None:
         "upload resumed",
         recorded[3],
     ]
+
+
+def _packet(tag: int, body: bytes) -> bytes:
+    return bytes([0xC0 | tag, len(body)]) + body
+
+
+PUBLIC_KEY = (
+    bytes([0x99, 0, 4]) + b"\x04key" + _packet(13, b"Haberdasher") + _packet(2, b"signature")
+)
+ARMOURED_PUBLIC = (
+    b"-----BEGIN PGP PUBLIC KEY BLOCK-----\nComment: fixture\n\n"
+    + base64.b64encode(PUBLIC_KEY)
+    + b"\n=abcd\n-----END PGP PUBLIC KEY BLOCK-----\n"
+)
+PACKAGE_SIZED = bytes(1024 * 1024 - 12)
+
+
+@pytest.mark.parametrize(
+    "key,data",
+    [
+        ("pool/tool.deb", PACKAGE_SIZED + b"-----BEGIN OPENSSH PRIVATE KEY-----" + bytes(64)),
+        ("keys/haberdasher.asc", b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nxcA=\n"),
+        ("keys/haberdasher.gpg", bytes([0x95, 0, 3]) + b"key"),
+        ("keys/haberdasher.gpg", PUBLIC_KEY + _packet(7, b"secret subkey")),
+        (
+            "Release.gpg",
+            ARMOURED_PUBLIC.replace(
+                base64.b64encode(PUBLIC_KEY), base64.b64encode(_packet(5, b"k"))
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize("mode", ["local", "create", "upload"])
+def test_upload_rejects_private_key_material(
+    tmp_path: Path, command_runtime: CommandRuntime, mode: str, key: str, data: bytes
+) -> None:
+    ref = object_ref(data, key=key)
+    source = source_file(tmp_path, data)
+    store = (
+        LocalStore(local_policy(tmp_path / "store"))
+        if mode == "local"
+        else R2Store(remote_policy(), runtime=command_runtime)
+    )
+    message = f"^Refuse to upload apt object {key}: it holds private key material$"
+    with pytest.raises(StorageError, match=message):
+        if mode == "upload":
+            store.upload([OutputObject(ref, source, "create", None, 0)])
+        else:
+            store.create(ref, source)
+    assert not command_runtime.calls
+    assert store.stat(ref) is None
+
+
+@pytest.mark.parametrize("data", [PUBLIC_KEY, ARMOURED_PUBLIC])
+def test_upload_accepts_a_public_key(tmp_path: Path, data: bytes) -> None:
+    store = LocalStore(local_policy(tmp_path / "store"))
+    ref = object_ref(data, key="keys/haberdasher.gpg")
+    assert store.create(ref, source_file(tmp_path, data)).sha256 == ref.sha256

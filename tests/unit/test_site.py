@@ -114,8 +114,10 @@ def test_tree_nests_directories_and_folds_flatpak_objects() -> None:
         ref("flatpak", "keys/haberdasher.asc", 3000),
         ref("flatpak", "keys/haberdasher.gpg", 2000),
         ref("flatpak", "keys/haberdasher.rsa.pub", 800),
+        ref("flatpak", "haberdasher.json", 1500),
+        ref("flatpak", "index.html", 4000),
     )
-    tree = site.tree("flatpak", site.files(objects, 1500))
+    tree = site.tree("flatpak", site.files(objects))
     assert tree.startswith('<ul class="tree">')
     assert (
         '<span class="name">objects/<span class="meta">2 OSTree objects, content-addressed'
@@ -125,9 +127,10 @@ def test_tree_nests_directories_and_folds_flatpak_objects() -> None:
     assert '<span class="name">refs/<span class="meta">1 file</span></span>' in tree
     assert 'href="refs/heads/app/world.wimpys.tool/x86_64/stable"' in tree
     assert '<a href="summary">' in tree and '<span class="size">900 B</span>' in tree
-    assert '<span class="name">haberdasher.<wbr>json</span><span class="size">2 KB</span>' in tree
+    assert state.INVENTORY_KEY not in site.files(objects) and site.PAGE_KEY not in tree
+    assert "haberdasher.<wbr>json" not in tree
     assert '<li class="aux"><a href="keys/haberdasher.asc">' in tree
-    apt_tree = site.tree("apt", site.files((ref("apt", "objects/a", 1),), 1))
+    apt_tree = site.tree("apt", site.files((ref("apt", "objects/a", 1),)))
     assert "<details><summary>" in apt_tree and 'objects/<span class="meta">1 file' in apt_tree
     assert "content-addressed" not in apt_tree
 
@@ -172,21 +175,38 @@ def test_several_projects_render_tabs_with_the_first_selected() -> None:
     assert 'name="pm-alpha"' in page and 'name="pm-zed"' in page
 
 
-def test_hero_card_counts_the_repository_and_installs_the_first_project() -> None:
+def test_hero_card_counts_the_published_package_files() -> None:
     history = (
         *apt("Zed text", package="zed", repository="someone/zed"),
         asset("apt", "alpha", "all", "1", {"record": "Package: alpha\n"}, repository="o/alpha"),
     )
-    objects = (ref("apt", "pool/a.deb", 2_000), ref("apt", "dists/Release", 500))
+    objects = (
+        ref("apt", "pool/a.deb", 2_000),
+        ref("apt", "dists/Release", 500),
+        ref("apt", "haberdasher.json", 9_000),
+        ref("apt", "index.html", 9_000),
+    )
     page = render("apt", published("apt", history, objects))
     card = page[page.index('<aside class="hero-card"') : page.index("</aside>")]
     assert "<dt>Projects</dt><dd>2</dd>" in card
     assert "<dt>Packages</dt><dd>2 <small>all, amd64, arm64</small></dd>" in card
-    assert "<dt>Files</dt><dd>3 <small>4 KB</small></dd>" in card
+    assert "<dt>Files</dt><dd>2 <small>2 KB</small></dd>" in card
     assert '<time datetime="2026-11-09">9 November</time> <small>2026</small>' in card
-    assert "After setup, install Alpha with" in card and '<a href="#alpha">' in card
-    assert commands(card) == ["sudo apt-get install alpha"]
-    assert "<strong>3 files</strong> in this repository" in page
+    assert card.endswith("</dl>") and "<a " not in card and commands(card) == []
+    assert "<strong>2 files</strong> in this repository" in page
+    assert "<strong>2 KB</strong> total" in page
+    assert "haberdasher.json" not in page and 'href="index.html"' not in page
+
+
+def test_every_hero_links_the_maintainer() -> None:
+    for name in site.THEMES:
+        page = render(name, published(name, ()))
+        assert (
+            '<p class="lead">Packages for projects managed and maintained by '
+            '<a href="https://github.com/flexiondotorg">Martin Wimpress</a>.</p>'
+        ) in page
+        assert 'content="Wimpy&#x27;s World' in page and "maintained by Martin Wimpress." in page
+        assert "nofficial" not in page and "affiliated" not in page
 
 
 def test_pages_show_the_shared_client_configuration() -> None:
@@ -277,7 +297,7 @@ def test_no_project_is_hard_coded() -> None:
     assert not re.search(r"tailor|sidra", source, re.I)
     page = render("apt", published("apt", ()))
     assert "<p>This repository has no packages yet.</p>" in page
-    assert "<dt>Projects</dt><dd>0</dd>" in page and "After setup" not in page
+    assert "<dt>Projects</dt><dd>0</dd>" in page
 
 
 def test_every_format_loads_pinned_assets_with_integrity() -> None:

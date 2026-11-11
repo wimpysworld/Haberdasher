@@ -33,6 +33,7 @@ from haberdasher.site_style import (
 PAGE_KEY = "index.html"
 MAX_PAGE_BYTES = 4 * 1024 * 1024
 OWNER = "Martin Wimpress"
+OWNER_URL = "https://github.com/flexiondotorg"
 SOURCE = "https://github.com/wimpysworld/Haberdasher"
 APT_KEYRING = "/etc/apt/keyrings/haberdasher.gpg"
 _HASH = re.compile(rb'<meta name="haberdasher-content" content="([0-9a-f]{64})">')
@@ -451,11 +452,9 @@ def _breakable(name: str) -> str:
     return re.sub(r"([._-])(?=.)", r"\1<wbr>", _e(name)) if len(name) > 14 else _e(name)
 
 
-def files(objects: Sequence[ObjectRef], inventory_size: int) -> dict[str, int]:
-    """The size of every published file, with the inventory."""
-    result = {ref.key: ref.size for ref in objects}
-    result[state.INVENTORY_KEY] = inventory_size
-    return result
+def files(objects: Sequence[ObjectRef]) -> dict[str, int]:
+    """The size of every published package repository file, without the inventory or page."""
+    return {ref.key: ref.size for ref in objects if ref.key not in (state.INVENTORY_KEY, PAGE_KEY)}
 
 
 def _tree(sizes: Mapping[str, int], prefix: str, fold: bool) -> str:
@@ -598,9 +597,7 @@ def _tab(project: Project, *, selected: bool) -> str:
     )
 
 
-def _hero_card(
-    name: str, entries: Sequence[Project], sizes: Mapping[str, int], now: datetime | None
-) -> str:
+def _hero_card(entries: Sequence[Project], sizes: Mapping[str, int], now: datetime | None) -> str:
     architectures = sorted({a for p in entries for _, _, items in p.packages for a in items})
     packages = sum(len(project.packages) for project in entries)
     date = (
@@ -609,15 +606,6 @@ def _hero_card(
         else f'<time datetime="{now.date().isoformat()}">{now.day} {now:%B}</time> '
         f"<small>{now.year}</small>"
     )
-    install_first = ""
-    if entries:
-        title, slug = _title(entries[0])
-        command = install(name, _names(entries[0]))[0][1]
-        install_first = (
-            f'<p class="fp-label" style="margin:0 0 .35rem">After setup, install {_e(title)} '
-            f"with</p>{_code(command, label=f'Copy install command for {title}')}"
-            f'<a href="#{_e(slug)}">Set up the repository first</a>'
-        )
     return (
         '<aside class="hero-card" aria-labelledby="hero-card-h">'
         '<h2 id="hero-card-h">In this repository</h2>'
@@ -626,8 +614,7 @@ def _hero_card(
         "</dd></div>"
         f"<div><dt>Files</dt><dd>{len(sizes)} <small>{size_text(sum(sizes.values()))}</small>"
         "</dd></div>"
-        f"<div><dt>Published</dt><dd>{date}</dd></div></dl>"
-        f"{install_first}</aside>"
+        f"<div><dt>Published</dt><dd>{date}</dd></div></dl></aside>"
     )
 
 
@@ -643,7 +630,8 @@ def _document(
     theme = THEMES[name]
     url = PUBLIC[name][1]
     title = f"{TITLE} {theme.label} repository"
-    lead = f"Packages from projects that {OWNER} manages."
+    lead = f"Packages for projects managed and maintained by {OWNER}."
+    lead_html = _e(lead).replace(_e(OWNER), f'<a href="{OWNER_URL}">{_e(OWNER)}</a>')
     links = "\n".join(
         f'<link rel="stylesheet" href="{_e(_CDN + path)}" integrity="{_e(STYLES[path])}" '
         'crossorigin="anonymous">'
@@ -665,7 +653,7 @@ def _document(
     history = published.retained.accepted_history
     entries = projects(history, fallback)
     refs = {ref.key for ref in published.objects}
-    sizes = files(published.objects, len(published.data))
+    sizes = files(published.objects)
     tabs = (
         '<ul class="tablist" aria-label="Projects">'
         + "".join(_tab(project, selected=i == 0) for i, project in enumerate(entries))
@@ -716,12 +704,10 @@ def _document(
 {_mark(theme.icon, "mark")}
 <div>
 <h1><span>{_e(TITLE)}</span> <span>{_e(theme.label)} repository</span></h1>
-<p class="lead">{_e(lead)}</p>
+<p class="lead">{lead_html}</p>
 <ul class="works" aria-label="Works with"><li class="label">Works with</li>{works}</ul>
-<p class="unofficial">Unofficial repository. Not affiliated with or endorsed by \
-{_e(theme.vendors)}.</p>
 </div>
-{_hero_card(name, entries, sizes, now)}
+{_hero_card(entries, sizes, now)}
 </div></div>
 </header>
 <main id="main">

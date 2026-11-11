@@ -50,7 +50,6 @@ class Theme:
     icon: str
     mu: str
     fonts: tuple[str, ...]
-    vendors: str
     works: tuple[tuple[str | None, str], ...]
     favicon: str
     css: str
@@ -78,7 +77,6 @@ THEMES: dict[str, Theme] = {
             "@fontsource-variable/ubuntu-sans@5.3.0/index.css",
             "@fontsource-variable/ubuntu-sans-mono@5.3.0/index.css",
         ),
-        vendors="Canonical or the Debian Project",
         works=(
             ("ubuntu", "Ubuntu"),
             ("debian", "Debian"),
@@ -89,7 +87,7 @@ body{--hd-font-body:"Ubuntu Sans Variable",Ubuntu,system-ui,sans-serif;--hd-font
 --hd-h-weight:300;--hd-h1-weight:200;--hd-h2-weight:400;--hd-h3-weight:500;--hd-h4-weight:500;--hd-radius:.125rem;--hd-btn-radius:.125rem;--hd-pill:.125rem;--hd-step-radius:50%;
 --hd-bg:#fff;--hd-fg:#111;--hd-muted:#5d5d5d;--hd-surface:#f7f7f7;--hd-border:#d9d9d9;--hd-link:#0066cc;--hd-focus:#2e96ff;--hd-accent:#E95420;--hd-h2-color:#77216F;
 --hd-bar-bg:#2C001E;--hd-bar-fg:#fff;--hd-bar-hover:rgba(255,255,255,.1);--hd-bar-current-bg:#E95420;--hd-bar-current-fg:#111;
---hd-hero-bg:#2C001E;--hd-hero-fg:#fff;--hd-hero-muted:#d9ccd4;--hd-hero-mark:#fff;
+--hd-hero-bg:#2C001E;--hd-hero-fg:#fff;--hd-hero-muted:#d9ccd4;--hd-hero-mark:#fff;--hd-hero-rule:#E95420;
 --hd-code-bg:#300A24;--hd-code-fg:#fff;--hd-code-border:#300A24;--hd-code-btn-bg:transparent;--hd-code-btn-fg:#F99B78;--hd-code-btn-border:#E95420;--hd-code-btn-hover:rgba(233,84,32,.18);--hd-tag-fg:#F99B78;--hd-tag-bg:rgba(255,255,255,.08);
 --hd-btn-bg:#E95420;--hd-btn-fg:#111;--hd-btn-hover:#f29a7e;--hd-step-bg:#E95420;--hd-step-fg:#111;--hd-fp-tail:#C34113;
 --hd-tab-active-bg:#fff;--hd-tab-active-fg:#111}
@@ -119,7 +117,6 @@ h2{color:var(--hd-h2-color)}
             "@fontsource/red-hat-mono@5.3.0/latin-400.css",
             "@fontsource/red-hat-mono@5.3.0/latin-700.css",
         ),
-        vendors="Red Hat, the Fedora Project, or SUSE",
         works=(
             ("redhat", "Red Hat"),
             ("fedora", "Fedora"),
@@ -132,7 +129,7 @@ body{--hd-font-body:"Red Hat Text",system-ui,sans-serif;--hd-font-display:"Red H
 --hd-h-weight:700;--hd-radius:0;--hd-btn-radius:0;--hd-pill:0;--hd-step-radius:0;
 --hd-bg:#fff;--hd-fg:#151515;--hd-muted:#4d4d4d;--hd-surface:#f2f2f2;--hd-border:#c7c7c7;--hd-link:#0066cc;--hd-focus:#0066cc;--hd-accent:#ee0000;
 --hd-bar-bg:#151515;--hd-bar-fg:#fff;--hd-bar-hover:rgba(255,255,255,.1);--hd-bar-current-bg:transparent;--hd-bar-current-fg:#fff;--hd-bar-current-rule:3px;--hd-bar-rule:1px solid #383838;
---hd-hero-bg:#151515;--hd-hero-fg:#fff;--hd-hero-muted:#c7c7c7;--hd-hero-mark:#ee0000;
+--hd-hero-bg:#151515;--hd-hero-fg:#fff;--hd-hero-muted:#c7c7c7;--hd-hero-mark:#ee0000;--hd-hero-rule:#ee0000;
 --hd-code-bg:#151515;--hd-code-fg:#fff;--hd-code-border:#151515;--hd-code-btn-bg:#ee0000;--hd-code-btn-fg:#fff;--hd-code-btn-border:#ee0000;--hd-code-btn-hover:#a60000;--hd-tag-fg:#c7c7c7;--hd-tag-bg:#383838;
 --hd-btn-bg:#ee0000;--hd-btn-fg:#fff;--hd-btn-hover:#a60000;--hd-step-bg:#ee0000;--hd-step-fg:#fff;--hd-fp-tail:#a60000;
 --hd-tab-active-bg:transparent;--hd-tab-active-fg:#151515}
@@ -158,7 +155,6 @@ body{--hd-font-body:"Red Hat Text",system-ui,sans-serif;--hd-font-display:"Red H
             "@fontsource/dejavu-mono@5.3.0/latin-400.css",
             "@fontsource/dejavu-mono@5.3.0/latin-700.css",
         ),
-        vendors="Arch Linux",
         works=(
             ("archlinux", "Arch Linux"),
             ("manjaro", "Manjaro"),
@@ -170,7 +166,7 @@ body{--hd-font-body:"Liberation Sans",Arial,Helvetica,sans-serif;--hd-font-displ
 --hd-h-weight:700;--hd-radius:.2rem;--hd-btn-radius:.2rem;--hd-pill:.2rem;--hd-step-radius:.2rem;
 --hd-bg:#F6F9FC;--hd-fg:#222;--hd-muted:#555;--hd-surface:#ECF2F5;--hd-border:#BBCCDD;--hd-link:#0077BB;--hd-focus:#0077BB;--hd-accent:#1793D1;
 --hd-bar-bg:#333;--hd-bar-fg:#CCC;--hd-bar-hover:rgba(255,255,255,.08);--hd-bar-current-bg:transparent;--hd-bar-current-fg:#fff;--hd-bar-rule:5px solid #0088CC;
---hd-hero-bg:#ECF2F5;--hd-hero-fg:#222;--hd-hero-muted:#555;--hd-hero-mark:#1793D1;
+--hd-hero-bg:#ECF2F5;--hd-hero-fg:#222;--hd-hero-muted:#555;--hd-hero-mark:#1793D1;--hd-hero-link:#005f96;
 --hd-code-bg:#DDFFDD;--hd-code-fg:#222;--hd-code-border:#BBDDBB;--hd-inline-code-bg:#FFFFDD;--hd-code-btn-bg:#0077BB;--hd-code-btn-fg:#fff;--hd-code-btn-border:#0077BB;--hd-code-btn-hover:#005f96;--hd-tag-fg:#222;--hd-tag-bg:#BBDDBB;
 --hd-btn-bg:#0077BB;--hd-btn-fg:#fff;--hd-btn-hover:#005f96;--hd-step-bg:#0077BB;--hd-step-fg:#fff;--hd-fp-tail:#005f96;--hd-panel-bg:#fff;
 --hd-tab-active-bg:#fff;--hd-tab-active-fg:#222}
@@ -192,7 +188,7 @@ h3{font-size:1.25rem}
 .foot{background:#333;color:#CCC;border-top:5px solid #0088CC}.foot a{color:#fff}
 @media (max-width:640px){.panel{padding:1rem}}
 """
-        + dark("""SEL body{--hd-bg:#050A10;--hd-fg:#EAECF0;--hd-muted:#b3bac3;--hd-surface:#0d141b;--hd-border:#384756;--hd-guide:#5a7390;--hd-link:#00B6F9;--hd-focus:#00B6F9;--hd-hero-bg:#060606;--hd-card-bg:#0d141b;--hd-hero-fg:#EAECF0;--hd-hero-muted:#b3bac3;--hd-code-bg:#181C20;--hd-code-fg:#EAECF0;--hd-code-border:#384756;--hd-inline-code-bg:#181C20;--hd-tag-fg:#EAECF0;--hd-tag-bg:#384756;--hd-panel-bg:#060606;--hd-fp-tail:#00B6F9;--hd-tab-active-bg:#060606;--hd-tab-active-fg:#EAECF0}
+        + dark("""SEL body{--hd-bg:#050A10;--hd-fg:#EAECF0;--hd-muted:#b3bac3;--hd-surface:#0d141b;--hd-border:#384756;--hd-guide:#5a7390;--hd-link:#00B6F9;--hd-focus:#00B6F9;--hd-hero-bg:#060606;--hd-card-bg:#0d141b;--hd-hero-fg:#EAECF0;--hd-hero-muted:#b3bac3;--hd-hero-link:#00B6F9;--hd-code-bg:#181C20;--hd-code-fg:#EAECF0;--hd-code-border:#384756;--hd-inline-code-bg:#181C20;--hd-tag-fg:#EAECF0;--hd-tag-bg:#384756;--hd-panel-bg:#060606;--hd-fp-tail:#00B6F9;--hd-tab-active-bg:#060606;--hd-tab-active-fg:#EAECF0}
 SEL .tree li:hover>a,SEL .tree li>details>summary:hover{background:#181C20}SEL .hero-card{background:#0d141b}"""),
     ),
     "apk": Theme(
@@ -207,7 +203,6 @@ SEL .tree li:hover>a,SEL .tree li>details>summary:hover{background:#181C20}SEL .
             "@fontsource/cousine@5.3.0/latin-700.css",
             "@fontsource/comfortaa@5.3.0/latin-700.css",
         ),
-        vendors="Alpine Linux",
         works=(
             ("alpinelinux", "Alpine Linux"),
             (None, "postmarketOS"),
@@ -218,7 +213,7 @@ body{--hd-font-body:Arimo,Arial,Helvetica,sans-serif;--hd-font-display:Comfortaa
 --hd-h-weight:700;--hd-radius:.25rem;--hd-btn-radius:.25rem;--hd-pill:999px;--hd-step-radius:50%;
 --hd-bg:#fff;--hd-fg:#111;--hd-muted:#526066;--hd-surface:#f7f7f7;--hd-border:#e7e7e7;--hd-link:#0d597f;--hd-focus:#3d92c9;--hd-accent:#0d597f;
 --hd-bar-bg:#fff;--hd-bar-fg:#0d597f;--hd-bar-hover:#eaf3f8;--hd-bar-current-bg:transparent;--hd-bar-current-fg:#111;--hd-bar-current-rule:3px;--hd-bar-rule:3px solid #0d597f;--hd-pill:.25rem;
---hd-hero-bg:#0d597f;--hd-hero-fg:#fff;--hd-hero-muted:#d6e7f0;--hd-hero-mark:#fff;
+--hd-hero-bg:#0d597f;--hd-hero-fg:#fff;--hd-hero-muted:#d6e7f0;--hd-hero-mark:#fff;--hd-hero-rule:#7fc0e3;
 --hd-code-bg:#f2f2f2;--hd-code-fg:#111;--hd-code-border:#dcdcdc;--hd-code-btn-bg:#006f3a;--hd-code-btn-fg:#fff;--hd-code-btn-border:#006f3a;--hd-code-btn-hover:#00572d;--hd-tag-fg:#526066;--hd-tag-bg:#e7e7e7;
 --hd-btn-bg:#006f3a;--hd-btn-fg:#fff;--hd-btn-hover:#00572d;--hd-step-bg:#0d597f;--hd-step-fg:#fff;--hd-fp-tail:#0d597f;
 --hd-tab-active-bg:#0d597f;--hd-tab-active-fg:#fff}
@@ -229,7 +224,6 @@ h2{font-size:1.6rem}
 .steps>li::before{border-radius:0;clip-path:polygon(20% 0,80% 0,100% 50%,80% 100%,20% 100%,0 50%);width:2.4rem}
 .fold>summary,.fold[open]>summary{font-family:var(--hd-font-body)}
 .hero-card{border:0}
-.hero-card .copy{background:#006f3a;color:#fff}
 .pkg div,.fp,.fold,.tree-wrap,.code{border-radius:0}
 .copy{border-radius:.25rem}
 .tablist{border-bottom:0;gap:.6rem}
@@ -251,7 +245,6 @@ SEL .code{border-left-color:#7fc0e3}"""),
             "@fontsource/jetbrains-mono@5.3.0/latin-400.css",
             "@fontsource/jetbrains-mono@5.3.0/latin-700.css",
         ),
-        vendors="the Flatpak project or Flathub",
         works=(
             ("flatpak", "Flatpak"),
             ("flathub", "Flathub"),
@@ -274,7 +267,7 @@ body{--hd-font-body:"Inter Variable",Inter,system-ui,sans-serif;--hd-font-displa
 .tree-wrap .tree{background:var(--hd-bg)}
 .tree-sum{background:var(--hd-surface)}
 @media (max-width:640px){.panel .lead-install,.panel .pkg div,.panel .fp{background:var(--hd-surface);border:1px solid var(--hd-border)}.lead-install{padding:1rem 1rem .1rem}}
-.masthead .lead{font-weight:500}
+.masthead .lead{font-weight:500}.masthead .lead a{font-weight:700}
 .pkg div{border-radius:.75rem}
 .tablist{border-bottom:0;gap:.6rem}
 .tablist a{border-radius:999px;background:var(--hd-surface);margin-bottom:0}
@@ -331,15 +324,12 @@ code{font-family:var(--hd-font-mono);font-size:.92em;padding:.1em .2em;margin-ri
 .masthead{position:relative;overflow:hidden;background:var(--hd-hero-bg);color:var(--hd-hero-fg);padding-block:clamp(2.25rem,6vw,4.5rem) clamp(2rem,5vw,3.5rem)}
 .masthead ul,.masthead p,.masthead dl{color:inherit}
 .masthead .wrap{position:relative;display:grid;grid-template-columns:auto minmax(0,1fr) minmax(17rem,22rem);gap:1.5rem 2.25rem;align-items:start}
-.hero-card{background:var(--hd-card-bg,var(--hd-bg));color:var(--hd-fg);border:1px solid var(--hd-border);border-radius:var(--hd-radius);padding:1.1rem 1.25rem;align-self:center;position:relative}
-.hero-card h2{font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--hd-muted);margin:0 0 .6rem;font-weight:600;font-family:var(--hd-font-body)}
-.hero-card dl{display:grid;grid-template-columns:1fr 1fr;gap:.6rem 1rem;margin:0 0 1rem;color:inherit}
-.hero-card dt{font-size:.75rem;color:var(--hd-muted);margin:0}
-.hero-card dd{margin:0;font-weight:700;font-size:1.05rem;font-variant-numeric:tabular-nums}
+.hero-card{background:var(--hd-card-bg,var(--hd-bg));color:var(--hd-fg);border:1px solid var(--hd-border);border-radius:var(--hd-radius);padding:1.25rem 1.5rem 1.35rem;align-self:center;position:relative}
+.hero-card h2{font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--hd-muted);margin:0 0 1rem;font-weight:600;font-family:var(--hd-font-body)}
+.hero-card dl{display:grid;grid-template-columns:auto auto;justify-content:space-between;gap:1rem 1.5rem;margin:0;color:inherit}
+.hero-card dt{font-size:.75rem;color:var(--hd-muted);margin:0 0 .15rem}
+.hero-card dd{margin:0;font-weight:700;font-size:1.3rem;line-height:1.25;font-variant-numeric:tabular-nums}
 .hero-card dd small{font-weight:400;font-size:.8rem;color:var(--hd-muted)}
-.hero-card .code{margin:0}
-.hero-card .code pre{font-size:.82rem}
-.hero-card>a{display:inline-block;margin-top:.75rem;font-size:.85rem}
 .masthead .mark{width:clamp(4rem,9vw,6.5rem);height:clamp(4rem,9vw,6.5rem);fill:var(--hd-hero-mark);flex:none;margin-top:.25rem}
 .masthead h1{color:inherit;font-size:clamp(2rem,5.2vw,3.5rem);line-height:1.05;margin:0 0 .75rem;font-weight:var(--hd-h1-weight,var(--hd-h-weight));text-wrap:pretty}
 .masthead h1 span{display:block}
@@ -349,7 +339,9 @@ code{font-family:var(--hd-font-mono);font-size:.92em;padding:.1em .2em;margin-ri
 .works .label{color:var(--hd-hero-muted)}
 .works i{display:inline-block;width:1.15rem;height:1.15rem;background:currentColor;-webkit-mask:var(--m) center/contain no-repeat;mask:var(--m) center/contain no-repeat}
 .works .txt{font-weight:600;font-size:.82em;border:1px solid currentColor;border-radius:.2rem;padding:.05rem .4rem;opacity:.9}
-.unofficial{margin:1.25rem 0 0;font-size:.875rem;color:var(--hd-hero-muted)}
+.masthead .lead a{color:var(--hd-hero-link,inherit);font-weight:600;text-decoration:underline;text-decoration-color:var(--hd-hero-rule,currentColor);text-decoration-thickness:2px;text-underline-offset:.2em;white-space:nowrap}
+.masthead .lead a:hover{text-decoration-color:currentColor;text-decoration-thickness:3px}
+.masthead .lead a:focus-visible{outline-color:currentColor;border-radius:.1rem}
 
 /* Sections */
 main{flex:1}
@@ -475,7 +467,7 @@ html.no-js .tablist{border:0;gap:1rem;margin-bottom:1rem}html.no-js .tablist::be
 .foot p{margin:0;color:inherit}
 .foot a{color:inherit;font-weight:600}
 
-@media (max-width:900px){.masthead .wrap{grid-template-columns:auto minmax(0,1fr)}.hero-card{grid-column:1/-1}.project{grid-template-columns:1fr}.fp{grid-template-columns:1fr}.fp .copy{justify-self:start}}
+@media (max-width:900px){.masthead .wrap{grid-template-columns:auto minmax(0,1fr)}.hero-card{grid-column:1/-1}.hero-card dl{grid-template-columns:repeat(4,auto);justify-content:space-between}.project{grid-template-columns:1fr}.fp{grid-template-columns:1fr}.fp .copy{justify-self:start}}
 @media (max-width:640px){
 .brand span{display:none}
 .bar .wrap{gap:.5rem}

@@ -117,6 +117,7 @@ Treat the five package buckets as public:
 - Permit one public, non-secret `haberdasher.json` package inventory per bucket for package identity, source, published digests, referenced objects, and the publication state that the adapters need.
   Enforce the explicit public inventory allow-list. Never include secrets or local paths.
 - Permit a temporary `haberdasher.lock` per bucket that holds only a run identifier, the publisher host or CI run URL, and the start time.
+- Reject any object that holds a private key header or an OpenPGP secret-key packet before it is uploaded.
 - Permit one public `index.html` per bucket, generated from the published inventory and package metadata.
   It holds the setup steps, one install section per project, and a fold-down tree of the published files.
   Theme it with µCSS and each distribution's colours, fonts, and logos, loaded from pinned jsDelivr URLs with SRI hashes.

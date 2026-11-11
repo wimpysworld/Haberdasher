@@ -527,7 +527,8 @@ def check_page(bucket: Path, name: str, fingerprint: str) -> str:
             f'href="https://cdn.jsdelivr.net/npm/{path}" integrity="{site.STYLES[path]}" '
             'crossorigin="anonymous"'
         ) in page
-    assert fingerprint in page and f'href="{state.INVENTORY_KEY}"' in page
+    assert fingerprint in page and state.INVENTORY_KEY not in page
+    assert f'href="{site.PAGE_KEY}"' not in page and "nofficial" not in page
     if name == "flatpak":
         assert '<p class="desc">Local data only test</p>' in page
         assert 'objects/<span class="meta">' in page and "content-addressed" in page
