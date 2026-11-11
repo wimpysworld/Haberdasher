@@ -40,6 +40,7 @@ The first command builds the current system's checks. The second evaluates all d
 | Storage clients | `tests/native/test_storage_clients.py` | Native transport against local protocol fixtures, not real R2 permissions |
 | Native adapters | `tests/native/test_{apt,rpm,arch,apk,flatpak}.py` | Retained state, install/update, rejection cases, signed upstream packages, local HTTP acquisition |
 | Served trust | `tests/native/test_pipeline.py` | Fetched public keys, full independent fixture fingerprint, fresh and existing strict clients |
+| Repository pages | `tests/unit/test_site.py`, `test_publish.py`, `tests/native/test_pipeline.py` | Escaping, the file tree with the Flatpak `objects/` line, install sections, the content hash, the plan line, an `index.html` with pinned theme assets in each bucket, and no page write on an unchanged rerun |
 
 The pipeline runs the real CLI with recorded GitHub responses, real native adapters, durable local storage, and loopback HTTP clients. It checks unchanged runs, which write only their locks, and assets added to the latest release. For each format, interruptions before the first entry write and after each entry write, and interruptions during bootstrap key writes, each converge with a full rerun to signed metadata that native clients install with signature checks on. A further rerun writes only its locks.
 
@@ -71,6 +72,8 @@ To do:
 - [ ] Hosted execution: set the CI secrets, `HD_PUBLISH_ENABLED`, and the `publisher` environment protection, then test hosted permissions.
 - [ ] Public delivery: test HTTPS, content types, cache headers, delayed clients, and split entry/signature reads on the live domains.
 - [ ] Distribution clients: test official images for each format, including `arm64` APT and `aarch64` packages, separately from the pinned Nix clients.
+- [ ] Repository pages: test the page commands on official images. The `zypper` steps are untested, because nixpkgs has no `zypper`. The Arch `pacman-key --add` and `--lsign-key` steps and the RPM `rpm -e gpg-pubkey-87db88e0` step were checked only in disposable directories.
+- [ ] Repository pages: after the first page publication, check that `/` serves `index.html` with `text/html` and `max-age=300` on each domain.
 
 Done:
 
@@ -88,3 +91,4 @@ Done:
 - [x] Signed upstream RPM, Arch, APK, and Flatpak inputs that Haberdasher publishes with its own signature.
 - [x] Flatpak runs that download only the working set.
 - [x] Publish workflow gates and step inputs, with a synthetic `nix`.
+- [x] Repository pages rendered in headless Chromium from the live inventories, at 390 and 1280 pixels wide, in light and dark mode: SRI loads without errors, no horizontal page scroll, WCAG AA contrast on measured text, keyboard focus on links and copy buttons, and commands without JavaScript.

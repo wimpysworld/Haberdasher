@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from haberdasher import site
 from haberdasher.core import PreparedFormat, SourceAsset, VerifiedAsset, sha256_file
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
@@ -170,19 +171,11 @@ install_weak_deps=0
 optional_metadata_types=filelists
 keepcache=1
 plugins=0
-[proof]
-name=Disposable RPM adapter fixture
-baseurl={url}
-enabled=1
-gpgcheck=1
-repo_gpgcheck=1
-gpgkey=file:///public.asc
-skip_if_unavailable=0
-metadata_expire=0
+{site.rpm_repo(url, "file:///public.asc")}metadata_expire=0
 """)
         # Librepo 1.20 needs preseeded scoped public trust for its missing-key retry.
         ring = self.client.path(
-            f"cache/proof-{hashlib.sha256(url.encode()).hexdigest()[:16]}/pubring"
+            f"cache/haberdasher-{hashlib.sha256(url.encode()).hexdigest()[:16]}/pubring"
         )
         ring.mkdir(parents=True, mode=0o700)
         shutil.copyfile(keyring, ring / "pubring.gpg")
@@ -238,7 +231,7 @@ metadata_expire=0
             "1",
             "--no-plugins",
             "--repo",
-            "proof",
+            "haberdasher",
             "--assumeyes",
             "--refresh",
         ]

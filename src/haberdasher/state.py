@@ -138,7 +138,8 @@ def parse(data: bytes) -> dict[str, JSONValue]:
         raise ValueError("Invalid inventory JSON") from error
 
 
-def _write(store: Store, ref: ObjectRef, data: bytes, expected: str | None) -> WriteReceipt:
+def write_object(store: Store, ref: ObjectRef, data: bytes, expected: str | None) -> WriteReceipt:
+    """Create an absent object, or replace it on the expected ETag."""
     with tempfile.TemporaryDirectory(prefix="hd-state-") as temporary:
         path = Path(temporary) / "object"
         atomic_write(path, data)
@@ -193,7 +194,7 @@ def acquire(store: Store, locations: Mapping[str, str], *, now: datetime) -> Loc
     try:
         for name in sorted(locations):
             try:
-                receipt = _write(store, _ref(name, LOCK_KEY, "lock", data), data, None)
+                receipt = write_object(store, _ref(name, LOCK_KEY, "lock", data), data, None)
             except PreconditionFailed:
                 current = store.read(name, LOCK_KEY, max_bytes=MAX_LOCK_BYTES)
                 shown = _shown(current[0]) if current else "(released during the check)"
@@ -274,7 +275,13 @@ def _paths(
     result = dict(metadata)
     if not result:
         return result
-    for field in {"apt": ("files",), "arch": ("paths",), "flatpak": ("files",)}.get(name, ()):
+    for field in {
+        "apt": ("files",),
+        "arch": ("paths",),
+        "flatpak": ("files",),
+        "brew": ("files",),
+        "scoop": ("files",),
+    }.get(name, ()):
         result[field] = {
             key: move(text(value, "metadata path"), key)
             for key, value in mapping(result.get(field)).items()
@@ -461,4 +468,4 @@ def write_inventory(store: Store, published: Published, data: bytes) -> WriteRec
     if len(data) > MAX_INVENTORY_BYTES:
         raise StateError("Public inventory exceeds its size limit")
     ref = _ref(published.format, INVENTORY_KEY, "inventory", data)
-    return _write(store, ref, data, published.etag)
+    return write_object(store, ref, data, published.etag)

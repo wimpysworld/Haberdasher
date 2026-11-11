@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from haberdasher import cli, core, discovery, publish, state
+from haberdasher import cli, core, discovery, publish, site, state
 from haberdasher.admission import AdmissionFailure
 from haberdasher.config import Config, FormatPolicy, Policy, StoragePolicy
 from haberdasher.core import (
@@ -331,7 +331,7 @@ def test_unchanged_rerun_writes_only_its_locks(
     fixture = Fixture(tmp_path, monkeypatch, ("arch",))
     fixture.releases.add("tool", "1")
     first = fixture.run()
-    assert first.changed and first.published_objects == 5
+    assert first.changed and first.published_objects == 7
     assert fixture.store.writes == [
         "arch/haberdasher.lock",
         "arch/keys/haberdasher.asc",
@@ -339,6 +339,8 @@ def test_unchanged_rerun_writes_only_its_locks(
         "arch/x86_64/tool-1.pkg",
         "arch/x86_64/db",
         "arch/haberdasher.json",
+        "arch/og.png",
+        "arch/index.html",
     ]
     assert fixture.store.deletes == ["arch/haberdasher.lock"] and not fixture.locks()
     assert_published(fixture)
@@ -360,12 +362,13 @@ def test_asset_added_to_the_latest_release_publishes_only_the_change(
     package = fixture.path("arch", "x86_64/tool-1.pkg").read_bytes()
     fixture.releases.add("helper", "1")
     result = fixture.run()
-    assert result.changed and result.published_objects == 3
+    assert result.changed and result.published_objects == 4
     assert fixture.store.writes == [
         "arch/haberdasher.lock",
         "arch/x86_64/helper-1.pkg",
         "arch/x86_64/db",
         "arch/haberdasher.json",
+        "arch/index.html",
     ]
     assert fixture.adapter.inspections == 2
     assert "arch/x86_64/tool-1.pkg" not in fixture.store.downloads
@@ -392,6 +395,7 @@ def test_new_latest_release_adds_packages_and_keeps_the_published_version(
         "arch/x86_64/tool-2.pkg",
         "arch/x86_64/db",
         "arch/haberdasher.json",
+        "arch/index.html",
     ]
     assert fixture.store.deletes == ["arch/haberdasher.lock"]
     assert fixture.path("arch", "x86_64/tool-1.pkg").read_bytes() == package
@@ -442,7 +446,11 @@ def test_entry_interruption_converges_with_a_full_rerun(
     assert not fixture.locks()
     result = fixture.run()
     assert (result.changed, result.packages) == (True, 1)
-    assert fixture.store.writes[-2:] == ["arch/x86_64/db", "arch/haberdasher.json"]
+    assert fixture.store.writes[-3:] == [
+        "arch/x86_64/db",
+        "arch/haberdasher.json",
+        "arch/index.html",
+    ]
     assert "arch/x86_64/tool-1.pkg" not in fixture.store.downloads
     assert fixture.path("arch", "x86_64/db").read_text() == "tool-1\ntool-2\n"
     assert_published(fixture)
@@ -550,8 +558,10 @@ def test_unlock_deletes_existing_locks_only_on_request(
         "apk   no lock",
         "apt   no lock",
         f"arch  removed lock from {host} started {NOW.isoformat()}",
+        "brew  no lock",
         "flatpak no lock",
         "rpm   no lock",
+        "scoop no lock",
         "Removed 1 lock.",
     ]
     assert not any((root / "public" / name / state.LOCK_KEY).exists() for name in core.FORMATS)
@@ -608,7 +618,7 @@ def test_publish_reports_each_step_and_an_unchanged_rerun(
     lines: list[str] = []
     result = fixture.run(lines.append)
     assert (result.packages, result.repositories) == (1, ("arch",))
-    assert result.published_objects == 5
+    assert result.published_objects == 7
     assert lines == [
         "arch  locked",
         "arch  preparing 1 new package",
@@ -620,6 +630,8 @@ def test_publish_reports_each_step_and_an_unchanged_rerun(
         "arch  uploaded 3 objects in 3m12s",
         "arch    x86_64/db (7 B)",
         "arch  wrote haberdasher.json",
+        "arch  wrote og.png",
+        "arch  wrote index.html",
         "arch  unlocked",
     ]
     lines.clear()
@@ -679,18 +691,25 @@ def test_plan_counts_published_and_new_packages_from_the_public_inventory(
     urls = {"arch": "https://pkg.example.invalid", "apt": "https://apt.example.invalid"}
     requested: list[str] = []
 
+    page = fixture.path("arch", site.PAGE_KEY).read_bytes()
+    image = fixture.path("arch", site.IMAGE_KEY).read_bytes()
+
     def answer(request: urllib.request.Request, timeout: float) -> io.BytesIO:
         requested.append(request.full_url)
         if request.full_url.startswith("https://apt."):
             raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
-        return io.BytesIO(inventory)
+        if request.full_url.endswith(site.IMAGE_KEY):
+            return io.BytesIO(image)
+        return io.BytesIO(page if request.full_url.endswith(site.PAGE_KEY) else inventory)
 
     scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
     with patch.object(urllib.request, "urlopen", side_effect=answer):
-        cli.show_plan(scan, fixture.config, fixture.runtime, urls)
+        cli.show_plan(scan, fixture.config, fixture.runtime, urls, FINGERPRINT)
     assert requested == [
         "https://pkg.example.invalid/haberdasher.json",
         "https://apt.example.invalid/haberdasher.json",
+        "https://pkg.example.invalid/og.png",
+        "https://pkg.example.invalid/index.html",
     ]
     assert capsys.readouterr().out.splitlines() == [
         "Reading published state from pkg.example.invalid, apt.example.invalid",
@@ -721,14 +740,59 @@ def test_unsupported_asset_is_skipped_with_one_line(
     assert fixture.store.writes == ["arch/haberdasher.lock"]
     inventory = fixture.path("arch", state.INVENTORY_KEY).read_bytes()
     scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
-    with patch.object(urllib.request, "urlopen", return_value=io.BytesIO(inventory)):
+    fixture.path("arch", site.PAGE_KEY).unlink()
+    fixture.path("arch", site.IMAGE_KEY).unlink()
+
+    def answer(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        if request.full_url.endswith((site.PAGE_KEY, site.IMAGE_KEY)):
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
+        return io.BytesIO(inventory)
+
+    with patch.object(urllib.request, "urlopen", side_effect=answer):
         cli.show_plan(scan, fixture.config, fixture.runtime, {"arch": "https://pkg.example"})
     output = capsys.readouterr().out.splitlines()
     assert output[1:] == [
         skipped,
+        "arch  would write og.png",
+        "arch  would write index.html",
         "",
         "Format  Repository   Published  New",
         "arch    pkg.example          1    0",
         "",
-        "No new packages. Nothing written.",
+        "No new packages. 1 index page to write. 1 preview image to write. Nothing written. "
+        "Run `just publish` to publish them.",
     ]
+    lines.clear()
+    result = fixture.run(lines.append)
+    assert (result.changed, result.pages, result.published_objects, fixture.store.writes) == (
+        True,
+        ("arch",),
+        2,
+        ["arch/haberdasher.lock", "arch/og.png", "arch/index.html"],
+    )
+    assert lines == [
+        "arch  locked",
+        skipped,
+        "arch  unchanged",
+        "arch  wrote og.png",
+        "arch  wrote index.html",
+        "arch  unlocked",
+    ]
+
+
+def test_preview_image_is_written_only_when_missing_or_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    store = fixture.store
+    lines: list[str] = []
+    assert publish.write_image(store, "arch", report=lines.append) == 1
+    assert store.writes == ["arch/og.png"] and lines == ["arch  wrote og.png"]
+    assert fixture.path("arch", site.IMAGE_KEY).read_bytes() == site.image("arch")
+    store.writes.clear()
+    assert publish.write_image(store, "arch", report=lines.append) == 0
+    assert store.writes == [] and len(lines) == 1
+    fixture.path("arch", site.IMAGE_KEY).write_bytes(b"older image")
+    assert publish.write_image(store, "arch") == 1
+    assert store.writes == ["arch/og.png"]
+    assert fixture.path("arch", site.IMAGE_KEY).read_bytes() == site.image("arch")

@@ -1,6 +1,8 @@
 # Native client setup
 
-Each client trusts the Haberdasher public key for one repository, with native signature checks enabled.
+In each signed package repository (APT, RPM, Arch, Alpine, and Flatpak), the client trusts the Haberdasher public key for that repository, with native signature checks enabled.
+
+For the setup and install commands, use the page of each repository: [APT](https://apt.wimpys.world/), [RPM](https://rpm.wimpys.world/), [Arch Linux](https://pkg.wimpys.world/), [Alpine Linux](https://apk.wimpys.world/), [Flatpak](https://flatpak.wimpys.world/), [Homebrew](https://brew.wimpys.world/), and [Scoop](https://scoop.wimpys.world/). Each page lists its packages and published files. This guide explains the trust model and the tested client configuration. The Homebrew and Scoop repositories are not signed, so they have no key to trust. They rely on HTTPS and the `sha256` in each cask or the `hash` in each manifest.
 
 The native tests run pinned Nix clients on `x86_64-linux` against disposable roots and loopback HTTP. They do not cover official distribution images, public HTTPS, host installation, or the execution of an installed application.
 

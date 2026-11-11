@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import quote
 
-from haberdasher.config import Config
+from haberdasher.config import Config, load_yaml
 from haberdasher.core import (
     Record,
     Report,
@@ -30,6 +30,7 @@ from haberdasher.core import (
     safe_key,
     safe_path,
     sha256_file,
+    step,
     text,
 )
 from haberdasher.runtime import Runtime, transfer_timeout
@@ -43,7 +44,22 @@ MAX_CHECKSUM_BYTES = 1024 * 1024
 MAX_CHECKSUM_ENTRIES = 10_000
 MAX_BUNDLE_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 5 * 1024 * 1024 * 1024 - 1
-PACKAGE_SUFFIXES = (".deb", ".rpm", ".apk", ".pkg.tar.zst", ".pkg.tar.xz", ".flatpak")
+PACKAGE_SUFFIXES = (
+    (".deb", "apt"),
+    (".rpm", "rpm"),
+    (".pkg.tar.zst", "arch"),
+    (".pkg.tar.xz", "arch"),
+    (".apk", "apk"),
+    (".flatpak", "flatpak"),
+    (".exe", "scoop"),
+    (".zip", "brew"),
+)
+# A bare macOS binary has no file extension and names its operating system after the tool.
+MACOS_BINARY = re.compile(r"(.+?)[-_](?:darwin|macos|mac|osx)(?:[-_].*)?", re.IGNORECASE)
+# A Windows zip file names its operating system.
+WINDOWS = re.compile(r"(?:^|[-_.])(?:windows|win(?:32|64)?)(?:[-_.]|$)", re.IGNORECASE)
+# electron-builder publishes this Windows update feed for apps that update themselves.
+UPDATER = "latest.yml"
 PER_ASSET_SUFFIXES = (".sha256", ".sha256sum")
 COSIGN_BUNDLE_SUFFIX = ".sigstore.json"
 COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
@@ -51,6 +67,18 @@ COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
 
 class DiscoveryFailure(ValueError):
     pass
+
+
+def asset_format(filename: str) -> str | None:
+    """The format that a release asset name can provide, before its bytes are inspected."""
+    if filename.endswith(".zip") and WINDOWS.search(filename):
+        return "scoop"
+    for suffix, name in PACKAGE_SUFFIXES:
+        if filename.endswith(suffix):
+            return name
+    if re.search(r"\.[A-Za-z][A-Za-z0-9]*$", filename) is None and MACOS_BINARY.fullmatch(filename):
+        return "brew"
+    return None
 
 
 def _filename(value: object) -> str:
@@ -379,6 +407,27 @@ def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[tu
         yield path, tag
 
 
+def release_details(source: SourceAsset, runtime: Runtime) -> tuple[str, str, str]:
+    """The release tag of an asset, and the description and SPDX licence of its repository.
+
+    The licence is `Unknown` when GitHub does not name an SPDX licence.
+    """
+    release = _mapping(
+        _json_request(f"repos/{source.repository}/releases/{source.release_id}", runtime)
+    )
+    if integer(release.get("id"), "release ID", 1) != source.release_id:
+        raise DiscoveryFailure("Release changed during inspection")
+    repository = _mapping(_json_request(f"repos/{source.repository}", runtime))
+    description = repository.get("description")
+    licence = repository.get("license")
+    spdx = None if licence is None else _mapping(licence).get("spdx_id")
+    return (
+        text(release.get("tag_name"), "release tag"),
+        " ".join(description.split()) if isinstance(description, str) else "",
+        spdx if isinstance(spdx, str) and spdx and spdx != "NOASSERTION" else "Unknown",
+    )
+
+
 def cosign_identity(repository: str, tag: str) -> str:
     """Pin a release workflow certificate to the source repository and the release tag."""
     owner, name = repository_name(repository).split("/")
@@ -424,6 +473,29 @@ def _release_label(release: dict[str, object], release_id: int) -> str:
 
 
 _MISSING = object()
+
+
+def _installers(
+    feed: SourceAsset, checksum: ChecksumEntry | None, runtime: Runtime
+) -> set[str] | None:
+    """The installer names in an electron-builder update feed, or None without a feed checksum."""
+    expected = checksum.sha256 if checksum is not None else feed.github_sha256
+    if expected is None:
+        return None
+    try:
+        with _download(feed, runtime, MAX_CHECKSUM_BYTES) as (path, _tag):
+            if sha256_file(path)[0] != expected:
+                raise DiscoveryFailure("Downloaded asset differs from SHA256 checksum")
+            data = load_yaml(path)
+    except ValueError as error:
+        raise DiscoveryFailure(f"{feed.repository}, {feed.filename}: {error}") from error
+    files = data.get("files")
+    entries = cast(list[object], files) if isinstance(files, list) else []
+    urls = [data.get("path")]
+    urls += [
+        cast(dict[str, object], entry).get("url") for entry in entries if isinstance(entry, dict)
+    ]
+    return {url for url in urls if isinstance(url, str)}
 
 
 def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -> CompleteScan:
@@ -491,8 +563,31 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
         packages = 0
         missing = 0
         digests = 0
+        feed = siblings.get(UPDATER)
+        installers: set[str] | None = set()
+        if feed is not None and any(asset_format(name) == "scoop" for name in siblings):
+            installers = _installers(feed, checksums.get(UPDATER), runtime)
+            if installers is None:
+                step(
+                    report,
+                    "scoop",
+                    f"skipped {repository} {label}: the app updates itself ({UPDATER} "
+                    "has no checksum)",
+                )
         for source in sorted(group, key=lambda item: item.asset_id):
-            if not source.filename.endswith(PACKAGE_SUFFIXES):
+            name = asset_format(source.filename)
+            if name is None:
+                continue
+            if name == "scoop" and (installers is None or source.filename in installers):
+                if installers is not None:
+                    step(
+                        report,
+                        "scoop",
+                        f"skipped {repository} {label} {source.filename}: "
+                        f"a self-updating installer ({UPDATER})",
+                    )
+                # Keep the record, so the format stays in the run, but never download the asset.
+                records.append(DiscoveredAsset(source, None))
                 continue
             packages += 1
             checksum = checksums.get(source.filename)

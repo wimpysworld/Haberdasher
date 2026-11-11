@@ -56,7 +56,7 @@ def _mapping(loader: StrictLoader, node: Node) -> dict[str, object]:
 StrictLoader.add_constructor("tag:yaml.org,2002:map", _mapping)
 
 
-def _load(path: Path) -> dict[str, object]:
+def load_yaml(path: Path) -> dict[str, object]:
     with path.open("rb") as stream:
         data = stream.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
@@ -116,15 +116,21 @@ PUBLIC: dict[str, tuple[str, str]] = {
     "arch": ("haberdasher-pkg", "https://pkg.wimpys.world"),
     "apk": ("haberdasher-apk", "https://apk.wimpys.world"),
     "flatpak": ("haberdasher-flatpak", "https://flatpak.wimpys.world"),
+    "brew": ("haberdasher-brew", "https://brew.wimpys.world"),
+    "scoop": ("haberdasher-scoop", "https://scoop.wimpys.world"),
 }
 # Concrete architectures that each repository layout indexes. Every format also accepts its
 # architecture-independent packages: APT all, RPM noarch, Arch any, and Alpine noarch.
+# Homebrew names the two Mac architectures, and a universal binary serves both.
+# Scoop names the Windows architectures by its manifest keys.
 ARCHITECTURES: dict[str, tuple[str, ...]] = {
     "apt": ("amd64", "arm64"),
     "rpm": ("x86_64", "aarch64"),
     "arch": ("x86_64", "aarch64"),
     "apk": ("x86_64", "aarch64"),
     "flatpak": ("x86_64", "aarch64"),
+    "brew": ("arm", "intel", "universal"),
+    "scoop": ("64bit", "32bit", "arm64"),
 }
 
 
@@ -198,7 +204,7 @@ class Policy(Record):
 
 
 def load_config(path: Path) -> Config:
-    data = _load(path)
+    data = load_yaml(path)
     unknown = sorted(data.keys() - {"sources"})
     if unknown:
         raise ValueError(

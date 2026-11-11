@@ -78,6 +78,18 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
   Match the `.rsa.pub` filename to signature members and client trust files.
   Preserve the bytes of unsigned upstream APKs.
 - For Flatpak (WW-375), sign and verify both commits and summaries with GPG.
+- For Homebrew, publish macOS bare binaries and `.zip` files that hold one `.app`, mirrored into the bucket.
+  Write one cask per tool into a tap that the bucket serves as a Git repository over dumb HTTP at `tap.git`.
+  The tap name is `wimpysworld/haberdasher`. Homebrew verifies the cask `sha256`, not an OpenPGP signature.
+  Bare binaries carry no package metadata, so the cask name comes from the asset name and the version from the release tag.
+  Take each architecture from the Mach-O header, never from the file name.
+  Remove the quarantine attribute in each cask's `postflight` until the projects sign and notarise with a Developer ID.
+- For Scoop, publish Windows bare `.exe` files and `.zip` files that hold one `.exe`, mirrored into the bucket.
+  Write one JSON manifest per tool into a bucket repository served over dumb HTTP at `wimpysworld/haberdasher.git`.
+  Scoop requires a `<host>/<user>/<repo>` URL. Scoop verifies the manifest `hash`, not an OpenPGP signature.
+  Name and version each tool the same way as Homebrew. Take each architecture from the PE header, never from the file name.
+  Publish an app's portable zip, never its self-updating installer. Skip the installer that a release's `latest.yml` names, without downloading it.
+  Give a GUI executable a Start Menu shortcut and a console executable a `bin` entry, from the PE subsystem field.
 
 ## Testing
 
@@ -96,7 +108,7 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
 
 ## Security and secrets
 
-Treat the five package buckets as public:
+Treat the seven package buckets as public:
 
 | Domain | Bucket |
 | --- | --- |
@@ -105,6 +117,8 @@ Treat the five package buckets as public:
 | `apk.wimpys.world` | `haberdasher-apk` |
 | `pkg.wimpys.world` | `haberdasher-pkg` |
 | `flatpak.wimpys.world` | `haberdasher-flatpak` |
+| `brew.wimpys.world` | `haberdasher-brew` |
+| `scoop.wimpys.world` | `haberdasher-scoop` |
 
 - Use one dedicated Haberdasher RSA4096 private primary with signing and certification capabilities, without subkeys or per-format keypairs.
   Sign directly with that primary for APT, RPM, Arch, and Flatpak. Convert the same RSA private numbers to PKCS#8 PEM for Alpine.
@@ -117,6 +131,13 @@ Treat the five package buckets as public:
 - Permit one public, non-secret `haberdasher.json` package inventory per bucket for package identity, source, published digests, referenced objects, and the publication state that the adapters need.
   Enforce the explicit public inventory allow-list. Never include secrets or local paths.
 - Permit a temporary `haberdasher.lock` per bucket that holds only a run identifier, the publisher host or CI run URL, and the start time.
+- Reject any object that holds a private key header or an OpenPGP secret-key packet before it is uploaded.
+- Permit one public `index.html` per bucket, generated from the published inventory and package metadata.
+  It holds the setup steps, one install section per project, and a fold-down tree of the published files.
+  Theme it with µCSS and each distribution's colours, fonts, and logos, loaded from pinned jsDelivr URLs with SRI hashes.
+  Do not add per-project settings for the page.
+- Permit one public `og.png` preview image per bucket, which the page names in its OpenGraph and Twitter tags.
+  Generate it from the hero design of the page with the sources in `og/`, and ship it in the Python package.
 - Keep secrets and credentials out of these buckets.
 - Read publisher credentials only from the runtime environment:
   `HD_CLOUDFLARE_S3_API_ENDPOINT`, `HD_CLOUDFLARE_ACCESS_KEY_ID`, and `HD_CLOUDFLARE_SECRET_ACCESS_KEY`.

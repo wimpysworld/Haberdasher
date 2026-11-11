@@ -8,6 +8,7 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 
+from haberdasher import site
 from haberdasher.config import FormatPolicy
 from haberdasher.core import (
     JSONValue,
@@ -100,8 +101,10 @@ class Client:
         ):
             client.path(relative).mkdir(parents=True, exist_ok=True)
         client.path("root/var/lib/dpkg/status").touch()
-        client.path("config/sources.list").write_text(
-            f"deb [arch=amd64 signed-by={keyring}] {url} stable main\n"
+        client.path("config/sources.list").touch()
+        client.path("config/sources.list.d").mkdir()
+        client.path("config/sources.list.d/haberdasher.sources").write_text(
+            site.apt_sources(url, str(keyring), "amd64")
         )
         self.config = client.path("config/apt.conf")
         dpkg = shutil.which("dpkg", path=runtime.environment["PATH"])
@@ -115,7 +118,7 @@ Dir::Etc "{client.path("config")}";
 Dir::Etc::main "-";
 Dir::Etc::parts "{client.path("config/empty")}";
 Dir::Etc::sourcelist "{client.path("config/sources.list")}";
-Dir::Etc::sourceparts "{client.path("config/empty")}";
+Dir::Etc::sourceparts "{client.path("config/sources.list.d")}";
 Dir::Etc::trusted "{client.path("config/absent.gpg")}";
 Dir::Etc::trustedparts "{client.path("config/empty")}";
 Dir::State "{client.path("state")}";

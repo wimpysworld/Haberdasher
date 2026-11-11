@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from haberdasher import admission, discovery, state
+from haberdasher import admission, discovery, site, state
 from haberdasher.config import Config, FormatPolicy, Policy
 from haberdasher.core import (
     AdmittedAsset,
@@ -28,6 +28,7 @@ from haberdasher.core import (
     plural,
     quiet,
     sha256_file,
+    size_text,
     stale_entries,
     step,
     utc_now,
@@ -85,6 +86,14 @@ def _adapter(name: str) -> Adapter:
             from haberdasher.formats import flatpak
 
             return flatpak
+        case "brew":
+            from haberdasher.formats import brew
+
+            return brew
+        case "scoop":
+            from haberdasher.formats import scoop
+
+            return scoop
         case _:
             raise ValueError("Unknown publication format")
 
@@ -96,20 +105,11 @@ class RunResult:
     pending_assets: int = 0
     packages: int = 0
     repositories: tuple[str, ...] = ()
+    pages: tuple[str, ...] = ()
 
 
 def _format(filename: str) -> str | None:
-    for suffix, name in (
-        (".deb", "apt"),
-        (".rpm", "rpm"),
-        (".pkg.tar.zst", "arch"),
-        (".pkg.tar.xz", "arch"),
-        (".apk", "apk"),
-        (".flatpak", "flatpak"),
-    ):
-        if filename.endswith(suffix):
-            return name
-    return None
+    return discovery.asset_format(filename)
 
 
 def provided(scan: discovery.CompleteScan) -> set[str]:
@@ -137,6 +137,10 @@ def new_assets(
     return result
 
 
+# Homebrew and Scoop trust HTTPS and the manifest hash, so their buckets hold no public keys.
+UNSIGNED = frozenset({"brew", "scoop"})
+
+
 def prepare_bootstrap(
     prepared: Sequence[PreparedFormat],
     published: Sequence[ObjectRef],
@@ -149,6 +153,8 @@ def prepare_bootstrap(
     refs = {(ref.bucket_role, ref.key): ref for ref in published}
     outputs: list[OutputObject] = []
     for item in prepared:
+        if item.format in UNSIGNED:
+            continue
         if item.retained.metadata:
             if item.format == "apk":
                 native = next(
@@ -195,28 +201,62 @@ def _write(store: Store, output: OutputObject) -> None:
         store.replace(output.ref, output.local_path, expected_etag=observed.etag)
 
 
-def _size(size: int) -> str:
-    if size >= 1_000_000:
-        return f"{size / 1_000_000:.0f} MB"
-    return f"{size / 1_000:.0f} KB" if size >= 1_000 else f"{size} B"
-
-
 def _listing(name: str, refs: Sequence[ObjectRef]) -> list[str]:
-    """Name each object and its size in key order, with Flatpak `objects/` as one line."""
+    """Name each object and its size in key order, with Flatpak and Git objects as one line."""
     lines: dict[str, str] = {}
-    objects = [ref for ref in refs if name == "flatpak" and ref.key.startswith("objects/")]
+    folded = {
+        "flatpak": "objects/",
+        "brew": "tap.git/objects/",
+        "scoop": "wimpysworld/haberdasher.git/objects/",
+    }.get(name)
+    objects = [ref for ref in refs if folded and ref.key.startswith(folded)]
     for ref in refs:
         if ref not in objects:
-            lines[ref.key] = f"{ref.key} ({_size(ref.size)})"
+            lines[ref.key] = f"{ref.key} ({size_text(ref.size)})"
     if objects:
-        size = _size(sum(ref.size for ref in objects))
-        lines["objects/"] = f"objects/ {plural(len(objects), 'file')} ({size})"
+        size = size_text(sum(ref.size for ref in objects))
+        lines[folded or ""] = f"{folded} {plural(len(objects), 'file')} ({size})"
     return [f"  {lines[key]}" for key in sorted(lines)]
 
 
 def _duration(seconds: float) -> str:
     minutes, seconds = divmod(round(seconds), 60)
     return f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
+
+
+def write_page(
+    store: Store,
+    published: Published,
+    *,
+    fingerprint: str,
+    fallback: Mapping[str, str],
+    now: datetime,
+    report: Report = quiet,
+) -> int:
+    """Write a format's og.png and index.html when each is missing or differs. Count the writes."""
+    count = write_image(store, published.format, report=report)
+    data, digest = site.page(
+        published.format, published, fingerprint=fingerprint, fallback=fallback, now=now
+    )
+    current = store.read(published.format, site.PAGE_KEY, max_bytes=site.MAX_PAGE_BYTES)
+    if current is not None and site.content_hash(current[0]) == digest:
+        return count
+    expected = None if current is None else current[1].etag
+    state.write_object(store, site.ref(published.format, data), data, expected)
+    step(report, published.format, f"wrote {site.PAGE_KEY}")
+    return count + 1
+
+
+def write_image(store: Store, name: str, *, report: Report = quiet) -> int:
+    """Write a format's og.png when it is missing or its bytes differ."""
+    data = site.image(name)
+    current = store.read(name, site.IMAGE_KEY, max_bytes=site.MAX_IMAGE_BYTES)
+    if current is not None and current[0] == data:
+        return 0
+    expected = None if current is None else current[1].etag
+    state.write_object(store, site.image_ref(name, data), data, expected)
+    step(report, name, f"wrote {site.IMAGE_KEY}")
+    return 1
 
 
 def _unchanged(published: Published) -> PreparedFormat:
@@ -312,7 +352,7 @@ def _reconcile(
         scan = discovery.scan_releases(config, runtime=runtime, report=report)
     changed = new_assets(scan, published)
     missing_bootstrap: set[str] = (
-        {name for name in names if len(published[name].bootstrap) != 2}
+        {name for name in names if name not in UNSIGNED and len(published[name].bootstrap) != 2}
         if fingerprint is not None
         else set()
     )
@@ -332,7 +372,24 @@ def _reconcile(
         if not missing_bootstrap and not any(inspected.values()):
             for name in names:
                 step(report, name, "unchanged")
-            return RunResult(False, 0, len(scan.pending))
+            if fingerprint is None:
+                return RunResult(False, 0, len(scan.pending))
+            fallback = site.descriptions(
+                item.retained.accepted_history for item in published.values()
+            )
+            writes = {
+                name: write_page(
+                    store,
+                    published[name],
+                    fingerprint=fingerprint,
+                    fallback=fallback,
+                    now=now,
+                    report=report,
+                )
+                for name in names
+            }
+            pages = tuple(name for name in names if writes[name])
+            return RunResult(bool(pages), sum(writes.values()), len(scan.pending), pages=pages)
         if fingerprint is None:
             raise ValueError("Publication requires the expected signing fingerprint")
         prepared: list[PreparedFormat] = []
@@ -359,7 +416,7 @@ def _reconcile(
                         out=root / name,
                     )
                 )
-                if prepared[-1].outputs:
+                if prepared[-1].outputs and name not in UNSIGNED:
                     step(report, name, "signed metadata")
             bootstrap_outputs, bootstrap_objects = prepare_bootstrap(
                 prepared,
@@ -370,6 +427,8 @@ def _reconcile(
         count = 0
         packages = 0
         repositories: list[str] = []
+        written: list[str] = []
+        fallback = site.descriptions(item.retained.accepted_history for item in prepared)
         for item in prepared:
             current = published[item.format]
             bootstrap = tuple(ref for ref in bootstrap_objects if ref.bucket_role == item.format)
@@ -379,6 +438,16 @@ def _reconcile(
                 *item.outputs,
             )
             if not outputs and hashlib.sha256(data).hexdigest() == current.sha256:
+                if wrote := write_page(
+                    store,
+                    current,
+                    fingerprint=fingerprint,
+                    fallback=fallback,
+                    now=now,
+                    report=report,
+                ):
+                    written.append(item.format)
+                    count += wrote
                 continue
             batch = [
                 output
@@ -388,7 +457,9 @@ def _reconcile(
             if batch:
                 size = sum(output.ref.size for output in batch)
                 step(
-                    report, item.format, f"uploading {plural(len(batch), 'object')} ({_size(size)})"
+                    report,
+                    item.format,
+                    f"uploading {plural(len(batch), 'object')} ({size_text(size)})",
                 )
                 for line in _listing(item.format, [output.ref for output in batch]):
                     step(report, item.format, line)
@@ -402,7 +473,7 @@ def _reconcile(
             for output in outputs:
                 if output in batch:
                     continue
-                step(report, item.format, f"  {output.ref.key} ({_size(output.ref.size)})")
+                step(report, item.format, f"  {output.ref.key} ({size_text(output.ref.size)})")
                 _write(store, output)
                 count += 1
             state.write_inventory(store, current, data)
@@ -410,7 +481,19 @@ def _reconcile(
             count += 1
             repositories.append(item.format)
             packages += len(item.retained.accepted_history) - len(current.retained.accepted_history)
-        return RunResult(True, count, len(scan.pending), packages, tuple(repositories))
+            if wrote := write_page(
+                store,
+                state.decode_published(item.format, data, None),
+                fingerprint=fingerprint,
+                fallback=fallback,
+                now=now,
+                report=report,
+            ):
+                written.append(item.format)
+                count += wrote
+        return RunResult(
+            True, count, len(scan.pending), packages, tuple(repositories), tuple(written)
+        )
 
 
 def _prepare(

@@ -22,6 +22,7 @@ with pkgs;
   rclone
   awscli2
   miniserve
+  git
 ]
 ++ lib.optionals stdenv.hostPlatform.isLinux [
   apt
@@ -39,6 +40,7 @@ with pkgs;
   ostree
   shared-mime-info
   appstream
+  ruby
 ]
 ++ lib.optionals (stdenv.hostPlatform.isLinux && builtins.pathExists ./flatpak-metadata.nix) (
   import ./flatpak-metadata.nix { inherit pkgs; }

@@ -95,6 +95,8 @@ flatpak  flatpak.wimpys.world          0    2
 14 new packages. Nothing written. Run `just publish` to publish them.
 ```
 
+The plan also reads each published `index.html`. When the page is missing or differs from the page that `just publish` would write, the plan prints one line before the table, for example `apt   would write index.html`, and the summary counts the pages, for example `No new packages. 5 index pages to write.`
+
 The plan matches packages to the published state by the SHA256 checksum of each release asset, the same test that `just publish` uses to skip a download. It downloads and inspects each new asset, so it skips the same unsupported assets as `just publish`. It does not compare native identities with the published history.
 
 `just publish` prints the same discovery lines and one line for each format step:
@@ -119,6 +121,7 @@ apt     dists/stable/main/binary-amd64/Packages (2 KB)
 ...
 apt     dists/stable/InRelease (4 KB)
 apt   wrote haberdasher.json
+apt   wrote index.html
 ...
 flatpak uploading 530 objects (226 MB)
 flatpak   keys/haberdasher.asc (2 KB)
@@ -133,7 +136,7 @@ Published 72 packages to 4 repositories.
 
 Each upload lists every object by key and size before `rclone` starts. Flatpak lists OSTree `objects/` as one line. Each metadata line names the key before its write. `rclone` reports progress every 10 seconds while an upload runs. An upload that ends within 10 seconds prints no progress lines, and no upload prints the final total. When the byte count does not change, one `upload stalled, waiting` line replaces the repeated progress lines until the upload continues.
 
-When nothing is new, each format prints `unchanged` and the summary is `Nothing changed in 4 repositories.` A run that writes metadata but no new packages, for example the first public keys of a bucket, ends with `Refreshed apt metadata.`
+When nothing is new, each format prints `unchanged` and the summary is `Nothing changed in 4 repositories.` A run that writes metadata but no new packages, for example the first public keys of a bucket, ends with `Refreshed apt metadata.` A run that writes only index pages ends with `Refreshed the apt and rpm index pages.`
 
 ### Local test root
 
@@ -149,7 +152,7 @@ Production local signing reads the existing SOPS-managed path through `HD_SIGNIN
 
 Storage subprocesses receive only the three documented `HD_CLOUDFLARE_*` storage variables through an isolated AWS configuration. Conditional create requires absence. Conditional replace requires the exact observed ETag. An ETag identifies a revision, not a SHA256 digest.
 
-Each format uploads its new packages, signatures, dependency metadata, keys, and Flatpak objects with one `rclone copy` run for each content type and cache policy, 16 transfers at a time, then confirms their sizes and MD5 checksums with one `rclone lsjson` run. While `rclone` runs, the format prints its transfer statistics every 10 seconds. Locks, entry metadata, and `haberdasher.json` use conditional single-object writes with `aws s3api`.
+Each format uploads its new packages, signatures, dependency metadata, keys, and Flatpak objects with one `rclone copy` run for each content type and cache policy, 16 transfers at a time, then confirms their sizes and MD5 checksums with one `rclone lsjson` run. While `rclone` runs, the format prints its transfer statistics every 10 seconds. Locks, entry metadata, `haberdasher.json`, and `index.html` use conditional single-object writes with `aws s3api`.
 
 APT places each package at `pool/main/<prefix>/<source>/<package>_<version>_<arch>.deb`, without the epoch, for example `pool/main/s/sidra/sidra_1.3.0_amd64.deb`. RPM places each package at `packages/<name>-<version>-<release>.<arch>.rpm`, for example `packages/sidra-1.3.0-1.x86_64.rpm`. When two packages need one file name, the run stops with one line that names the file and both sources.
 
@@ -163,7 +166,27 @@ Both OpenPGP exports appear in every published bucket. The native APK public key
 
 For each format, a run writes the bootstrap keys and packages, then dependency metadata, then entry metadata, then `haberdasher.json`. A run replaces published entries only on the exact ETag that it read. Objects that the published inventory references never change. A run can overwrite an object that the published inventory does not reference, because an interrupted run can leave one with other signature bytes. RPM and Arch package signatures are not deterministic.
 
+After `haberdasher.json`, a run writes the format's `index.html`. See [Repository pages](#repository-pages).
+
 There is no multi-object atomicity. Split entry/signature pairs can temporarily fail client verification. The publisher retains older referenced objects and performs no deletion or retention change.
+
+## Repository pages
+
+Each bucket serves one `index.html` with `Cache-Control: public, max-age=300`. `src/haberdasher/site.py` builds it from the bucket's `haberdasher.json`, with no per-project settings. The page shows, in order:
+
+1. The repository name, links to the seven repository sites, a "Works with" row of distribution logos, and an unofficial-repository notice.
+2. For the signed formats (APT, RPM, Arch, Alpine, and Flatpak), the full signing key fingerprint and one command that prints it. The Homebrew and Scoop pages have no signing-key step, because those repositories are not signed. Their trust comes from HTTPS, the `sha256` in each cask, and the `hash` in each manifest.
+3. The common setup steps for the format. The RPM page has DNF and zypper steps.
+4. One section for each source repository: its name, the package description, a GitHub link, the packages and architectures of its newest published release, and the install command.
+5. The commands that remove the repository.
+6. The published files as nested disclosures, each linked with its size. Flatpak `objects/` is one line with a file count and a total size.
+7. The date of the last page write.
+
+The description comes from package metadata: DEB `Description`, RPM `Summary`, Arch `%DESC%`, and APK `T:`. Flatpak inspection stores the untranslated AppStream `summary` in the inventory. A source without a description in one format uses its description from another format in the same run, for example Sidra in Flatpak.
+
+Each page loads one µCSS theme and its fonts from pinned jsDelivr URLs with SRI hashes, and distribution logos from pinned `simple-icons` URLs. Browsers do not check SRI for images or for font files that a stylesheet loads. A few lines of inline JavaScript show a copy button beside each command. Without JavaScript, the commands stay selectable.
+
+The page embeds a content hash of everything except the date, in `<meta name="haberdasher-content">`. A run writes the page only when it is missing or that hash differs, so an unchanged rerun writes no page. The setup commands share their repository definitions with the native client tests through `apt_sources`, `rpm_repo`, and `pacman_repo` in `src/haberdasher/site.py`.
 
 ## Locks
 
@@ -177,7 +200,7 @@ A run that stops without cleanup, for example after a killed process, leaves its
 just unlock
 ```
 
-`just unlock` deletes the existing locks in all five buckets and exits without publishing. It prints one line for each bucket:
+`just unlock` deletes the existing locks in all seven buckets and exits without publishing. It prints one line for each bucket:
 
 ```text
 apk   no lock
