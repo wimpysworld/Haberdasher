@@ -86,6 +86,10 @@ def _adapter(name: str) -> Adapter:
             from haberdasher.formats import flatpak
 
             return flatpak
+        case "brew":
+            from haberdasher.formats import brew
+
+            return brew
         case _:
             raise ValueError("Unknown publication format")
 
@@ -101,17 +105,7 @@ class RunResult:
 
 
 def _format(filename: str) -> str | None:
-    for suffix, name in (
-        (".deb", "apt"),
-        (".rpm", "rpm"),
-        (".pkg.tar.zst", "arch"),
-        (".pkg.tar.xz", "arch"),
-        (".apk", "apk"),
-        (".flatpak", "flatpak"),
-    ):
-        if filename.endswith(suffix):
-            return name
-    return None
+    return discovery.asset_format(filename)
 
 
 def provided(scan: discovery.CompleteScan) -> set[str]:
@@ -139,6 +133,10 @@ def new_assets(
     return result
 
 
+# Homebrew trusts HTTPS and the cask sha256, so its bucket holds no public signing keys.
+UNSIGNED = frozenset({"brew"})
+
+
 def prepare_bootstrap(
     prepared: Sequence[PreparedFormat],
     published: Sequence[ObjectRef],
@@ -151,6 +149,8 @@ def prepare_bootstrap(
     refs = {(ref.bucket_role, ref.key): ref for ref in published}
     outputs: list[OutputObject] = []
     for item in prepared:
+        if item.format in UNSIGNED:
+            continue
         if item.retained.metadata:
             if item.format == "apk":
                 native = next(
@@ -198,15 +198,16 @@ def _write(store: Store, output: OutputObject) -> None:
 
 
 def _listing(name: str, refs: Sequence[ObjectRef]) -> list[str]:
-    """Name each object and its size in key order, with Flatpak `objects/` as one line."""
+    """Name each object and its size in key order, with Flatpak and tap objects as one line."""
     lines: dict[str, str] = {}
-    objects = [ref for ref in refs if name == "flatpak" and ref.key.startswith("objects/")]
+    folded = {"flatpak": "objects/", "brew": "tap.git/objects/"}.get(name)
+    objects = [ref for ref in refs if folded and ref.key.startswith(folded)]
     for ref in refs:
         if ref not in objects:
             lines[ref.key] = f"{ref.key} ({size_text(ref.size)})"
     if objects:
         size = size_text(sum(ref.size for ref in objects))
-        lines["objects/"] = f"objects/ {plural(len(objects), 'file')} ({size})"
+        lines[folded or ""] = f"{folded} {plural(len(objects), 'file')} ({size})"
     return [f"  {lines[key]}" for key in sorted(lines)]
 
 
@@ -343,7 +344,7 @@ def _reconcile(
         scan = discovery.scan_releases(config, runtime=runtime, report=report)
     changed = new_assets(scan, published)
     missing_bootstrap: set[str] = (
-        {name for name in names if len(published[name].bootstrap) != 2}
+        {name for name in names if name not in UNSIGNED and len(published[name].bootstrap) != 2}
         if fingerprint is not None
         else set()
     )
@@ -407,7 +408,7 @@ def _reconcile(
                         out=root / name,
                     )
                 )
-                if prepared[-1].outputs:
+                if prepared[-1].outputs and name not in UNSIGNED:
                     step(report, name, "signed metadata")
             bootstrap_outputs, bootstrap_objects = prepare_bootstrap(
                 prepared,

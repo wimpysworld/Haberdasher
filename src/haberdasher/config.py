@@ -116,15 +116,18 @@ PUBLIC: dict[str, tuple[str, str]] = {
     "arch": ("haberdasher-pkg", "https://pkg.wimpys.world"),
     "apk": ("haberdasher-apk", "https://apk.wimpys.world"),
     "flatpak": ("haberdasher-flatpak", "https://flatpak.wimpys.world"),
+    "brew": ("haberdasher-brew", "https://brew.wimpys.world"),
 }
 # Concrete architectures that each repository layout indexes. Every format also accepts its
 # architecture-independent packages: APT all, RPM noarch, Arch any, and Alpine noarch.
+# Homebrew names the two Mac architectures, and a universal binary serves both.
 ARCHITECTURES: dict[str, tuple[str, ...]] = {
     "apt": ("amd64", "arm64"),
     "rpm": ("x86_64", "aarch64"),
     "arch": ("x86_64", "aarch64"),
     "apk": ("x86_64", "aarch64"),
     "flatpak": ("x86_64", "aarch64"),
+    "brew": ("arm", "intel", "universal"),
 }
 
 

@@ -276,7 +276,12 @@ def _paths(
     result = dict(metadata)
     if not result:
         return result
-    for field in {"apt": ("files",), "arch": ("paths",), "flatpak": ("files",)}.get(name, ()):
+    for field in {
+        "apt": ("files",),
+        "arch": ("paths",),
+        "flatpak": ("files",),
+        "brew": ("files",),
+    }.get(name, ()):
         result[field] = {
             key: move(text(value, "metadata path"), key)
             for key, value in mapping(result.get(field)).items()

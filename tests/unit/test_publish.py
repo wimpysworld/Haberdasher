@@ -558,6 +558,7 @@ def test_unlock_deletes_existing_locks_only_on_request(
         "apk   no lock",
         "apt   no lock",
         f"arch  removed lock from {host} started {NOW.isoformat()}",
+        "brew  no lock",
         "flatpak no lock",
         "rpm   no lock",
         "Removed 1 lock.",

@@ -43,7 +43,17 @@ MAX_CHECKSUM_BYTES = 1024 * 1024
 MAX_CHECKSUM_ENTRIES = 10_000
 MAX_BUNDLE_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 5 * 1024 * 1024 * 1024 - 1
-PACKAGE_SUFFIXES = (".deb", ".rpm", ".apk", ".pkg.tar.zst", ".pkg.tar.xz", ".flatpak")
+PACKAGE_SUFFIXES = (
+    (".deb", "apt"),
+    (".rpm", "rpm"),
+    (".pkg.tar.zst", "arch"),
+    (".pkg.tar.xz", "arch"),
+    (".apk", "apk"),
+    (".flatpak", "flatpak"),
+    (".zip", "brew"),
+)
+# A bare macOS binary has no file extension and names its operating system after the tool.
+MACOS_BINARY = re.compile(r"(.+?)[-_](?:darwin|macos|mac|osx)(?:[-_].*)?", re.IGNORECASE)
 PER_ASSET_SUFFIXES = (".sha256", ".sha256sum")
 COSIGN_BUNDLE_SUFFIX = ".sigstore.json"
 COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
@@ -51,6 +61,16 @@ COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
 
 class DiscoveryFailure(ValueError):
     pass
+
+
+def asset_format(filename: str) -> str | None:
+    """The format that a release asset name can provide, before its bytes are inspected."""
+    for suffix, name in PACKAGE_SUFFIXES:
+        if filename.endswith(suffix):
+            return name
+    if re.search(r"\.[A-Za-z][A-Za-z0-9]*$", filename) is None and MACOS_BINARY.fullmatch(filename):
+        return "brew"
+    return None
 
 
 def _filename(value: object) -> str:
@@ -379,6 +399,20 @@ def _download(source: SourceAsset, runtime: Runtime, limit: int) -> Generator[tu
         yield path, tag
 
 
+def release_details(source: SourceAsset, runtime: Runtime) -> tuple[str, str]:
+    """The release tag of an asset and the description of its GitHub repository."""
+    release = _mapping(
+        _json_request(f"repos/{source.repository}/releases/{source.release_id}", runtime)
+    )
+    if integer(release.get("id"), "release ID", 1) != source.release_id:
+        raise DiscoveryFailure("Release changed during inspection")
+    repository = _mapping(_json_request(f"repos/{source.repository}", runtime))
+    description = repository.get("description")
+    return text(release.get("tag_name"), "release tag"), (
+        " ".join(description.split()) if isinstance(description, str) else ""
+    )
+
+
 def cosign_identity(repository: str, tag: str) -> str:
     """Pin a release workflow certificate to the source repository and the release tag."""
     owner, name = repository_name(repository).split("/")
@@ -492,7 +526,7 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
         missing = 0
         digests = 0
         for source in sorted(group, key=lambda item: item.asset_id):
-            if not source.filename.endswith(PACKAGE_SUFFIXES):
+            if asset_format(source.filename) is None:
                 continue
             packages += 1
             checksum = checksums.get(source.filename)

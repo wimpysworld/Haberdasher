@@ -78,6 +78,12 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
   Match the `.rsa.pub` filename to signature members and client trust files.
   Preserve the bytes of unsigned upstream APKs.
 - For Flatpak (WW-375), sign and verify both commits and summaries with GPG.
+- For Homebrew, publish macOS bare binaries and `.zip` files that hold one `.app`, mirrored into the bucket.
+  Write one cask per tool into a tap that the bucket serves as a Git repository over dumb HTTP at `tap.git`.
+  The tap name is `wimpysworld/haberdasher`. Homebrew verifies the cask `sha256`, not an OpenPGP signature.
+  Bare binaries carry no package metadata, so the cask name comes from the asset name and the version from the release tag.
+  Take each architecture from the Mach-O header, never from the file name.
+  Remove the quarantine attribute in each cask's `postflight` until the projects sign and notarise with a Developer ID.
 
 ## Testing
 
@@ -96,7 +102,7 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
 
 ## Security and secrets
 
-Treat the five package buckets as public:
+Treat the six package buckets as public:
 
 | Domain | Bucket |
 | --- | --- |
@@ -105,6 +111,7 @@ Treat the five package buckets as public:
 | `apk.wimpys.world` | `haberdasher-apk` |
 | `pkg.wimpys.world` | `haberdasher-pkg` |
 | `flatpak.wimpys.world` | `haberdasher-flatpak` |
+| `brew.wimpys.world` | `haberdasher-brew` |
 
 - Use one dedicated Haberdasher RSA4096 private primary with signing and certification capabilities, without subkeys or per-format keypairs.
   Sign directly with that primary for APT, RPM, Arch, and Flatpak. Convert the same RSA private numbers to PKCS#8 PEM for Alpine.

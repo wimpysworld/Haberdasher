@@ -10,7 +10,7 @@ chmod +x "$fixture/tool"
 for tool in bash env cat cp mv rm mkdir mktemp chmod sha256sum sort timeout id \
     find xargs grep sed tar gzip xz zstd bsdtar \
     jq curl openssl gpg gpgv gpgsm gpgconf cosign shellcheck shfmt nixfmt rclone gh just actionlint \
-    python3 tailor-python uv ruff basedpyright aws miniserve; do
+    python3 tailor-python uv ruff basedpyright aws miniserve git; do
     ln -s "$fixture/tool" "$fixture/bin/$tool"
 done
 
@@ -33,7 +33,7 @@ printf 'PASS: both Linux systems require repository tools.\n'
 
 for tool in apt-ftparchive apt-get apt-config dpkg dpkg-deb dpkg-query createrepo_c modifyrepo_c \
     rpm rpmsign rpmbuild rpmkeys dnf5 fakechroot fakeroot \
-    apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp flatpak ostree update-mime-database appstreamcli; do
+    apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp flatpak ostree update-mime-database appstreamcli ruby; do
     ln -s "$fixture/tool" "$fixture/bin/$tool"
 done
 for system in x86_64-linux aarch64-linux; do
@@ -88,7 +88,7 @@ printf '%s\n' "$*" >native.log
 EOF
 chmod +x "$fixture/project/.venv/bin/python"
 router x86_64-linux all
-[[ $(cat "$fixture/project/native.log") == '-m pytest -p no:cacheprovider tests/native/test_apt.py tests/native/test_rpm.py tests/native/test_arch.py tests/native/test_apk.py tests/native/test_flatpak.py tests/native/test_signing.py tests/native/test_http.py tests/native/test_storage_clients.py tests/native/test_pipeline.py' ]]
+[[ $(cat "$fixture/project/native.log") == '-m pytest -p no:cacheprovider tests/native/test_apt.py tests/native/test_rpm.py tests/native/test_arch.py tests/native/test_apk.py tests/native/test_flatpak.py tests/native/test_brew.py tests/native/test_signing.py tests/native/test_http.py tests/native/test_storage_clients.py tests/native/test_pipeline.py' ]]
 rm "$fixture/project/native.log"
 if router aarch64-linux all; then
     printf 'FAIL: unqualified native architecture accepted.\n' >&2

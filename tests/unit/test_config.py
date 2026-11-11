@@ -33,6 +33,7 @@ def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
         "arch": ("haberdasher-pkg", "https://pkg.wimpys.world"),
         "apk": ("haberdasher-apk", "https://apk.wimpys.world"),
         "flatpak": ("haberdasher-flatpak", "https://flatpak.wimpys.world"),
+        "brew": ("haberdasher-brew", "https://brew.wimpys.world"),
     }
     StoragePolicy("r2", {name: bucket for name, (bucket, _) in PUBLIC.items()})
 

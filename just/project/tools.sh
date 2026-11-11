@@ -11,7 +11,7 @@ tools=(
     bash env cat cp mv rm mkdir mktemp chmod sha256sum sort timeout id
     find xargs grep sed tar gzip xz zstd bsdtar
     jq curl openssl gpg gpgv gpgsm gpgconf cosign shellcheck shfmt nixfmt rclone
-    gh just actionlint python3 tailor-python uv ruff basedpyright aws miniserve
+    gh just actionlint python3 tailor-python uv ruff basedpyright aws miniserve git
 )
 case "${HABERDASHER_TOOL_SYSTEM:-}" in
     x86_64-linux | aarch64-linux)
@@ -19,7 +19,7 @@ case "${HABERDASHER_TOOL_SYSTEM:-}" in
             apt-ftparchive apt-get apt-config dpkg dpkg-deb dpkg-query createrepo_c modifyrepo_c
             rpm rpmsign rpmbuild rpmkeys dnf5 fakechroot fakeroot
             apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp
-            flatpak ostree update-mime-database appstreamcli
+            flatpak ostree update-mime-database appstreamcli ruby
         )
         ;;
     aarch64-darwin)

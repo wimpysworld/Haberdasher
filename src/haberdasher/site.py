@@ -16,6 +16,7 @@ from haberdasher import state
 from haberdasher.config import PUBLIC
 from haberdasher.core import AdmittedAsset, ObjectRef, plural, size_text
 from haberdasher.formats.apt import COMPONENT, SUITE
+from haberdasher.formats.brew import TAP, TAP_NAME
 from haberdasher.formats.flatpak import FLATHUB, FLATPAKREPO, REMOTE, TITLE
 from haberdasher.site_style import (
     BASE_CSS,
@@ -120,6 +121,8 @@ def install(name: str, packages: Sequence[str]) -> list[Command]:
             return [(None, f"sudo pacman -Syu {names}")]
         case "apk":
             return [(None, f"apk add {names}")]
+        case "brew":
+            return [(None, "\n".join(f"brew install --cask {TAP_NAME}/{p}" for p in packages))]
         case _:
             return [(None, f"flatpak --user install {REMOTE} {app}") for app in packages]
 
@@ -134,6 +137,20 @@ def steps(
     add = "Add the repository"
     last = Step(f"Install {' '.join(packages)}", "", tuple(install(name, packages)))
     match name:
+        case "brew":
+            return [
+                Step(
+                    "Add the tap",
+                    "Homebrew clones the tap over HTTPS and checks the SHA-256 of each download.",
+                    ((None, f"brew tap {TAP_NAME} {url}/{TAP}"),),
+                ),
+                Step(
+                    last.title,
+                    "These apps are not yet signed by Apple, so each cask removes the quarantine "
+                    "flag after install.",
+                    last.commands,
+                ),
+            ]
         case "apt":
             sources = _heredoc(
                 "sudo tee",
@@ -294,6 +311,8 @@ def remove(name: str, fingerprint: str) -> tuple[str, list[Command]]:
                     )
                 ],
             )
+        case "brew":
+            return ("Uninstall its casks first.", [(None, f"brew untap {TAP_NAME}")])
         case "apk":
             return (
                 "Run these commands as root.",
@@ -329,6 +348,8 @@ def description(asset: AdmittedAsset) -> str:
             return _field(r"^%DESC%\n(.*)$", metadata.get("desc"))
         case "apk":
             return _field(r"^T:(.*)$", metadata.get("stanza"))
+        case "brew":
+            return _field(r"(.+)", metadata.get("desc"))
         case _:
             return _field(r"(.+)", metadata.get("summary"))
 
@@ -461,7 +482,14 @@ def files(objects: Sequence[ObjectRef]) -> dict[str, int]:
     return {ref.key: ref.size for ref in objects if ref.key not in hidden}
 
 
-def _tree(sizes: Mapping[str, int], prefix: str, fold: bool) -> str:
+# The top-level directory that each format shows on one row, and the description of its files.
+FOLDS = {
+    "flatpak": ("objects", "OSTree object", "content-addressed"),
+    "brew": (TAP, "file", "Git repository"),
+}
+
+
+def _tree(sizes: Mapping[str, int], prefix: str, fold: tuple[str, str, str] | None) -> str:
     directories: dict[str, dict[str, int]] = {}
     leaves: list[tuple[str, int]] = []
     for key, size in sizes.items():
@@ -474,11 +502,11 @@ def _tree(sizes: Mapping[str, int], prefix: str, fold: bool) -> str:
     for directory in sorted(directories):
         inner = directories[directory]
         total = size_text(sum(inner.values()))
-        if fold and not prefix and directory == "objects":
+        if fold and not prefix and directory == fold[0]:
             items.append(
                 f'<li><div class="frow"><span></span>{FOLDER_CLOSED}<span class="name">'
-                f'{_e(directory)}/<span class="meta">{plural(len(inner), "OSTree object")}, '
-                f'content-addressed</span></span><span class="size">{total}</span></div></li>'
+                f'{_e(directory)}/<span class="meta">{plural(len(inner), fold[1])}, '
+                f'{fold[2]}</span></span><span class="size">{total}</span></div></li>'
             )
             continue
         items.append(
@@ -499,8 +527,8 @@ def _tree(sizes: Mapping[str, int], prefix: str, fold: bool) -> str:
 
 
 def tree(name: str, sizes: Mapping[str, int]) -> str:
-    """Nested disclosures of the published files, with Flatpak objects/ on one row."""
-    return _tree(sizes, "", name == "flatpak")
+    """Nested disclosures of the published files, with Flatpak objects/ and tap.git/ on one row."""
+    return _tree(sizes, "", FOLDS.get(name))
 
 
 def _favicon(colour: str) -> str:
