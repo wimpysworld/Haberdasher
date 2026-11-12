@@ -200,7 +200,7 @@ def upstream_nix_files(
         "  stdenvNoCC,\n"
         "  fetchurl,\n"
         "  dpkg,\n"
-        f'  version ? "0.0.0",\n'
+        '  version ? "0.0.0",\n'
         "}:\n"
         "let\n"
         "  inherit (stdenvNoCC.hostPlatform) system;\n"
