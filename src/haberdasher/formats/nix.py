@@ -14,7 +14,7 @@ import struct
 import tarfile
 import zipfile
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -274,6 +274,114 @@ def _brace_blocks(
     return blocks
 
 
+def _mask_nix(content: str, *, mask_strings: bool = False) -> str:
+    """Mask Nix comments and indented strings (and optionally `\"...\"` text) with spaces."""
+    out: list[str] = []
+    stack: list[tuple[str, int]] = [("code", 0)]
+    idx = 0
+    length = len(content)
+    while idx < length:
+        mode, depth = stack[-1]
+        if mode in {"code", "interp_dquote", "interp_indented"}:
+            if content[idx] == "#":
+                end = content.find("\n", idx)
+                stop = length if end == -1 else end
+                out.append(" " * (stop - idx))
+                idx = stop
+                continue
+            if content[idx : idx + 2] == "/*":
+                end = content.find("*/", idx + 2)
+                stop = length if end == -1 else end + 2
+                out.extend("\n" if ch == "\n" else " " for ch in content[idx:stop])
+                idx = stop
+                continue
+            if content[idx : idx + 2] == "''":
+                out.append("  ")
+                stack.append(("indented", 0))
+                idx += 2
+                continue
+            if content[idx] == '"':
+                out.append('"')
+                stack.append(("dquote", 0))
+                idx += 1
+                continue
+            if content[idx] == "{" and mode != "code":
+                stack[-1] = (mode, depth + 1)
+                out.append("{")
+                idx += 1
+                continue
+            if content[idx] == "}" and mode != "code":
+                if depth == 0:
+                    stack.pop()
+                    if mode == "interp_dquote":
+                        out.append(" " if mask_strings else "}")
+                    else:
+                        out.append(" ")
+                else:
+                    stack[-1] = (mode, depth - 1)
+                    out.append("}")
+                idx += 1
+                continue
+            out.append(content[idx])
+            idx += 1
+            continue
+        if mode == "dquote":
+            if content[idx] == "\\":
+                step = 2 if idx + 1 < length else 1
+                if mask_strings:
+                    out.extend("\n" if ch == "\n" else " " for ch in content[idx : idx + step])
+                else:
+                    out.append(content[idx : idx + step])
+                idx += step
+                continue
+            if content[idx : idx + 2] == "${":
+                out.append("  " if mask_strings else "${")
+                stack.append(("interp_dquote", 0))
+                idx += 2
+                continue
+            if content[idx] == '"':
+                stack.pop()
+                out.append('"')
+                idx += 1
+                continue
+            ch = content[idx]
+            out.append(("\n" if ch == "\n" else " ") if mask_strings else ch)
+            idx += 1
+            continue
+        if content[idx : idx + 3] in {"'''", "''$"}:
+            out.append("   ")
+            idx += 3
+            continue
+        if content[idx : idx + 3] == "''\\" and idx + 3 < length:
+            out.append("   " + ("\n" if content[idx + 3] == "\n" else " "))
+            idx += 4
+            continue
+        if content[idx : idx + 2] == "''":
+            stack.pop()
+            out.append("  ")
+            idx += 2
+            continue
+        if content[idx : idx + 2] == "${":
+            out.append("  ")
+            stack.append(("interp_indented", 0))
+            idx += 2
+            continue
+        out.append("\n" if content[idx] == "\n" else " ")
+        idx += 1
+    return "".join(out)
+
+
+_UPSTREAM_SYS_HEADER = (
+    r'(?:"(x86_64-linux|aarch64-linux|x86_64-darwin|aarch64-darwin)"'
+    r"|(?<![A-Za-z0-9_-])(x86_64-linux|aarch64-linux|x86_64-darwin|aarch64-darwin))"
+    r"\s*=\s*(?:[A-Za-z0-9_.]*\bfetchurl\s*)?\{"
+)
+_SYSTEM_BLOCK_HEADER = (
+    r'(?:"([A-Za-z0-9_]+-(?:linux|darwin))"|(?<![A-Za-z0-9_-])([A-Za-z0-9_]+-(?:linux|darwin)))'
+    r"\s*=\s*(?:[A-Za-z0-9_.]*\bfetchurl\s*)?\{"
+)
+
+
 def _upstream_sources(
     nix_files: Mapping[str, str], ver: str
 ) -> tuple[str, list[tuple[str, str, str, bool]]]:
@@ -282,27 +390,25 @@ def _upstream_sources(
     for rel_path, content in sorted(nix_files.items()):
         if rel_path == "flake.nix":
             continue
-        if not pname and (match := re.search(r'\bpname\s*=\s*"([^"]+)"\s*;', content)):
+        masked = _mask_nix(content)
+        if not pname and (match := re.search(r'\bpname\s*=\s*"([^"]+)"\s*;', masked)):
             pname = mirror.name(match[1])
         matched_spans: list[tuple[int, int]] = []
-        for match, inner, span in _brace_blocks(
-            content,
-            r"(?<![A-Za-z0-9_-])(x86_64-linux|aarch64-linux|x86_64-darwin|aarch64-darwin)\s*=\s*\{",
-        ):
-            url_match = re.search(r'\burl\s*=\s*"([^"]+)"\s*;', inner)
-            hash_match = re.search(r'\b(?:hash|sha256)\s*=\s*"([^"]*)"\s*;', inner)
-            if url_match and hash_match:
-                expanded = url_match[1].replace("${version}", ver)
+        for match, inner, span in _brace_blocks(masked, _UPSTREAM_SYS_HEADER):
+            urls = re.findall(r'\burl\s*=\s*"([^"]+)"\s*;', inner)
+            hashes = re.findall(r'\b(?:hash|sha256)\s*=\s*"([^"]*)"\s*;', inner)
+            if len(urls) == 1 and len(hashes) == 1:
+                expanded = urls[0].replace("${version}", ver)
                 if pname:
                     expanded = expanded.replace("${pname}", pname)
-                entries.append((rel_path, match[1], expanded, False))
+                entries.append((rel_path, match[1] or match[2], expanded, False))
                 matched_spans.append(span)
         platforms = re.findall(
             r'"(x86_64-linux|aarch64-linux|x86_64-darwin|aarch64-darwin)"',
-            next(iter(re.findall(r"\bplatforms\s*=\s*\[([^\]]*)\]", content)), ""),
+            next(iter(re.findall(r"\bplatforms\s*=\s*\[([^\]]*)\]", masked)), ""),
         )
         standalone_urls: list[str] = []
-        for _match, inner, span in _brace_blocks(content, r"\bfetchurl\s*\{"):
+        for _match, inner, span in _brace_blocks(masked, r"\bfetchurl\s*\{"):
             if any(start <= span[0] < end for start, end in matched_spans):
                 continue
             url_match = re.search(r'\burl\s*=\s*"([^"]+)"\s*;', inner)
@@ -698,20 +804,73 @@ def _ordered_systems(systems: set[str]) -> tuple[str, ...]:
     return tuple(sys_name for sys_name in SYSTEMS if sys_name in systems)
 
 
+@dataclass(frozen=True)
+class _SourceBlock:
+    system: str | None
+    inner_span: tuple[int, int]
+    remove_span: tuple[int, int] | None
+
+
+def _find_source_blocks(content: str) -> list[_SourceBlock]:
+    masked = _mask_nix(content)
+    code_only = _mask_nix(content, mask_strings=True)
+    blocks: list[_SourceBlock] = []
+    sys_spans: list[tuple[int, int]] = []
+    for match, inner, (inner_start, inner_end) in _brace_blocks(masked, _SYSTEM_BLOCK_HEADER):
+        urls = re.findall(r'\burl\s*=\s*"[^"]+"\s*;', inner)
+        hashes = re.findall(r'\b(?:hash|sha256)\s*=\s*"[^"]*"\s*;', inner)
+        if len(urls) != 1 or len(hashes) != 1:
+            continue
+        semi = re.match(r"\s*;", masked[inner_end + 1 :])
+        remove_span: tuple[int, int] | None = None
+        if semi is not None:
+            stmt_start = match.start()
+            remove_start = stmt_start
+            while remove_start > 0 and content[remove_start - 1] in {" ", "\t"}:
+                remove_start -= 1
+            after_semi = inner_end + 1 + semi.end()
+            if remove_start == 0 or content[remove_start - 1] == "\n":
+                nl = re.match(r"[ \t]*\r?\n", content[after_semi:])
+                remove_end = after_semi + (nl.end() if nl else 0)
+            else:
+                remove_start = stmt_start
+                ws = re.match(r"[ \t]*", content[after_semi:])
+                remove_end = after_semi + (ws.end() if ws else 0)
+            remove_span = (remove_start, remove_end)
+        sys_spans.append((inner_start, inner_end))
+        blocks.append(_SourceBlock(match[1] or match[2], (inner_start, inner_end), remove_span))
+    for _match, _inner, (inner_start, inner_end) in _brace_blocks(
+        masked, r"\b(?:fetchurl|fetchzip|fetchTarball)\s*\{"
+    ):
+        if any(start <= inner_start and inner_end <= end for start, end in sys_spans):
+            continue
+        inner_code = code_only[inner_start:inner_end]
+        if re.search(r"\b(?:url|hash|sha256|outputHash)\s*=", inner_code):
+            blocks.append(_SourceBlock(None, (inner_start, inner_end), None))
+    return blocks
+
+
 def _replace_fetchurl_block(
     body: str, pname: str, ver: str, pub_url: str, fname: str, sri: str
 ) -> tuple[str, bool]:
-    url_m = re.search(r'\burl\s*=\s*"([^"]+)"\s*;', body)
-    hash_m = re.search(r'\b(?:hash|sha256)\s*=\s*"([^"]*)"\s*;', body)
-    if not (url_m and hash_m):
+    masked = _mask_nix(body)
+    url_ms = list(re.finditer(r'\burl\s*=\s*"([^"]+)"\s*;', masked))
+    hash_ms = list(re.finditer(r'\b(?:hash|sha256)\s*=\s*"([^"]*)"\s*;', masked))
+    if len(url_ms) != 1 or len(hash_ms) != 1:
         return body, False
+    url_m, hash_m = url_ms[0], hash_ms[0]
     expanded = url_m[1].replace("${version}", ver).replace("${pname}", pname)
     if expanded != pub_url and expanded.rsplit("/", 1)[-1] != fname:
         return body, False
-    new_body = re.sub(r'\burl\s*=\s*"[^"]+"\s*;', f"url = {_nix_str(pub_url)};", body, count=1)
-    new_body = re.sub(
-        r'\b(?:hash|sha256)\s*=\s*"[^"]*"\s*;', f"hash = {_nix_str(sri)};", new_body, count=1
+    edits = sorted(
+        [
+            (url_m.start(), url_m.end(), f"url = {_nix_str(pub_url)};"),
+            (hash_m.start(), hash_m.end(), f"hash = {_nix_str(sri)};"),
+        ]
     )
+    new_body = body
+    for start, end, replacement in reversed(edits):
+        new_body = new_body[:start] + replacement + new_body[end:]
     return new_body, True
 
 
@@ -721,60 +880,101 @@ def _rewrite_upstream_nix(
     first = items[0]
     pname, ver = first.identity.name, first.identity.version
     raw_files = _mapping(items[-1].metadata.get("nix_files"), "upstream nix_files")
-    rewritten = {
+    candidates = {
         rel: _string(text, "upstream nix content")
-        for rel, text in raw_files.items()
+        for rel, text in sorted(raw_files.items())
         if rel != "flake.nix"
     }
+    blocks_by_file = {rel: _find_source_blocks(content) for rel, content in candidates.items()}
+    replacements: dict[tuple[str, int], str] = {}
     admitted_systems: set[str] = set()
     for item in items:
-        admitted_systems.update(_item_systems(item))
+        item_sys = _item_systems(item)
+        admitted_systems.update(item_sys)
         sri = _sri(item.verified.sha256)
         pub_url = item.verified.source.public_url
         fname = item.verified.source.filename
         updated = False
-        for rel in sorted(rewritten):
-            content = rewritten[rel]
-            sys_pat = rf"(?<![A-Za-z0-9_-]){re.escape(item.identity.architecture)}\s*=\s*\{{"
-            for _match, inner, (inner_start, inner_end) in _brace_blocks(content, sys_pat):
-                new_inner, hit = _replace_fetchurl_block(inner, pname, ver, pub_url, fname, sri)
-                if hit:
-                    content = content[:inner_start] + new_inner + content[inner_end:]
-                    rewritten[rel] = content
-                    updated = True
+        for target_sys in item_sys:
+            matched_sys = False
+            for rel, blocks in blocks_by_file.items():
+                content = candidates[rel]
+                for idx, block in enumerate(blocks):
+                    if block.system != target_sys or (rel, idx) in replacements:
+                        continue
+                    inner = content[block.inner_span[0] : block.inner_span[1]]
+                    new_inner, hit = _replace_fetchurl_block(inner, pname, ver, pub_url, fname, sri)
+                    if hit:
+                        replacements[(rel, idx)] = new_inner
+                        updated = True
+                        matched_sys = True
+                        break
+                if matched_sys:
                     break
-            if updated:
-                break
-            for _match, inner, (inner_start, inner_end) in _brace_blocks(
-                content, r"\bfetchurl\s*\{"
-            ):
-                new_inner, hit = _replace_fetchurl_block(inner, pname, ver, pub_url, fname, sri)
-                if hit:
-                    content = content[:inner_start] + new_inner + content[inner_end:]
-                    rewritten[rel] = content
-                    updated = True
+        if not updated:
+            for rel, blocks in blocks_by_file.items():
+                content = candidates[rel]
+                for idx, block in enumerate(blocks):
+                    if block.system is not None or (rel, idx) in replacements:
+                        continue
+                    inner = content[block.inner_span[0] : block.inner_span[1]]
+                    new_inner, hit = _replace_fetchurl_block(inner, pname, ver, pub_url, fname, sri)
+                    if hit:
+                        replacements[(rel, idx)] = new_inner
+                        updated = True
+                        break
+                if updated:
                     break
-            if updated:
-                break
         if not updated:
             raise NixFailure(f"Could not bind verified hash for {fname} in {pname} nix/ files")
     pkg_files: dict[str, str] = {}
-    for rel, content in sorted(rewritten.items()):
+    for rel, content in candidates.items():
+        blocks = blocks_by_file[rel]
+        matched_idxs = {idx for idx in range(len(blocks)) if (rel, idx) in replacements}
+        if not matched_idxs:
+            continue
+        edits: list[tuple[int, int, str]] = []
+        for idx, block in enumerate(blocks):
+            if idx in matched_idxs:
+                edits.append((block.inner_span[0], block.inner_span[1], replacements[(rel, idx)]))
+            elif block.remove_span is not None:
+                edits.append((block.remove_span[0], block.remove_span[1], ""))
+            else:
+                raise NixFailure(f"Unmatched fetchurl block in {pname} {rel}")
+        edits.sort(key=lambda item: (item[0], item[1]))
+        if any(edits[i - 1][1] > edits[i][0] for i in range(1, len(edits))):
+            raise NixFailure(f"Overlapping source blocks in {pname} {rel}")
+        for start, end, replacement in reversed(edits):
+            content = content[:start] + replacement + content[end:]
+        code_only = _mask_nix(content, mask_strings=True)
+        url_count = len(re.findall(r"\burl\s*=", code_only))
+        hash_count = len(re.findall(r"\b(?:hash|sha256|outputHash)\s*=", code_only))
+        bare_fetch = re.search(
+            r'\b(?:fetchurl|fetchzip|fetchTarball|fetchGit|fetchTree)\s*"', code_only
+        )
+        if url_count != len(matched_idxs) or hash_count != len(matched_idxs) or bare_fetch:
+            raise NixFailure(f"Unverified source attribute remains in {pname} {rel}")
         leaf = rel.removeprefix("nix/")
         target_leaf = "upstream.nix" if leaf == "default.nix" else leaf
         pkg_files[f"pkgs/{pname}/{target_leaf}"] = content
     has_darwin = f"pkgs/{pname}/darwin.nix" in pkg_files
-    has_linux = f"pkgs/{pname}/linux.nix" in pkg_files
-    if has_darwin and has_linux:
-        dispatch = "if stdenv.hostPlatform.isDarwin then call ./darwin.nix else call ./linux.nix"
+    non_darwin = [
+        f"./{leaf}"
+        for leaf in ("linux.nix", "package.nix", "upstream.nix")
+        if f"pkgs/{pname}/{leaf}" in pkg_files
+    ]
+    if len(non_darwin) > 1 or (not has_darwin and not non_darwin):
+        raise NixFailure(f"Invalid matched Nix expression set for {pname}")
+    if has_darwin and non_darwin:
+        dispatch = (
+            f"if stdenv.hostPlatform.isDarwin then call ./darwin.nix else call {non_darwin[0]}"
+        )
     elif has_darwin:
         dispatch = "call ./darwin.nix"
-    elif has_linux:
-        dispatch = "call ./linux.nix"
-    elif f"pkgs/{pname}/package.nix" in pkg_files:
-        dispatch = "call ./package.nix"
     else:
-        dispatch = "call ./upstream.nix"
+        dispatch = f"call {non_darwin[0]}"
+    ordered = _ordered_systems(admitted_systems)
+    platforms = " ".join(_nix_str(sys_name) for sys_name in ordered)
     pkg_files[f"pkgs/{pname}/default.nix"] = (
         "{\n"
         "  lib,\n"
@@ -792,9 +992,12 @@ def _rewrite_upstream_nix(
         "    in\n"
         "    callPackage fn args;\n"
         "in\n"
-        f"{dispatch}\n"
+        f"if builtins.elem stdenv.hostPlatform.system [ {platforms} ] then\n"
+        f"  {dispatch}\n"
+        "else\n"
+        f'  throw "{pname} is not available on ${{stdenv.hostPlatform.system}}"\n'
     )
-    return pkg_files, _ordered_systems(admitted_systems)
+    return pkg_files, ordered
 
 
 def _tarball_nix(items: Sequence[InspectedAsset]) -> tuple[str, tuple[str, ...]]:
@@ -983,10 +1186,27 @@ def _flake_nix(package_systems: Mapping[str, tuple[str, ...]], nixpkgs_url: str)
             f"        in\n"
             f"        {{\n{body}\n        }};"
         )
-    overlay_attrs = "\n".join(
-        f"        {name} = final.callPackage ./pkgs/{name} {{ }};"
-        for name in sorted(package_systems)
-    )
+    overlay_parts: list[str] = []
+    for name, group in sorted(package_systems.items()):
+        platforms = " ".join(_nix_str(sys_name) for sys_name in group)
+        overlay_parts.append(
+            f"        prev.lib.optionalAttrs (builtins.elem system [ {platforms} ]) {{\n"
+            f"          {name} = final.callPackage ./pkgs/{name} {{ }};\n"
+            "        }"
+        )
+    if overlay_parts:
+        joined = "\n        // ".join(
+            part.lstrip() if idx else part for idx, part in enumerate(overlay_parts)
+        )
+        overlay_block = (
+            "      overlays.default =\n"
+            "        final: prev:\n"
+            "        let\n"
+            "          inherit (prev.stdenv.hostPlatform) system;\n"
+            "        in\n" + joined + ";\n"
+        )
+    else:
+        overlay_block = "      overlays.default = _final: _prev: { };\n"
     return (
         "{\n"
         '  description = "Nix packages published by Haberdasher";\n\n'
@@ -995,9 +1215,7 @@ def _flake_nix(package_systems: Mapping[str, tuple[str, ...]], nixpkgs_url: str)
         "  };\n\n"
         "  outputs =\n"
         "    { nixpkgs, ... }:\n"
-        "    {\n"
-        "      overlays.default = final: _prev: {\n" + overlay_attrs + "\n      };\n"
-        "      packages = {\n" + "\n".join(sys_blocks) + "\n      };\n"
+        "    {\n" + overlay_block + "      packages = {\n" + "\n".join(sys_blocks) + "\n      };\n"
         "    };\n"
         "}\n"
     )

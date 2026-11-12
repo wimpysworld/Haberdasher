@@ -360,6 +360,230 @@ def test_inspect_upstream_nix_universal_darwin_dmg(tmp_path: Path, platforms_exp
     assert "aarch64-darwin =" in flake_text
 
 
+@pytest.mark.parametrize("fetchurl_binding", [False, True])
+def test_upstream_nix_omits_unmatched_files_strips_unmatched_systems_and_guards_overlay(
+    tmp_path: Path, fetchurl_binding: bool
+) -> None:
+    stale_amd64 = "sha256-59b0f813bf7ef5e2c4da4b5e9a3fb33ee82ad49c7bc644fa4e83a19b264e32a1"
+    stale_arm64 = "sha256-1111111111111111111111111111111111111111111111111111111111111111"
+    stale_darwin = "sha256-bf20810ca11e1d498bf00c11b0c9f085dc48ec94d5bc543d0f9b10862e39a409"
+    amd64_url = (
+        "https://github.com/wimpysworld/sidra/releases/download/1.3.0/Sidra-1.3.0-linux-amd64.deb"
+    )
+    arm64_url = (
+        "https://github.com/wimpysworld/sidra/releases/download/1.3.0/Sidra-1.3.0-linux-arm64.deb"
+    )
+    darwin_url = (
+        "https://github.com/wimpysworld/sidra/releases/download/1.3.0/Sidra-1.3.0-mac-arm64.dmg"
+    )
+    if fetchurl_binding:
+        sources_block = (
+            "  sources = {\n"
+            "    x86_64-linux = fetchurl {\n"
+            f'      url = "{amd64_url}";\n'
+            f'      hash = "{stale_amd64}";\n'
+            "    };\n"
+            "    aarch64-linux = fetchurl {\n"
+            f'      url = "{arm64_url}";\n'
+            f'      hash = "{stale_arm64}";\n'
+            "    };\n"
+            "  };\n"
+        )
+        src_expr = "sources.${stdenv.hostPlatform.system}"
+    else:
+        sources_block = (
+            "  sources = {\n"
+            "    x86_64-linux = {\n"
+            f'      url = "{amd64_url}";\n'
+            f'      hash = "{stale_amd64}";\n'
+            "    };\n"
+            "    aarch64-linux = {\n"
+            f'      url = "{arm64_url}";\n'
+            f'      hash = "{stale_arm64}";\n'
+            "    };\n"
+            "  };\n"
+        )
+        src_expr = "fetchurl sources.${stdenv.hostPlatform.system}"
+    upstream_files = {
+        "flake.nix": '{ description = "Sidra"; outputs = _: {}; }\n',
+        "nix/default.nix": "{ callPackage }: callPackage ./darwin.nix { }\n",
+        "nix/linux.nix": (
+            "{\n"
+            "  lib,\n"
+            "  stdenv,\n"
+            "  fetchurl,\n"
+            '  version ? "1.2.1",\n'
+            "}:\n"
+            "let\n"
+            '  pname = "sidra";\n' + sources_block + "in\n"
+            f"stdenv.mkDerivation {{ inherit pname version; src = {src_expr}; }}\n"
+        ),
+        "nix/darwin.nix": (
+            "{\n"
+            "  lib,\n"
+            "  stdenvNoCC,\n"
+            "  fetchurl,\n"
+            '  version ? "1.2.1",\n'
+            "}:\n"
+            "stdenvNoCC.mkDerivation {\n"
+            '  pname = "sidra";\n'
+            "  inherit version;\n"
+            "  src = fetchurl {\n"
+            f'    url = "{darwin_url}";\n'
+            f'    hash = "{stale_darwin}";\n'
+            "  };\n"
+            '  meta = { platforms = [ "aarch64-darwin" ]; };\n'
+            "}\n"
+        ),
+    }
+    deb_asset = verified_asset(
+        tmp_path,
+        "Sidra-1.3.0-linux-amd64.deb",
+        b"sidra-1.3.0-deb-only-bytes",
+        repository="wimpysworld/sidra",
+        tag="1.3.0",
+        asset_id=60,
+    )
+    with (
+        private_workspace(tmp_path) as runtime,
+        patch.object(discovery, "release_details", return_value=("1.3.0", "Sidra desktop", "MIT")),
+        patch.object(discovery, "tag_nix_files", return_value=upstream_files),
+    ):
+        inspected_deb = nix.inspect(
+            deb_asset, policy=POLICY, runtime=runtime, out=tmp_path / "out-deb-only"
+        )
+        pkg_files, systems = nix._rewrite_upstream_nix([inspected_deb])  # pyright: ignore[reportPrivateUsage]
+        assert systems == ("x86_64-linux",)
+        assert set(pkg_files) == {"pkgs/sidra/linux.nix", "pkgs/sidra/default.nix"}
+        assert "pkgs/sidra/darwin.nix" not in pkg_files
+        assert "pkgs/sidra/upstream.nix" not in pkg_files
+        assert "./darwin.nix" not in pkg_files["pkgs/sidra/default.nix"]
+        assert "call ./linux.nix" in pkg_files["pkgs/sidra/default.nix"]
+
+        linux_out = pkg_files["pkgs/sidra/linux.nix"]
+        assert sri_hash(deb_asset.sha256) in linux_out
+        assert amd64_url in linux_out
+        assert "aarch64-linux" not in linux_out
+        assert arm64_url not in linux_out
+        for text in pkg_files.values():
+            assert stale_amd64 not in text
+            assert stale_arm64 not in text
+            assert stale_darwin not in text
+            assert darwin_url not in text
+
+        flake_text = nix._flake_nix({"sidra": systems}, "github:NixOS/nixpkgs/nixos-unstable")  # pyright: ignore[reportPrivateUsage]
+        repo_dir = tmp_path / "flake-eval"
+        for rel, content in {**pkg_files, "flake.nix": flake_text}.items():
+            target = repo_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write(target, content.encode("utf-8"))
+        nix_paths = [str(repo_dir / rel) for rel in sorted({*pkg_files, "flake.nix"})]
+        fmt = runtime.run(["nixfmt", *nix_paths])
+        assert fmt.returncode == 0, fmt.stderr.decode(errors="replace")
+
+        if shutil.which("nix-instantiate", path=runtime.environment["PATH"]) is None:
+            return
+        eval_expr = (
+            "let\n"
+            f"  flake = import {repo_dir / 'flake.nix'};\n"
+            "  outputs = flake.outputs { nixpkgs = null; };\n"
+            "  mkPkgs = system:\n"
+            "    let\n"
+            "      lib = {\n"
+            "        optionalAttrs = cond: attrs: if cond then attrs else { };\n"
+            "      };\n"
+            "      stdenv = {\n"
+            "        hostPlatform = {\n"
+            "          inherit system;\n"
+            '          isDarwin = builtins.elem system [ "x86_64-darwin" "aarch64-darwin" ];\n'
+            "        };\n"
+            "        mkDerivation = attrs: attrs;\n"
+            "      };\n"
+            "      base = rec {\n"
+            "        inherit lib stdenv;\n"
+            "        fetchurl = { url, hash }: { inherit url hash; };\n"
+            "        callPackage = fn: extra:\n"
+            "          let f = if builtins.isFunction fn then fn else import fn;\n"
+            "          in f ((builtins.intersectAttrs (builtins.functionArgs f) base) // extra);\n"
+            "      };\n"
+            "      final = base // (outputs.overlays.default final base);\n"
+            "    in\n"
+            "    final;\n"
+            '  linuxPkgs = mkPkgs "x86_64-linux";\n'
+            '  armPkgs = mkPkgs "aarch64-linux";\n'
+            '  darwinPkgs = mkPkgs "aarch64-darwin";\n'
+            "in\n"
+            "{\n"
+            "  linuxHasSidra = linuxPkgs ? sidra;\n"
+            "  linuxSrc = linuxPkgs.sidra.src;\n"
+            "  armHasSidra = armPkgs ? sidra;\n"
+            "  darwinHasSidra = darwinPkgs ? sidra;\n"
+            "  directDarwinRejected = !(builtins.tryEval (darwinPkgs.callPackage "
+            f"{repo_dir / 'pkgs/sidra/default.nix'} {{ }})).success;\n"
+            "}\n"
+        )
+        res = runtime.run(
+            ["nix-instantiate", "--readonly-mode", "--eval", "--strict", "--json", "-E", eval_expr]
+        )
+        assert res.returncode == 0, res.stderr.decode(errors="replace")
+        evaluated = json.loads(res.stdout)
+        assert evaluated == {
+            "linuxHasSidra": True,
+            "linuxSrc": {"url": amd64_url, "hash": sri_hash(deb_asset.sha256)},
+            "armHasSidra": False,
+            "darwinHasSidra": False,
+            "directDarwinRejected": True,
+        }
+
+
+def test_upstream_nix_rejects_unremovable_unmatched_fetchurl_block(tmp_path: Path) -> None:
+    stale_amd64 = "sha256-59b0f813bf7ef5e2c4da4b5e9a3fb33ee82ad49c7bc644fa4e83a19b264e32a1"
+    stale_extra = "sha256-2222222222222222222222222222222222222222222222222222222222222222"
+    upstream_files = {
+        "flake.nix": '{ description = "Sidra"; outputs = _: {}; }\n',
+        "nix/linux.nix": (
+            "{\n"
+            "  lib,\n"
+            "  stdenv,\n"
+            "  fetchurl,\n"
+            '  version ? "1.2.1",\n'
+            "}:\n"
+            "stdenv.mkDerivation {\n"
+            '  pname = "sidra";\n'
+            "  inherit version;\n"
+            "  src =\n"
+            '    if stdenv.hostPlatform.system == "x86_64-linux" then\n'
+            "      fetchurl {\n"
+            '        url = "https://github.com/wimpysworld/sidra/releases/download/1.3.0/Sidra-1.3.0-linux-amd64.deb";\n'
+            f'        hash = "{stale_amd64}";\n'
+            "      }\n"
+            "    else\n"
+            "      fetchurl {\n"
+            '        url = "https://github.com/wimpysworld/sidra/releases/download/1.3.0/Sidra-1.3.0-linux-arm64.deb";\n'
+            f'        hash = "{stale_extra}";\n'
+            "      };\n"
+            '  meta = { platforms = [ "x86_64-linux" "aarch64-linux" ]; };\n'
+            "}\n"
+        ),
+    }
+    deb_asset = verified_asset(
+        tmp_path,
+        "Sidra-1.3.0-linux-amd64.deb",
+        b"sidra-1.3.0-deb-bytes",
+        repository="wimpysworld/sidra",
+        tag="1.3.0",
+        asset_id=61,
+    )
+    with (
+        private_workspace(tmp_path) as runtime,
+        patch.object(discovery, "release_details", return_value=("1.3.0", "Sidra desktop", "MIT")),
+        patch.object(discovery, "tag_nix_files", return_value=upstream_files),
+    ):
+        inspected_deb = nix.inspect(deb_asset, policy=POLICY, runtime=runtime, out=tmp_path / "o61")
+        with pytest.raises(NixFailure, match="Unmatched fetchurl block"):
+            nix._rewrite_upstream_nix([inspected_deb])  # pyright: ignore[reportPrivateUsage]
+
+
 def test_inspect_deb_and_zip_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fsys_bytes = io.BytesIO()
     with tarfile.open(fileobj=fsys_bytes, mode="w") as archive:
