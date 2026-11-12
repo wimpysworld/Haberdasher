@@ -124,7 +124,7 @@ Treat the eight package buckets as public:
 | `scoop.wimpys.world` | `haberdasher-scoop` |
 | `nix.wimpys.world` | `haberdasher-nix` |
 
-- Use one dedicated Haberdasher RSA4096 private primary with signing and certification capabilities, without subkeys or per-format keypairs.
+- Use one dedicated Haberdasher RSA4096 private primary with signing and certification capabilities, without subkeys or separate per-format keypairs.
   Sign directly with that primary for APT, RPM, Arch, and Flatpak. Convert the same RSA private numbers to PKCS#8 PEM for Alpine, and derive the `nix.wimpys.world-1` Ed25519 key deterministically from the same RSA private numbers with HKDF-SHA256 for Nix.
 - Keep one canonical private OpenPGP export in local SOPS and GitHub Secrets. An offline backup copies the same key.
   Never generate another key, and do not require a certificate authority or certificate service.
