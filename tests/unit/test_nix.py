@@ -385,6 +385,58 @@ def test_inspect_deb_and_zip_fallback(tmp_path: Path, monkeypatch: pytest.Monkey
                 )
 
 
+def test_generated_install_phases_escape_shell_metacharacters(tmp_path: Path) -> None:
+    weird_bin = "-$(touch pwned) \"quote\" `uname` 'single' ${bad}/tailor"
+    weird_exe = "Tool \"$(touch pwned)\" `uname` 'single' ${bad}"
+    with (
+        private_workspace(tmp_path) as runtime,
+        patch.object(discovery, "release_details", return_value=("v1.4.0", "", "MIT")),
+        patch.object(discovery, "tag_nix_files", return_value=None),
+    ):
+        tar_data = tar_gz((weird_bin, elf64(0x3E, dynamic=False)))
+        tar_item = nix.inspect(
+            verified_asset(tmp_path, "tailor_1.4.0_linux_x86_64.tar.gz", tar_data, asset_id=30),
+            policy=POLICY,
+            runtime=runtime,
+            out=tmp_path / "tar-weird",
+        )
+        tar_expr, _ = nix._tarball_nix([tar_item])  # pyright: ignore[reportPrivateUsage]
+        assert 'install -Dm755 -- ${lib.escapeShellArg source.bin} "$out/bin/tailor"' in tar_expr
+        assert '"${source.bin}"' not in tar_expr
+
+        zip_path = tmp_path / "weird.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(
+                "Tool.app/Contents/Info.plist",
+                plistlib.dumps({"CFBundleExecutable": weird_exe}),
+            )
+            zf.writestr(f"Tool.app/Contents/MacOS/{weird_exe}", thin(ARM))
+        zip_item = nix.inspect(
+            verified_asset(
+                tmp_path, "Tool-1.4.0-mac-arm64.zip", zip_path.read_bytes(), asset_id=31
+            ),
+            policy=POLICY,
+            runtime=runtime,
+            out=tmp_path / "zip-weird",
+        )
+        zip_item_weird_app = replace(
+            zip_item,
+            metadata={**zip_item.metadata, "app": "-Tool \"$(touch pwned)\" `uname` 's'.app"},
+        )
+        zip_expr, _ = nix._fallback_nix([zip_item_weird_app])  # pyright: ignore[reportPrivateUsage]
+        assert 'cp -R -- ${lib.escapeShellArg source.app} "$out/Applications/"' in zip_expr
+        assert (
+            'makeWrapper "$out/Applications/"'
+            '${lib.escapeShellArg "${source.app}/Contents/MacOS/${source.exe}"} '
+            '"$out/bin/tool"' in zip_expr
+        )
+        assert '"${source.app}"' not in zip_expr
+        assert '"$out/Applications/${source.app}/Contents/MacOS/${source.exe}"' not in zip_expr
+        for expr in (tar_expr, zip_expr):
+            parsed = runtime.run(["nix-instantiate", "--parse", "-"], input=expr.encode("utf-8"))
+            assert parsed.returncode == 0, parsed.stderr.decode(errors="replace")
+
+
 def test_inspect_deb_rejects_library_only_package(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

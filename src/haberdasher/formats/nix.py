@@ -819,7 +819,7 @@ def _tarball_nix(items: Sequence[InspectedAsset]) -> tuple[str, tuple[str, ...]]
         "  dontConfigure = true;\n"
         "  dontBuild = true;\n" + fixup_lines + "  installPhase = ''\n"
         "    runHook preInstall\n"
-        f'    install -Dm755 "${{source.bin}}" "$out/bin/{pname}"\n'
+        f'    install -Dm755 -- ${{lib.escapeShellArg source.bin}} "$out/bin/{pname}"\n'
         "    runHook postInstall\n"
         "  '';\n" + _meta_block(first, pname, systems) + "\n}\n"
     )
@@ -905,8 +905,10 @@ def _fallback_nix(items: Sequence[InspectedAsset]) -> tuple[str, tuple[str, ...]
     zip_install = (
         "runHook preInstall\n"
         'mkdir -p "$out/Applications" "$out/bin"\n'
-        'cp -R "${source.app}" "$out/Applications/"\n'
-        f'makeWrapper "$out/Applications/${{source.app}}/Contents/MacOS/${{source.exe}}" "$out/bin/{pname}"\n'
+        'cp -R -- ${lib.escapeShellArg source.app} "$out/Applications/"\n'
+        'makeWrapper "$out/Applications/"'
+        '${lib.escapeShellArg "${source.app}/Contents/MacOS/${source.exe}"} '
+        f'"$out/bin/{pname}"\n'
         "runHook postInstall"
     )
     install_body = (
