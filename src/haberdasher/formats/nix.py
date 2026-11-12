@@ -7,6 +7,7 @@ import io
 import json
 import os
 import plistlib
+import posixpath
 import re
 import shutil
 import struct
@@ -326,6 +327,39 @@ def _upstream_sources(
     return pname, entries
 
 
+_DEB_NON_BIN_DIRS = frozenset(
+    {
+        "doc",
+        "etc",
+        "include",
+        "lib",
+        "lib32",
+        "lib64",
+        "locales",
+        "man",
+        "resources",
+        "share",
+        "var",
+    }
+)
+
+
+def _is_shared_object(path: str) -> bool:
+    lower = path.rsplit("/", 1)[-1].lower()
+    return lower.endswith(".so") or ".so." in lower
+
+
+def _in_deb_bin(rel: str) -> bool:
+    if rel.startswith(("usr/bin/", "bin/")):
+        return True
+    if rel.startswith("opt/"):
+        parts = rel.split("/")
+        return len(parts) >= 2 and not any(
+            part.lower() in _DEB_NON_BIN_DIRS for part in parts[1:-1]
+        )
+    return False
+
+
 def _deb_inspect(asset: VerifiedAsset, runtime: Runtime) -> tuple[str, str, str, str, bool]:
     filename = asset.source.filename
     raw_control = _run(runtime, ["dpkg-deb", "-f", str(asset.local_path)]).decode("utf-8")
@@ -340,31 +374,59 @@ def _deb_inspect(asset: VerifiedAsset, runtime: Runtime) -> tuple[str, str, str,
     fsys = _run(runtime, ["dpkg-deb", "--fsys-tarfile", str(asset.local_path)])
     has_exec = False
     dynamic = False
+    exec_files: set[str] = set()
+    links: dict[str, str] = {}
+    bin_links: list[str] = []
     with tarfile.open(fileobj=io.BytesIO(fsys), mode="r|") as archive:
         for count, member in enumerate(archive, 1):
             if count > MAX_TAR_MEMBERS:
                 raise NixFailure("DEB payload exceeds member limit")
-            if not (member.isfile() or member.issym()):
+            if not (member.isfile() or member.issym() or member.islnk()):
                 continue
-            rel = member.name.removeprefix("./").lstrip("/")
-            in_bin = rel.startswith(("usr/bin/", "bin/", "opt/"))
-            if member.issym() and in_bin:
-                has_exec = True
+            rel = posixpath.normpath(member.name.removeprefix("./").lstrip("/"))
+            if rel in {"", "."} or rel.startswith("../"):
                 continue
-            if not member.isfile():
+            in_bin = _in_deb_bin(rel) and not _is_shared_object(rel)
+            if member.issym() or member.islnk():
+                if member.islnk() or member.linkname.startswith("/"):
+                    target = posixpath.normpath(member.linkname.removeprefix("./").lstrip("/"))
+                else:
+                    target = posixpath.normpath(
+                        posixpath.join(posixpath.dirname(rel), member.linkname)
+                    )
+                if target not in {"", "."} and not target.startswith("../"):
+                    links[rel] = target
+                    if in_bin:
+                        bin_links.append(rel)
                 continue
             extracted = archive.extractfile(member)
             if extracted is None:
                 continue
             data = extracted.read(min(member.size, 16 * 1024 * 1024))
             elf_sys, elf_dyn = elf_binary(data)
+            is_exec_mode = (member.mode & 0o111) != 0 and not _is_shared_object(rel)
             if elf_sys:
                 if elf_sys != system:
                     raise NixFailure(f"{filename}: DEB header {deb_arch} disagrees with {elf_sys}")
-                has_exec = True
                 dynamic = dynamic or elf_dyn
-            elif in_bin and (member.mode & 0o111):
+                if is_exec_mode:
+                    exec_files.add(rel)
+                    if in_bin:
+                        has_exec = True
+            elif is_exec_mode and not data.startswith(b"\x7fELF") and member.size > 0:
+                exec_files.add(rel)
+                if in_bin:
+                    has_exec = True
+    if not has_exec:
+        for link in bin_links:
+            seen: set[str] = set()
+            cur = link
+            while cur in links and cur not in seen and len(seen) < 16:
+                seen.add(cur)
+                cur = links[cur]
+            if cur in exec_files:
                 has_exec = True
+                break
     if not has_exec:
         raise UnsupportedAsset(f"{filename}: DEB contains no executable program")
     return pkg, deb_ver, system, desc, dynamic
