@@ -194,7 +194,12 @@ class RecordedGitHub:
 
 
 def apply_cli(
-    recorded: RecordedGitHub, root: Path, key: DisposableKey, arguments: Sequence[str]
+    recorded: RecordedGitHub,
+    root: Path,
+    key: DisposableKey,
+    arguments: Sequence[str],
+    *,
+    only: str | None = None,
 ) -> publish.RunResult:
     shim = root / "bin"
     shim.mkdir(mode=0o700, exist_ok=True)
@@ -292,8 +297,20 @@ os.execv({target!r},[{target!r},*sys.argv[1:]])
 """,
         )
     path = str(shim) + ":" + os.environ["HABERDASHER_TOOL_PATH"]
+    invocation = (
+        [sys.executable, "-m", "haberdasher", *arguments]
+        if only is None
+        else [
+            sys.executable,
+            "-c",
+            "from haberdasher import cli; "
+            f"cli.PUBLIC = {{{only!r}: cli.PUBLIC[{only!r}]}}; "
+            "raise SystemExit(cli.main())",
+            *arguments,
+        ]
+    )
     result = subprocess.run(
-        [sys.executable, "-m", "haberdasher", *arguments],
+        invocation,
         cwd=root / "work",
         env={
             "PATH": path,
@@ -685,6 +702,7 @@ def test_recorded_pipeline_and_full_rerun(
                     fixtures.root,
                     key,
                     arguments,
+                    only=name if name == "apt" else None,
                 )
             with private_workspace() as runtime:
                 recorded.bind(runtime)
@@ -716,12 +734,16 @@ def test_recorded_pipeline_and_full_rerun(
 
         if interrupted:
             monkeypatch.chdir(fixtures.root / "work")
-            with patch.object(cli, "private_workspace", recorded_workspace):
+            with (
+                patch.object(cli, "private_workspace", recorded_workspace),
+                patch.object(cli, "PUBLIC", {name: PUBLIC[name]}),
+            ):
                 assert cli.main(arguments) == 0
             first = printed_result(capsys.readouterr().out)
         else:
             first = reconcile()
         assert first.changed and first.published_objects > 0
+        assert list((local_root / "public").iterdir()) == [bucket]
         assert not (bucket / state.LOCK_KEY).exists()
         first_page = check_page(bucket, name, key.fingerprint)
         bootstrap_paths = sorted((bucket / "keys").iterdir())

@@ -385,6 +385,58 @@ def test_inspect_deb_and_zip_fallback(tmp_path: Path, monkeypatch: pytest.Monkey
                 )
 
 
+def test_inspect_deb_rejects_library_only_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fsys_bytes = io.BytesIO()
+    with tarfile.open(fileobj=fsys_bytes, mode="w") as archive:
+        lib_payload = elf64(0x3E, dynamic=True, e_type=3)
+        lib_info = tarfile.TarInfo("./usr/lib/libfoo.so.1")
+        lib_info.size = len(lib_payload)
+        lib_info.mode = 0o755
+        archive.addfile(lib_info, io.BytesIO(lib_payload))
+        doc_payload = b"Copyright\n"
+        doc_info = tarfile.TarInfo("./usr/share/doc/libfoo1/copyright")
+        doc_info.size = len(doc_payload)
+        doc_info.mode = 0o644
+        archive.addfile(doc_info, io.BytesIO(doc_payload))
+
+    with private_workspace(tmp_path) as runtime:
+
+        def fake_run(
+            argv: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            input: bytes | None = None,
+            timeout: float = 120,
+            env_kind: str = "native",
+            progress: Callable[[str], None] | None = None,
+        ) -> subprocess.CompletedProcess[bytes]:
+            if argv[0] == "gpgconf":
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            if argv[:2] == ["dpkg-deb", "-f"]:
+                control = (
+                    b"Package: libfoo1\nVersion: 1.0.0-1\nArchitecture: amd64\n"
+                    b"Description: Shared library only\n"
+                )
+                return subprocess.CompletedProcess(argv, 0, control, b"")
+            assert argv[:2] == ["dpkg-deb", "--fsys-tarfile"]
+            return subprocess.CompletedProcess(argv, 0, fsys_bytes.getvalue(), b"")
+
+        monkeypatch.setattr(runtime, "run", fake_run)
+        with (
+            patch.object(discovery, "release_details", return_value=("v1.0.0", "", "MIT")),
+            patch.object(discovery, "tag_nix_files", return_value=None),
+            pytest.raises(UnsupportedAsset, match="DEB contains no executable program"),
+        ):
+            nix.inspect(
+                verified_asset(tmp_path, "libfoo1_1.0.0_amd64.deb", b"deb", asset_id=23),
+                policy=POLICY,
+                runtime=runtime,
+                out=tmp_path / "lib-out",
+            )
+
+
 def test_compare_and_validate_retained_and_prepared(tmp_path: Path) -> None:
     with private_workspace(tmp_path) as runtime:
         left = NativeIdentity("nix", "tailor", "x86_64-linux", "0.6.0")
