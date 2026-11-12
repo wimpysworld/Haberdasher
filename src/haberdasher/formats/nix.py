@@ -276,9 +276,9 @@ def _brace_blocks(
 
 def _upstream_sources(
     nix_files: Mapping[str, str], ver: str
-) -> tuple[str, list[tuple[str, str, str]]]:
+) -> tuple[str, list[tuple[str, str, str, bool]]]:
     pname = ""
-    entries: list[tuple[str, str, str]] = []
+    entries: list[tuple[str, str, str, bool]] = []
     for rel_path, content in sorted(nix_files.items()):
         if rel_path == "flake.nix":
             continue
@@ -295,12 +295,13 @@ def _upstream_sources(
                 expanded = url_match[1].replace("${version}", ver)
                 if pname:
                     expanded = expanded.replace("${pname}", pname)
-                entries.append((rel_path, match[1], expanded))
+                entries.append((rel_path, match[1], expanded, False))
                 matched_spans.append(span)
         platforms = re.findall(
             r'"(x86_64-linux|aarch64-linux|x86_64-darwin|aarch64-darwin)"',
             next(iter(re.findall(r"\bplatforms\s*=\s*\[([^\]]*)\]", content)), ""),
         )
+        standalone_urls: list[str] = []
         for _match, inner, span in _brace_blocks(content, r"\bfetchurl\s*\{"):
             if any(start <= span[0] < end for start, end in matched_spans):
                 continue
@@ -311,19 +312,43 @@ def _upstream_sources(
             expanded = url_match[1].replace("${version}", ver)
             if pname:
                 expanded = expanded.replace("${pname}", pname)
+            standalone_urls.append(expanded)
+        darwin_both = {"aarch64-darwin", "x86_64-darwin"}.issubset(platforms)
+        for expanded in standalone_urls:
             if len(platforms) == 1:
-                entries.append((rel_path, platforms[0], expanded))
-            else:
-                lower = expanded.lower()
-                is_mac = "darwin" in rel_path or any(k in lower for k in ("mac", "darwin", "osx"))
-                is_arm = any(k in lower for k in ("arm64", "aarch64"))
-                inferred = (
-                    ("aarch64-darwin" if is_arm else "x86_64-darwin")
-                    if is_mac
-                    else ("aarch64-linux" if is_arm else "x86_64-linux")
-                )
-                if not platforms or inferred in platforms:
-                    entries.append((rel_path, inferred, expanded))
+                entries.append((rel_path, platforms[0], expanded, False))
+                continue
+            lower = expanded.lower()
+            fname_lower = lower.rsplit("/", 1)[-1]
+            is_mac = (
+                "darwin" in rel_path
+                or lower.endswith(".dmg")
+                or (bool(platforms) and set(platforms) <= {"aarch64-darwin", "x86_64-darwin"})
+                or any(k in lower for k in ("mac", "darwin", "osx"))
+            )
+            is_arm = any(k in lower for k in ("arm64", "aarch64"))
+            is_x86 = any(k in fname_lower for k in ("x86_64", "x64", "amd64", "intel"))
+            has_universal = "universal" in fname_lower or (
+                "universal" in lower and not is_arm and not is_x86
+            )
+            if is_mac and (
+                has_universal
+                or (darwin_both and len(standalone_urls) == 1 and not is_arm and not is_x86)
+            ):
+                if not platforms or darwin_both:
+                    entries.append((rel_path, "aarch64-darwin", expanded, True))
+                elif "aarch64-darwin" in platforms:
+                    entries.append((rel_path, "aarch64-darwin", expanded, False))
+                elif "x86_64-darwin" in platforms:
+                    entries.append((rel_path, "x86_64-darwin", expanded, False))
+                continue
+            inferred = (
+                ("aarch64-darwin" if is_arm else "x86_64-darwin")
+                if is_mac
+                else ("aarch64-linux" if is_arm else "x86_64-linux")
+            )
+            if not platforms or inferred in platforms:
+                entries.append((rel_path, inferred, expanded, False))
     return pname, entries
 
 
@@ -463,19 +488,20 @@ def inspect(
         pname, entries = _upstream_sources(upstream, ver)
         pname = pname or repo_tool
         matches = [
-            (rel_path, system, url)
-            for rel_path, system, url in entries
+            (rel_path, system, url, universal)
+            for rel_path, system, url, universal in entries
             if url == asset.source.public_url or url.rsplit("/", 1)[-1] == filename
         ]
         if not matches:
             raise UnsupportedAsset(
                 f"{filename}: not referenced by {asset.source.repository} nix/ expressions"
             )
-        if len({system for _, system, _ in matches}) != 1:
+        if len({(system, universal) for _, system, _, universal in matches}) != 1:
             raise NixFailure(f"{filename}: ambiguous system mapping in nix/ expressions")
-        system = matches[0][1]
-        if system not in policy.architectures:
-            raise UnsupportedAsset(f"{filename}: unsupported Nix system {system!r}")
+        _, system, _, universal = matches[0]
+        for sys_name in ("aarch64-darwin", "x86_64-darwin") if universal else (system,):
+            if sys_name not in policy.architectures:
+                raise UnsupportedAsset(f"{filename}: unsupported Nix system {sys_name!r}")
         if not mirror.valid(pname, ver):
             raise UnsupportedAsset(f"{filename}: invalid Nix package name or version")
         metadata: dict[str, JSONValue] = {
@@ -485,6 +511,8 @@ def inspect(
             "tag": tag,
             "nix_files": dict(upstream),
         }
+        if universal:
+            metadata["universal"] = True
         return InspectedAsset(
             asset, NativeIdentity("nix", pname, system, ver), metadata, {}, "unsigned"
         )
@@ -700,7 +728,7 @@ def _rewrite_upstream_nix(
     }
     admitted_systems: set[str] = set()
     for item in items:
-        admitted_systems.add(item.identity.architecture)
+        admitted_systems.update(_item_systems(item))
         sri = _sri(item.verified.sha256)
         pub_url = item.verified.source.public_url
         fname = item.verified.source.filename

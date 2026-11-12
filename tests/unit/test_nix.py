@@ -303,6 +303,63 @@ def test_inspect_upstream_nix_rewrites_stale_tag_hashes_and_rejects_unreferenced
     )
 
 
+@pytest.mark.parametrize(
+    "platforms_expr",
+    [
+        '[ "aarch64-darwin" "x86_64-darwin" ]',
+        "lib.platforms.darwin",
+    ],
+)
+def test_inspect_upstream_nix_universal_darwin_dmg(tmp_path: Path, platforms_expr: str) -> None:
+    stale_darwin = "sha256-bf20810ca11e1d498bf00c11b0c9f085dc48ec94d5bc543d0f9b10862e39a409"
+    upstream_files = {
+        "flake.nix": '{ description = "Sidra"; outputs = _: {}; }\n',
+        "nix/darwin.nix": (
+            "{\n"
+            "  lib,\n"
+            "  stdenvNoCC,\n"
+            "  fetchurl,\n"
+            '  version ? "1.2.1",\n'
+            "}:\n"
+            "stdenvNoCC.mkDerivation {\n"
+            '  pname = "sidra";\n'
+            "  inherit version;\n"
+            "  src = fetchurl {\n"
+            '    url = "https://github.com/wimpysworld/sidra/releases/download/${version}/Sidra-${version}-mac-universal.dmg";\n'
+            f'    hash = "{stale_darwin}";\n'
+            "  };\n"
+            f"  meta = {{ platforms = {platforms_expr}; }};\n"
+            "}\n"
+        ),
+    }
+    dmg_asset = verified_asset(
+        tmp_path,
+        "Sidra-1.3.0-mac-universal.dmg",
+        b"sidra-1.3.0-universal-dmg-bytes",
+        repository="wimpysworld/sidra",
+        tag="1.3.0",
+        asset_id=15,
+    )
+    with (
+        private_workspace(tmp_path) as runtime,
+        patch.object(discovery, "release_details", return_value=("1.3.0", "Sidra desktop", "MIT")),
+        patch.object(discovery, "tag_nix_files", return_value=upstream_files),
+    ):
+        inspected_dmg = nix.inspect(dmg_asset, policy=POLICY, runtime=runtime, out=tmp_path / "ou")
+
+    assert inspected_dmg.identity == NativeIdentity("nix", "sidra", "aarch64-darwin", "1.3.0")
+    assert inspected_dmg.metadata["universal"] is True
+    assert nix._item_systems(inspected_dmg) == ("aarch64-darwin", "x86_64-darwin")  # pyright: ignore[reportPrivateUsage]
+
+    pkg_files, systems = nix._rewrite_upstream_nix([inspected_dmg])  # pyright: ignore[reportPrivateUsage]
+    assert systems == ("x86_64-darwin", "aarch64-darwin")
+    assert stale_darwin not in pkg_files["pkgs/sidra/darwin.nix"]
+    assert sri_hash(dmg_asset.sha256) in pkg_files["pkgs/sidra/darwin.nix"]
+    flake_text = nix._flake_nix({"sidra": systems}, "github:NixOS/nixpkgs/nixos-unstable")  # pyright: ignore[reportPrivateUsage]
+    assert "x86_64-darwin =" in flake_text
+    assert "aarch64-darwin =" in flake_text
+
+
 def test_inspect_deb_and_zip_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fsys_bytes = io.BytesIO()
     with tarfile.open(fileobj=fsys_bytes, mode="w") as archive:
