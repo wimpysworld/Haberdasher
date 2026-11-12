@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -45,10 +46,8 @@ PRIVATE_KEY_HEADER = re.compile(rb"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY")
 NIX_CANDIDATE_KEY = re.compile(rb"[A-Za-z0-9_.-]{1,128}:([A-Za-z0-9+/]{86}==)(?![A-Za-z0-9+/=])")
 OPENPGP_SUFFIXES = (".asc", ".gpg", ".pgp", ".sig")
 OPENPGP_SECRET_TAGS = frozenset({5, 7})
-_ED_P = (1 << 255) - 19
-_ED_D = (-121665 * pow(121666, -1, _ED_P)) % _ED_P
-_ED_BY = (4 * pow(5, -1, _ED_P)) % _ED_P
-_ED_BX = 15112221349535400772501151409588531511454012693041857206046113283949847762202
+_ED25519_PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
+_ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 
 
 class StorageError(RuntimeError):
@@ -248,42 +247,32 @@ def _dearmour(data: bytes) -> Generator[bytes]:
             yield base64.b64decode(b"".join(lines), validate=True)
 
 
-def _ed_add(
-    left: tuple[int, int, int, int], right: tuple[int, int, int, int]
-) -> tuple[int, int, int, int]:
-    x1, y1, z1, t1 = left
-    x2, y2, z2, t2 = right
-    a = ((y1 - x1) * (y2 - x2)) % _ED_P
-    b = ((y1 + x1) * (y2 + x2)) % _ED_P
-    c = (t1 * 2 * _ED_D * t2) % _ED_P
-    d = (z1 * 2 * z2) % _ED_P
-    e = (b - a) % _ED_P
-    f = (d - c) % _ED_P
-    g = (d + c) % _ED_P
-    h = (b + a) % _ED_P
-    return (e * f) % _ED_P, (g * h) % _ED_P, (f * g) % _ED_P, (e * h) % _ED_P
-
-
 def _is_ed25519_secret_key(raw: bytes) -> bool:
     """Return True when `raw` is a 64-byte RFC 8032 Ed25519 `(seed_32 || pubkey_32)` pair."""
     if len(raw) != 64:
         return False
-    digest = bytearray(hashlib.sha512(raw[:32]).digest()[:32])
-    digest[0] &= 248
-    digest[31] = (digest[31] & 63) | 64
-    scalar = int.from_bytes(digest, "little")
-    point = (0, 1, 1, 0)
-    step_point = (_ED_BX, _ED_BY, 1, (_ED_BX * _ED_BY) % _ED_P)
-    while scalar:
-        if scalar & 1:
-            point = _ed_add(point, step_point)
-        step_point = _ed_add(step_point, step_point)
-        scalar >>= 1
-    x, y, z, _ = point
-    inv_z = pow(z, -1, _ED_P)
-    x = (x * inv_z) % _ED_P
-    y = (y * inv_z) % _ED_P
-    return (y | ((x & 1) << 255)).to_bytes(32, "little") == raw[32:]
+    path = os.environ.get("HABERDASHER_TOOL_PATH") or os.environ.get("PATH", os.defpath)
+    executable = shutil.which("openssl", path=path)
+    if executable is None:
+        raise StorageError("Pinned openssl is required to inspect candidate Nix keys")
+    try:
+        result = subprocess.run(
+            [executable, "pkey", "-inform", "DER", "-pubout", "-outform", "DER"],
+            env={"PATH": path, "LC_ALL": "C"},
+            input=_ED25519_PKCS8_PREFIX + raw[:32],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise StorageError("OpenSSL Ed25519 key check failed") from error
+    if (
+        result.returncode != 0
+        or len(result.stdout) != 44
+        or not result.stdout.startswith(_ED25519_SPKI_PREFIX)
+    ):
+        raise StorageError("OpenSSL Ed25519 key check failed")
+    return result.stdout[12:] == raw[32:]
 
 
 def _guard(ref: ObjectRef, path: Path) -> None:
