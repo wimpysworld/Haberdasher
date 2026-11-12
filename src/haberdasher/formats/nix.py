@@ -1396,7 +1396,8 @@ def prepare(
             continue
         target = f"git+file://{repo}#packages.{host_system}.{pname}"
         out_path = _nix(runtime, "eval", "--raw", f"{target}.outPath", flakes=True).decode().strip()
-        out_hash = out_path.removeprefix("/nix/store/").split("-", 1)[0]
+        out_key = out_path.removeprefix("/nix/store/")
+        out_hash = out_key.split("-", 1)[0]
         if f"{out_hash}.narinfo" in old_refs:
             continue
         _nix(runtime, "build", "--no-link", "--print-out-paths", target, flakes=True)
@@ -1410,15 +1411,18 @@ def prepare(
             "path-info",
         )
         info_map = _mapping(info_doc.get("info"), "path-info map")
+        export_keys.add(out_key)
         for store_key, raw_entry in info_map.items():
             entry = _mapping(raw_entry, "path-info entry")
+            if store_key == out_key:
+                continue
             h32 = store_key.split("-", 1)[0]
             sigs = entry.get("signatures", [])
             sigs_list = sigs if isinstance(sigs, list) else []
-            is_local = all(
-                isinstance(sig, str) and sig.startswith(f"{NIX_KEY_NAME}:") for sig in sigs_list
+            is_upstream = any(
+                isinstance(sig, str) and sig.startswith("cache.nixos.org-1:") for sig in sigs_list
             )
-            if is_local and f"{h32}.narinfo" not in old_refs:
+            if not is_upstream and f"{h32}.narinfo" not in old_refs:
                 export_keys.add(store_key)
             else:
                 stub_entries[store_key] = entry

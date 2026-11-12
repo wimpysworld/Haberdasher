@@ -12,6 +12,7 @@ import tarfile
 import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,7 +45,7 @@ from haberdasher.formats.nix import (
     NixFailure,
 )
 from haberdasher.runtime import private_workspace
-from haberdasher.signing import NIX_KEY_NAME
+from haberdasher.signing import NIX_KEY_NAME, SigningSession
 from tests.unit.test_brew import ARM, INTEL, fat, thin
 
 POLICY = Config(("wimpysworld/tailor",)).format_policy("nix")
@@ -1165,3 +1166,257 @@ def test_per_system_derivation_invariance_when_sibling_systems_added(tmp_path: P
         assert real_paths["fb_solo_dyn"] == real_paths["fb_multi_dyn"]
         assert real_paths["fb_solo_static"] == real_paths["fb_multi_static"]
         assert real_paths["fb_solo_zip"] == real_paths["fb_multi_zip"]
+
+
+@pytest.mark.parametrize(
+    "out_sigs",
+    [
+        ["host-1:hostsig=="],
+        ["flakehub-1:thirdpartysig=="],
+    ],
+)
+def test_prepare_exports_signed_out_path_and_stubs_only_upstream_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, out_sigs: list[str]
+) -> None:
+    flake_key_1 = f"{'1' * 32}-source"
+    out_key_1 = f"{'2' * 32}-tailor-0.6.0"
+    host_dep_key = f"{'3' * 32}-local-wrapper-1.0"
+    third_party_dep_key = f"{'4' * 32}-flakehub-dep-1.0"
+    unsigned_dep_key = f"{'5' * 32}-unsigned-dep-1.0"
+    upstream_dep_key = f"{'6' * 32}-glibc-2.40"
+    mixed_upstream_dep_key = f"{'7' * 32}-zlib-1.3.1"
+    flake_key_2 = f"{'8' * 32}-source"
+    out_key_2 = f"{'9' * 32}-other-1.0.0"
+
+    def info_entry(refs: list[str], sigs: list[str]) -> dict[str, JSONValue]:
+        return {
+            "narHash": f"sha256-{'A' * 43}=",
+            "narSize": 128,
+            "references": list(refs),
+            "signatures": list(sigs),
+        }
+
+    closures: dict[str, dict[str, JSONValue]] = {
+        f"/nix/store/{out_key_1}": {
+            out_key_1: info_entry(
+                [
+                    host_dep_key,
+                    third_party_dep_key,
+                    unsigned_dep_key,
+                    upstream_dep_key,
+                    mixed_upstream_dep_key,
+                ],
+                out_sigs,
+            ),
+            host_dep_key: info_entry([upstream_dep_key], ["host-1:depsig=="]),
+            third_party_dep_key: info_entry([], ["flakehub-1:depsig=="]),
+            unsigned_dep_key: info_entry([], []),
+            upstream_dep_key: info_entry([], ["cache.nixos.org-1:upstreamsig=="]),
+            mixed_upstream_dep_key: info_entry(
+                [], ["host-1:mirrorsig==", "cache.nixos.org-1:upstreamsig=="]
+            ),
+        },
+        f"/nix/store/{out_key_2}": {
+            out_key_2: info_entry([host_dep_key, upstream_dep_key], out_sigs),
+            host_dep_key: info_entry([upstream_dep_key], ["host-1:depsig=="]),
+            upstream_dep_key: info_entry([], ["cache.nixos.org-1:upstreamsig=="]),
+        },
+    }
+
+    with private_workspace(tmp_path) as runtime:
+        orig_run = runtime.run
+        current_flake = flake_key_1
+        built_targets: list[str] = []
+        copied_batches: list[tuple[tuple[str, ...], set[str]]] = []
+        verified_batches: list[tuple[tuple[str, ...], set[str]]] = []
+
+        def fake_run(
+            argv: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            input: bytes | None = None,
+            timeout: float = 120,
+            env_kind: str = "native",
+            progress: Callable[[str], None] | None = None,
+        ) -> subprocess.CompletedProcess[bytes]:
+            if argv[0] == "gpgconf":
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            if argv[0] == "haberdasher-nixpkgs":
+                payload = {
+                    "locked": {
+                        "owner": "NixOS",
+                        "repo": "nixpkgs",
+                        "rev": "0" * 40,
+                        "type": "github",
+                    },
+                    "original": {
+                        "owner": "NixOS",
+                        "ref": "nixos-unstable",
+                        "repo": "nixpkgs",
+                        "type": "github",
+                    },
+                }
+                return subprocess.CompletedProcess(argv, 0, json.dumps(payload).encode(), b"")
+            if argv[0] == "nixfmt":
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            if argv[0] != "nix":
+                return orig_run(
+                    argv,
+                    cwd=cwd,
+                    input=input,
+                    timeout=timeout,
+                    env_kind=env_kind,  # type: ignore[arg-type]
+                    progress=progress,
+                )
+            args = list(argv[3:])
+            if args[:2] == ["store", "add-file"]:
+                return subprocess.CompletedProcess(
+                    argv, 0, f"/nix/store/{'0' * 32}-seed\n".encode(), b""
+                )
+            if args[:2] == ["flake", "archive"]:
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps({"path": f"/nix/store/{current_flake}"}).encode(), b""
+                )
+            if args[:4] == ["eval", "--raw", "--impure", "--expr"]:
+                return subprocess.CompletedProcess(argv, 0, b"x86_64-linux\n", b"")
+            if args[:2] == ["eval", "--raw"]:
+                expr = args[2]
+                out_key = out_key_1 if expr.endswith(".tailor.outPath") else out_key_2
+                return subprocess.CompletedProcess(argv, 0, f"/nix/store/{out_key}\n".encode(), b"")
+            if args[0] == "build":
+                built_targets.append(args[-1])
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            if args[0] == "path-info":
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps({"info": closures[args[-1]]}).encode(), b""
+                )
+            if args[0] == "copy":
+                to_uri = args[args.index("--to") + 1]
+                cache_dir = Path(to_uri.removeprefix("file://").split("?", 1)[0])
+                store_paths = tuple(arg for arg in args if arg.startswith("/nix/store/"))
+                pre_narinfos = {p.name for p in cache_dir.glob("*.narinfo")}
+                copied_batches.append((store_paths, pre_narinfos))
+                for store_path in store_paths:
+                    store_key = store_path.removeprefix("/nix/store/")
+                    h32 = store_key.split("-", 1)[0]
+                    nar_rel = f"nar/{h32}{'0' * 20}.nar.zst"
+                    nar_target = cache_dir / nar_rel
+                    nar_target.parent.mkdir(parents=True, exist_ok=True)
+                    atomic_write(nar_target, f"nar-{store_key}".encode())
+                    narinfo = (
+                        f"StorePath: {store_path}\n"
+                        f"URL: {nar_rel}\n"
+                        "Compression: zstd\n"
+                        f"Sig: {NIX_KEY_NAME}:sig==\n"
+                    )
+                    atomic_write(cache_dir / f"{h32}.narinfo", narinfo.encode("utf-8"))
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            assert args[:2] == ["store", "verify"]
+            store_uri = args[args.index("--store") + 1]
+            cache_dir = Path(store_uri.removeprefix("file://"))
+            store_paths = tuple(arg for arg in args if arg.startswith("/nix/store/"))
+            verified_batches.append((store_paths, {p.name for p in cache_dir.glob("*.narinfo")}))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        monkeypatch.setattr(runtime, "run", fake_run)
+        secret_file = tmp_path / "nix.sec"
+        public_file = tmp_path / "nix.pub"
+        secret_file.write_text(f"{NIX_KEY_NAME}:{'B' * 86}==\n", encoding="utf-8")
+        public_file.write_text(f"{PUB_VALUE}\n", encoding="utf-8")
+        signer = SigningSession(runtime, tmp_path / "gnupg", FINGERPRINT)
+
+        def make_admitted(name: str, version: str, asset_id: int) -> AdmittedAsset:
+            v_asset = verified_asset(
+                tmp_path,
+                f"{name}_{version}_linux_x86_64.tar.gz",
+                tar_gz((name, elf64(0x3E, dynamic=False))),
+                repository=f"wimpysworld/{name}",
+                tag=f"v{version}",
+                asset_id=asset_id,
+            )
+            return AdmittedAsset(
+                InspectedAsset(
+                    v_asset,
+                    NativeIdentity("nix", name, "x86_64-linux", version),
+                    {"mode": "tarball", "binary": name, "dynamic_elf": False},
+                    {},
+                    "unsigned",
+                ),
+                "preserve",
+                v_asset.sha256,
+            )
+
+        with patch.object(signer, "nix_key", return_value=(secret_file, public_file, PUB_VALUE)):
+            prepared1 = nix.prepare(
+                [make_admitted("tailor", "0.6.0", 70)],
+                RetainedFormat("nix", (), (), {}, ()),
+                policy=POLICY,
+                runtime=runtime,
+                signer=signer,
+                now=datetime(2026, 1, 1, tzinfo=UTC),
+                out=tmp_path / "prep1",
+            )
+
+            expected_export_1 = tuple(
+                sorted(
+                    f"/nix/store/{key}"
+                    for key in (
+                        flake_key_1,
+                        out_key_1,
+                        host_dep_key,
+                        third_party_dep_key,
+                        unsigned_dep_key,
+                    )
+                )
+            )
+            assert len(copied_batches) == 1 and len(verified_batches) == 1
+            copied_1, stubs_before_copy_1 = copied_batches[0]
+            verified_1, narinfos_before_verify_1 = verified_batches[0]
+            assert copied_1 == expected_export_1
+            assert verified_1 == expected_export_1
+            assert stubs_before_copy_1 == {f"{'6' * 32}.narinfo", f"{'7' * 32}.narinfo"}
+            assert f"{'6' * 32}.narinfo" not in narinfos_before_verify_1
+            assert f"{'7' * 32}.narinfo" not in narinfos_before_verify_1
+
+            gen1_keys = {ref.key for ref in prepared1.retained.objects}
+            for exported_h32 in ("1" * 32, "2" * 32, "3" * 32, "4" * 32, "5" * 32):
+                assert f"{exported_h32}.narinfo" in gen1_keys
+            for stubbed_h32 in ("6" * 32, "7" * 32):
+                assert f"{stubbed_h32}.narinfo" not in gen1_keys
+
+            current_flake = flake_key_2
+            retained1 = replace(
+                prepared1.retained,
+                metadata={
+                    **prepared1.retained.metadata,
+                    "etags": {entry: '"etag"' for entry in nix._ENTRIES},  # pyright: ignore[reportPrivateUsage]
+                },
+            )
+            prepared2 = nix.prepare(
+                [make_admitted("other", "1.0.0", 71)],
+                retained1,
+                policy=POLICY,
+                runtime=runtime,
+                signer=signer,
+                now=datetime(2026, 1, 2, tzinfo=UTC),
+                out=tmp_path / "prep2",
+            )
+
+            assert len(built_targets) == 2
+            assert built_targets[1].endswith("#packages.x86_64-linux.other")
+            expected_export_2 = tuple(
+                sorted(f"/nix/store/{key}" for key in (flake_key_2, out_key_2))
+            )
+            copied_2, stubs_before_copy_2 = copied_batches[1]
+            verified_2, narinfos_before_verify_2 = verified_batches[1]
+            assert copied_2 == expected_export_2
+            assert verified_2 == expected_export_2
+            assert stubs_before_copy_2 == {f"{'3' * 32}.narinfo", f"{'6' * 32}.narinfo"}
+            assert f"{'3' * 32}.narinfo" not in narinfos_before_verify_2
+            assert f"{'6' * 32}.narinfo" not in narinfos_before_verify_2
+
+            gen2_keys = {ref.key for ref in prepared2.retained.objects}
+            assert f"{'8' * 32}.narinfo" in gen2_keys
+            assert f"{'9' * 32}.narinfo" in gen2_keys
+            assert f"{'3' * 32}.narinfo" in gen2_keys
+            assert f"{'6' * 32}.narinfo" not in gen2_keys
