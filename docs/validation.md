@@ -38,7 +38,7 @@ The first command builds the current system's checks. The second evaluates all d
 | Locked publication | `tests/unit/test_publish.py`, `test_storage.py` | Bucket locks, `unlock`, conditional writes and deletes, unchanged reruns, late assets, a new latest release that keeps the published version, unsupported assets skipped with one line, interruptions before and after an entry write followed by a full rerun |
 | Hosted workflow | `tests/unit/test_publish_workflow.py` | Workflow gates, step inputs, and the exact publish command, with a synthetic `nix` |
 | Storage clients | `tests/native/test_storage_clients.py` | Native transport against local protocol fixtures, not real R2 permissions |
-| Native adapters | `tests/native/test_{apt,rpm,arch,apk,flatpak}.py` | Retained state, install/update, rejection cases, signed upstream packages, local HTTP acquisition |
+| Native adapters | `tests/native/test_{apt,rpm,arch,apk,flatpak,brew,scoop,nix}.py` | Retained state, install/update, rejection cases, signed upstream packages, local HTTP acquisition |
 | Served trust | `tests/native/test_pipeline.py` | Fetched public keys, full independent fixture fingerprint, fresh and existing strict clients |
 | Repository pages | `tests/unit/test_site.py`, `test_publish.py`, `tests/native/test_pipeline.py` | Escaping, the file tree with the Flatpak `objects/` line, install sections, the content hash, the plan line, an `index.html` with pinned theme assets in each bucket, and no page write on an unchanged rerun |
 

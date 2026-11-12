@@ -1,8 +1,8 @@
 # Native client setup
 
-In each signed package repository (APT, RPM, Arch, Alpine, and Flatpak), the client trusts the Haberdasher public key for that repository, with native signature checks enabled.
+In each signed package repository (APT, RPM, Arch, Alpine, Flatpak, and Nix), the client trusts the Haberdasher public key for that repository, with native signature checks enabled.
 
-For the setup and install commands, use the page of each repository: [APT](https://apt.wimpys.world/), [RPM](https://rpm.wimpys.world/), [Arch Linux](https://pkg.wimpys.world/), [Alpine Linux](https://apk.wimpys.world/), [Flatpak](https://flatpak.wimpys.world/), [Homebrew](https://brew.wimpys.world/), and [Scoop](https://scoop.wimpys.world/). Each page lists its packages and published files. This guide explains the trust model and the tested client configuration. The Homebrew and Scoop repositories are not signed, so they have no key to trust. They rely on HTTPS and the `sha256` in each cask or the `hash` in each manifest.
+For the setup and install commands, use the page of each repository: [APT](https://apt.wimpys.world/), [RPM](https://rpm.wimpys.world/), [Arch Linux](https://pkg.wimpys.world/), [Alpine Linux](https://apk.wimpys.world/), [Flatpak](https://flatpak.wimpys.world/), [Homebrew](https://brew.wimpys.world/), [Scoop](https://scoop.wimpys.world/), and [Nix](https://nix.wimpys.world/). Each page lists its packages and published files. This guide explains the trust model and the tested client configuration. The Homebrew and Scoop repositories are not signed, so they have no key to trust. They rely on HTTPS and the `sha256` in each cask or the `hash` in each manifest.
 
 The native tests run pinned Nix clients on `x86_64-linux` against disposable roots and loopback HTTP. They do not cover official distribution images, public HTTPS, host installation, or the execution of an installed application.
 
@@ -143,6 +143,54 @@ flatpak --user install wimpysworld APP_ID
 ```
 
 Haberdasher signs every commit and the summary with its own key, and removes any upstream commit signature. Do not disable commit or summary verification. `tests/native/test_flatpak.py` adds the publisher from the published file, with a local runtime provider that has a separate key, and checks the remote configuration and deployed data. It also installs from a `.flatpakref` file whose `RuntimeRepo` names a loopback runtime repository, and checks that Flatpak adds that runtime remote with GPG verification. No installed application executes.
+
+## Nix
+
+The Nix binary cache public key appears at `https://nix.wimpys.world/keys/haberdasher-nix.pub` with the first published package. Haberdasher derives the `nix.wimpys.world-1` Ed25519 key deterministically from the RSA4096 primary key with HKDF-SHA256.
+
+Verify `https://nix.wimpys.world/keys/haberdasher.asc` or `haberdasher.gpg` against your independently verified primary fingerprint first, then read the binary cache public key from the same origin:
+
+```sh
+curl -fsSL https://nix.wimpys.world/keys/haberdasher.asc | gpg --show-keys
+curl -fsSL https://nix.wimpys.world/keys/haberdasher-nix.pub
+```
+
+Add the binary cache and its `nix.wimpys.world-1:<base64>` public key to your NixOS configuration:
+
+```nix
+nix.settings = {
+  extra-substituters = [ "https://nix.wimpys.world" ];
+  extra-trusted-public-keys = [ "nix.wimpys.world-1:<base64>" ];
+};
+```
+
+On standalone Nix installations, add the equivalent lines to `/etc/nix/nix.conf`:
+
+```ini
+extra-substituters = https://nix.wimpys.world
+extra-trusted-public-keys = nix.wimpys.world-1:<base64>
+```
+
+Add the flake input to `flake.nix`:
+
+```nix
+inputs.haberdasher.url = "git+https://nix.wimpys.world/packages.git";
+```
+
+Or install a package directly into your profile:
+
+```sh
+nix profile add 'git+https://nix.wimpys.world/packages.git#<package>'
+```
+
+Haberdasher tags each commit in `packages.git` at `refs/tags/<rev>` and exports the archived flake source path to the signed binary cache. Locked `flake.lock` inputs substitute the flake tree and `x86_64-linux` store paths from the binary cache without shallow Git fetches. In tests, pass `--max-jobs 0` to verify that Nix substitutes from the signed binary cache instead of building locally.
+
+To remove a package and the binary cache configuration:
+
+```sh
+nix profile remove <package>
+sudo sed -i '/nix\.wimpys\.world/d' /etc/nix/nix.conf
+```
 
 ## Verification
 

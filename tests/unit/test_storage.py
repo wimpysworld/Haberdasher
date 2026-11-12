@@ -990,6 +990,22 @@ ARMOURED_PUBLIC = (
     + b"\n=abcd\n-----END PGP PUBLIC KEY BLOCK-----\n"
 )
 PACKAGE_SIZED = bytes(1024 * 1024 - 12)
+# RFC 8032 §7.1 Test 1 Ed25519 keypair: 32-byte seed || 32-byte public key.
+_ED25519_SEED = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+_ED25519_PUB = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+NIX_SECRET_KEY = b"nix.wimpys.world-1:" + base64.b64encode(_ED25519_SEED + _ED25519_PUB) + b"\n"
+NIX_PUBLIC_KEY = b"nix.wimpys.world-1:" + base64.b64encode(_ED25519_PUB) + b"\n"
+# RFC 8032 §7.1 Test 1 64-byte signature over empty message (not a seed||pubkey pair).
+_ED25519_SIG = bytes.fromhex(
+    "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+    "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+)
+NARINFO_WITH_SIG = (
+    b"StorePath: /nix/store/00000000000000000000000000000000-tool-1.0\n"
+    b"URL: nar/0000000000000000000000000000000000000000000000000000.nar.zst\n"
+    b"Compression: zstd\n"
+    b"Sig: nix.wimpys.world-1:" + base64.b64encode(_ED25519_SIG) + b"\n"
+)
 
 
 @pytest.mark.parametrize(
@@ -1005,6 +1021,8 @@ PACKAGE_SIZED = bytes(1024 * 1024 - 12)
                 base64.b64encode(PUBLIC_KEY), base64.b64encode(_packet(5, b"k"))
             ),
         ),
+        ("keys/haberdasher-nix.pub", NIX_SECRET_KEY),
+        ("nar/leaked.nar.zst", PACKAGE_SIZED + NIX_SECRET_KEY + bytes(64)),
     ],
 )
 @pytest.mark.parametrize("mode", ["local", "create", "upload"])
@@ -1028,8 +1046,16 @@ def test_upload_rejects_private_key_material(
     assert store.stat(ref) is None
 
 
-@pytest.mark.parametrize("data", [PUBLIC_KEY, ARMOURED_PUBLIC])
-def test_upload_accepts_a_public_key(tmp_path: Path, data: bytes) -> None:
+@pytest.mark.parametrize(
+    ("key", "data"),
+    [
+        ("keys/haberdasher.gpg", PUBLIC_KEY),
+        ("keys/haberdasher.gpg", ARMOURED_PUBLIC),
+        ("keys/haberdasher-nix.pub", NIX_PUBLIC_KEY),
+        ("00000000000000000000000000000000.narinfo", NARINFO_WITH_SIG),
+    ],
+)
+def test_upload_accepts_a_public_key(tmp_path: Path, key: str, data: bytes) -> None:
     store = LocalStore(local_policy(tmp_path / "store"))
-    ref = object_ref(data, key="keys/haberdasher.gpg")
+    ref = object_ref(data, key=key)
     assert store.create(ref, source_file(tmp_path, data)).sha256 == ref.sha256

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import re
 import tempfile
 import time
-from collections.abc import Generator, Iterator
+from collections.abc import Generator, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +59,15 @@ PACKAGE_SUFFIXES = (
 MACOS_BINARY = re.compile(r"(.+?)[-_](?:darwin|macos|mac|osx)(?:[-_].*)?", re.IGNORECASE)
 # A Windows zip file names its operating system.
 WINDOWS = re.compile(r"(?:^|[-_.])(?:windows|win(?:32|64)?)(?:[-_.]|$)", re.IGNORECASE)
+TARBALL = re.compile(
+    r".+[-_](?:linux|darwin|macos|mac|osx)[-_](?:x86_64|amd64|x64|aarch64|arm64)\.tar\.gz$",
+    re.IGNORECASE,
+)
+DMG = re.compile(r".+\.dmg$", re.IGNORECASE)
+MAX_NIX_BLOB_BYTES = 262_144
+RELEASE_NIX_FILES = frozenset(
+    {"nix/default.nix", "nix/linux.nix", "nix/darwin.nix", "nix/package.nix"}
+)
 # electron-builder publishes this Windows update feed for apps that update themselves.
 UPDATER = "latest.yml"
 PER_ASSET_SUFFIXES = (".sha256", ".sha256sum")
@@ -79,6 +89,27 @@ def asset_format(filename: str) -> str | None:
     if re.search(r"\.[A-Za-z][A-Za-z0-9]*$", filename) is None and MACOS_BINARY.fullmatch(filename):
         return "brew"
     return None
+
+
+def asset_formats(filename: str, siblings: Iterable[str] = ()) -> tuple[str, ...]:
+    """Every format that a release asset can feed within its release asset group."""
+    primary = asset_format(filename)
+    result = [primary] if primary is not None else []
+    sibling_set = set(siblings) or {filename}
+    if any(TARBALL.fullmatch(name) is not None for name in sibling_set):
+        if TARBALL.fullmatch(filename) is not None:
+            result.append("nix")
+    elif (
+        filename.endswith(".deb")
+        or DMG.fullmatch(filename) is not None
+        or (
+            primary == "brew"
+            and filename.endswith(".zip")
+            and not any(DMG.fullmatch(name) is not None for name in sibling_set)
+        )
+    ):
+        result.append("nix")
+    return tuple(dict.fromkeys(result))
 
 
 def _filename(value: object) -> str:
@@ -475,6 +506,59 @@ def _release_label(release: dict[str, object], release_id: int) -> str:
 _MISSING = object()
 
 
+def tag_nix_files(repository: str, tag: str, runtime: Runtime) -> dict[str, str] | None:
+    """Read upstream release Nix package expressions from a tag tree, ignoring devShell helpers."""
+    repository_name(repository)
+    tag = text(tag, "release tag")
+    value = _json_request(
+        f"repos/{repository}/git/trees/{quote(tag, safe='')}?recursive=1",
+        runtime,
+        missing=_MISSING,
+    )
+    if value is _MISSING:
+        return None
+    tree_obj = _mapping(value).get("tree")
+    if not isinstance(tree_obj, list):
+        raise DiscoveryFailure("Expected a GitHub Git tree array")
+    blobs: dict[str, tuple[str, int]] = {}
+    for raw in cast(list[object], tree_obj):
+        entry = _mapping(raw)
+        path = entry.get("path")
+        if (
+            not isinstance(path, str)
+            or (path != "flake.nix" and path not in RELEASE_NIX_FILES)
+            or entry.get("type") != "blob"
+            or entry.get("mode") != "100644"
+        ):
+            continue
+        sha = text(entry.get("sha"), "Git blob SHA")
+        size = integer(entry.get("size"), "Git blob size")
+        if re.fullmatch(r"[0-9a-f]{40}", sha) is None or size > MAX_NIX_BLOB_BYTES:
+            raise DiscoveryFailure(f"Invalid or oversized Nix expression {path} in {repository}")
+        blobs[path] = (sha, size)
+    has_release_nix = "nix/default.nix" in blobs or (
+        "flake.nix" in blobs
+        and bool(blobs.keys() & {"nix/linux.nix", "nix/darwin.nix", "nix/package.nix"})
+    )
+    if not has_release_nix:
+        return None
+    files: dict[str, str] = {}
+    for path, (sha, size) in sorted(blobs.items()):
+        blob = _mapping(_json_request(f"repos/{repository}/git/blobs/{sha}", runtime))
+        if blob.get("encoding") != "base64" or not isinstance(blob.get("content"), str):
+            raise DiscoveryFailure(f"Unexpected Git blob encoding for {path}")
+        compact = "".join(cast(str, blob["content"]).split())
+        try:
+            raw_bytes = base64.b64decode(compact, validate=True)
+            decoded = raw_bytes.decode("utf-8")
+        except (ValueError, UnicodeError) as error:
+            raise DiscoveryFailure(f"Invalid UTF-8 Nix expression {path}") from error
+        if len(raw_bytes) != size or len(raw_bytes) > MAX_NIX_BLOB_BYTES:
+            raise DiscoveryFailure(f"Git blob size mismatch for {path}")
+        files[path] = decoded
+    return files
+
+
 def _installers(
     feed: SourceAsset, checksum: ChecksumEntry | None, runtime: Runtime
 ) -> set[str] | None:
@@ -565,7 +649,7 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
         digests = 0
         feed = siblings.get(UPDATER)
         installers: set[str] | None = set()
-        if feed is not None and any(asset_format(name) == "scoop" for name in siblings):
+        if feed is not None and any("scoop" in asset_formats(name, siblings) for name in siblings):
             installers = _installers(feed, checksums.get(UPDATER), runtime)
             if installers is None:
                 step(
@@ -575,10 +659,10 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
                     "has no checksum)",
                 )
         for source in sorted(group, key=lambda item: item.asset_id):
-            name = asset_format(source.filename)
-            if name is None:
+            formats = asset_formats(source.filename, siblings)
+            if not formats:
                 continue
-            if name == "scoop" and (installers is None or source.filename in installers):
+            if formats == ("scoop",) and (installers is None or source.filename in installers):
                 if installers is not None:
                     step(
                         report,

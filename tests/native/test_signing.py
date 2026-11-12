@@ -11,7 +11,12 @@ import pytest
 
 from haberdasher.core import atomic_write
 from haberdasher.runtime import Runtime, private_workspace
-from haberdasher.signing import ALPINE_SIGNATURE_MEMBER, SigningFailure, signing_session
+from haberdasher.signing import (
+    ALPINE_SIGNATURE_MEMBER,
+    NIX_KEY_NAME,
+    SigningFailure,
+    signing_session,
+)
 from tests.support.keys import DisposableKey, disposable_key, run
 
 
@@ -135,6 +140,26 @@ def test_native_signatures_exports_and_same_rsa(
                 str(rsa_signature),
                 str(payload),
             )
+            nix_secret, nix_public, nix_public_value = signer.nix_key()
+            assert signer.nix_key() == (nix_secret, nix_public, nix_public_value)
+            assert nix_secret.name == "haberdasher.nix.sec"
+            assert nix_public.name == "haberdasher.nix.pub"
+            assert nix_public_value.startswith(f"{NIX_KEY_NAME}:")
+            assert nix_public.read_text(encoding="ascii") == f"{nix_public_value}\n"
+            converted = (
+                run(
+                    runtime,
+                    "nix",
+                    "--extra-experimental-features",
+                    "nix-command",
+                    "key",
+                    "convert-secret-to-public",
+                    data=nix_secret.read_bytes(),
+                )
+                .decode("ascii")
+                .strip()
+            )
+            assert converted == nix_public_value
             exports = runtime.root / "keys"
             exports.mkdir(mode=0o700)
             asc, binary, pem = signer.public_exports(exports)
@@ -155,7 +180,55 @@ def test_native_signatures_exports_and_same_rsa(
         stopped(pid)
         with pytest.raises(SigningFailure, match="closed"):
             signer.alpine_key()
+        with pytest.raises(SigningFailure, match="closed"):
+            signer.nix_key()
     assert not runtime.root.exists()
+
+
+def test_nix_key_determinism_across_sessions_and_distinct_keys(key: DisposableKey) -> None:
+    with disposable_key() as other_key, private_workspace() as runtime:
+        with signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as first_session:
+            first_secret, first_public, first_value = first_session.nix_key()
+            first_secret_bytes = first_secret.read_bytes()
+            first_public_bytes = first_public.read_bytes()
+            assert first_secret.stat().st_mode & 0o777 == 0o600
+            assert first_public.stat().st_mode & 0o777 == 0o600
+            assert first_secret.parent.stat().st_mode & 0o777 == 0o700
+        assert not first_secret.exists() and not first_public.exists()
+
+        with signing_session(
+            runtime, expected_fingerprint=key.fingerprint, key_file=key.key_file
+        ) as second_session:
+            second_secret, second_public, second_value = second_session.nix_key()
+            assert second_value == first_value
+            assert second_secret.read_bytes() == first_secret_bytes
+            assert second_public.read_bytes() == first_public_bytes
+        assert not second_secret.exists() and not second_public.exists()
+
+        with signing_session(
+            runtime, expected_fingerprint=other_key.fingerprint, key_file=other_key.key_file
+        ) as other_session:
+            other_secret, other_public, other_value = other_session.nix_key()
+            assert other_value != first_value
+            assert other_secret.read_bytes() != first_secret_bytes
+            assert other_public.read_bytes() != first_public_bytes
+            converted = (
+                run(
+                    runtime,
+                    "nix",
+                    "--extra-experimental-features",
+                    "nix-command",
+                    "key",
+                    "convert-secret-to-public",
+                    data=other_secret.read_bytes(),
+                )
+                .decode("ascii")
+                .strip()
+            )
+            assert converted == other_value
+        assert not other_secret.exists() and not other_public.exists()
 
 
 def test_native_unsigned_and_wrong_key_reject(key: DisposableKey) -> None:
@@ -247,6 +320,8 @@ from haberdasher.runtime import private_workspace
 from haberdasher.signing import signing_session
 with private_workspace() as runtime:
     with signing_session(runtime, expected_fingerprint={key.fingerprint!r}, key_file=Path({str(key.key_file)!r})) as signer:
+        nix_sec, nix_pub, _ = signer.nix_key()
+        assert nix_sec.is_file() and nix_pub.is_file()
         result = runtime.run(["gpg-connect-agent", "--homedir", str(signer.gnupghome), "GETINFO pid", "/bye"])
         if result.returncode: raise RuntimeError("agent query failed")
         pid = int(next(line[2:] for line in result.stdout.splitlines() if line.startswith(b"D ")))

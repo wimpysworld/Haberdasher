@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Render the OpenGraph preview images from the HTML templates with Firefox headless.
 #
-# Usage: ./render.sh [apt rpm arch apk flatpak brew scoop]
+# Usage: ./render.sh [apt rpm arch apk flatpak brew scoop nix]
 #
 # Each template loads its fonts from ./fonts, which holds the latin woff2 files from the
 # pinned jsDelivr fontsource packages (see fetch-fonts.sh). Renders run one at a time in the
@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 sites=("$@")
-[ ${#sites[@]} -eq 0 ] && sites=(apt rpm arch apk flatpak brew scoop)
+[ ${#sites[@]} -eq 0 ] && sites=(apt rpm arch apk flatpak brew scoop nix)
 
 # Firefox needs a writable home and its own profile. The content-process sandbox cannot start
 # inside the agent sandbox, so the Mozilla sandbox is disabled for the render only.

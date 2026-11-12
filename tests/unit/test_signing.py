@@ -9,10 +9,12 @@ from haberdasher.core import atomic_write, safe_path
 from haberdasher.runtime import Runtime, RuntimeFailure, private_workspace
 from haberdasher.signing import (
     MAX_KEY_BYTES,
+    NIX_KEY_NAME,
     SigningFailure,
     SigningSession,
     _checked,  # pyright: ignore[reportPrivateUsage]
     _input,  # pyright: ignore[reportPrivateUsage]
+    _mpint,  # pyright: ignore[reportPrivateUsage]
     _validate,  # pyright: ignore[reportPrivateUsage]
     signing_session,
 )
@@ -411,3 +413,150 @@ def test_reject_invalid_fingerprint_before_import() -> None:
             signing_session(runtime, expected_fingerprint="bad", key_data=b"synthetic"),
         ):
             pass
+
+
+def _asn1_output(
+    *,
+    version: int = 0,
+    n: int | None = None,
+    e: int = 65537,
+    d: int | None = None,
+    p: int = (1 << 2048) - 1,
+    q: int = (1 << 2047) + 1,
+) -> bytes:
+    if n is None:
+        n = p * q
+    if d is None:
+        d = pow(e, -1, (p - 1) * (q - 1))
+    values = (version, n, e, d, p, q, d % max(p - 1, 1), d % max(q - 1, 1), 1)
+    return "".join(
+        f"    0:d=1  hl=2 l=   1 prim: INTEGER           :{value:X}\n" for value in values
+    ).encode("ascii")
+
+
+def test_nix_key_deterministic_hkdf_derivation_and_swapped_primes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(SigningFailure, match="positive"):
+        _mpint(0)
+    assert _mpint(0x0102) == b"\x00\x00\x00\x02\x01\x02"
+    pub_bytes = bytes(range(1, 33))
+    spki = bytes.fromhex("302a300506032b6570032100") + pub_bytes
+    p_a = (1 << 2048) - 1
+    q_a = (1 << 2047) + 1
+    asn1_a = _asn1_output(p=p_a, q=q_a)
+    asn1_swapped = _asn1_output(p=q_a, q=p_a)
+    p_b = (1 << 2048) - 1
+    q_b = (1 << 2047) + 3
+    asn1_b = _asn1_output(p=p_b, q=q_b)
+
+    def fake_which(_cmd: str, *, path: str | None = None) -> str:
+        return "/bin/nix"
+
+    def derive(asn1_bytes: bytes) -> tuple[bytes, bytes, str, list[bytes]]:
+        seeds: list[bytes] = []
+        with private_workspace() as runtime:
+            session = SigningSession(runtime, runtime.root / "gnupg", FINGERPRINT)
+            priv_pem = runtime.root / "haberdasher.rsa"
+            pub_pem = runtime.root / "haberdasher.rsa.pub"
+            atomic_write(priv_pem, b"pem")
+            atomic_write(pub_pem, b"pub")
+            monkeypatch.setattr(session, "_validate", lambda: None)
+            monkeypatch.setattr(session, "alpine_key", lambda: (priv_pem, pub_pem))
+            monkeypatch.setattr("haberdasher.signing.shutil.which", fake_which)
+
+            def fake_run(argv: Sequence[str], *, data: bytes | None = None) -> bytes:
+                if argv[:2] == ["openssl", "rsa"]:
+                    return b"der"
+                if argv[:2] == ["openssl", "asn1parse"]:
+                    return asn1_bytes
+                if argv[:2] == ["openssl", "pkey"]:
+                    assert data is not None and len(data) == 48
+                    seeds.append(data[-32:])
+                    return spki
+                assert argv[0] == "nix" and data is not None
+                raw = data.decode("ascii").strip().split(":", 1)[1]
+                import base64
+
+                decoded = base64.b64decode(raw)
+                return f"{NIX_KEY_NAME}:{base64.b64encode(decoded[32:]).decode('ascii')}\n".encode()
+
+            monkeypatch.setattr(session, "_run", fake_run)
+            sec_path, pub_path, pub_val = session.nix_key()
+            assert session.nix_key() == (sec_path, pub_path, pub_val)
+            assert sec_path.stat().st_mode & 0o777 == 0o600
+            assert pub_path.stat().st_mode & 0o777 == 0o600
+            return sec_path.read_bytes(), pub_path.read_bytes(), pub_val, seeds
+
+    sec1, pub1, val1, seeds1 = derive(asn1_a)
+    sec2, pub2, val2, seeds2 = derive(asn1_swapped)
+    _, _, _, seeds_b = derive(asn1_b)
+    assert (sec1, pub1, val1, seeds1) == (sec2, pub2, val2, seeds2)
+    assert seeds1 != seeds_b
+    assert val1.startswith(f"{NIX_KEY_NAME}:") and pub1 == f"{val1}\n".encode("ascii")
+
+
+@pytest.mark.parametrize(
+    ("fault", "match"),
+    [
+        ("non-ascii-asn1", "Invalid PKCS#1 ASN.1 output"),
+        ("short-asn1", "Invalid PKCS#1 RSA private structure"),
+        ("bad-version", "Invalid PKCS#1 RSA private structure"),
+        ("bad-bits", "Invalid RSA secret numbers"),
+        ("bad-product", "Invalid RSA secret numbers"),
+        ("equal-primes", "Invalid RSA secret numbers"),
+        ("bad-ed25519-spki", "Invalid derived Ed25519 public key"),
+        ("non-ascii-nix", "Invalid native Nix key output"),
+        ("nix-mismatch", "Derived Nix key disagrees with native Nix key conversion"),
+    ],
+)
+def test_nix_key_validation_errors(monkeypatch: pytest.MonkeyPatch, fault: str, match: str) -> None:
+    p = (1 << 2048) - 1
+    q = (1 << 2047) + 1
+    asn1 = _asn1_output(p=p, q=q)
+    if fault == "non-ascii-asn1":
+        asn1 = b"\xff\xfe"
+    elif fault == "short-asn1":
+        asn1 = b"    0:d=1  hl=2 l=   1 prim: INTEGER           :00\n"
+    elif fault == "bad-version":
+        asn1 = _asn1_output(version=1, p=p, q=q)
+    elif fault == "bad-bits":
+        asn1 = _asn1_output(n=61 * 53, e=17, d=413, p=61, q=53)
+    elif fault == "bad-product":
+        asn1 = _asn1_output(n=p * q + 2, p=p, q=q)
+    elif fault == "equal-primes":
+        p_eq = (1 << 2047) + (1 << 2046) + 1
+        asn1 = _asn1_output(n=p_eq * p_eq, e=3, d=1, p=p_eq, q=p_eq)
+    spki = (
+        b"bad-spki"
+        if fault == "bad-ed25519-spki"
+        else bytes.fromhex("302a300506032b6570032100") + bytes(32)
+    )
+    with private_workspace() as runtime:
+        session = SigningSession(runtime, runtime.root / "gnupg", FINGERPRINT)
+        priv_pem = runtime.root / "haberdasher.rsa"
+        pub_pem = runtime.root / "haberdasher.rsa.pub"
+        atomic_write(priv_pem, b"pem")
+        atomic_write(pub_pem, b"pub")
+
+        def fake_which(_cmd: str, *, path: str | None = None) -> str:
+            return "/bin/nix"
+
+        monkeypatch.setattr(session, "_validate", lambda: None)
+        monkeypatch.setattr(session, "alpine_key", lambda: (priv_pem, pub_pem))
+        monkeypatch.setattr("haberdasher.signing.shutil.which", fake_which)
+
+        def fake_run(argv: Sequence[str], *, data: bytes | None = None) -> bytes:
+            if argv[:2] == ["openssl", "rsa"]:
+                return b"der"
+            if argv[:2] == ["openssl", "asn1parse"]:
+                return asn1
+            if argv[:2] == ["openssl", "pkey"]:
+                return spki
+            if fault == "non-ascii-nix":
+                return b"\xff"
+            return f"{NIX_KEY_NAME}:wrong\n".encode("ascii")
+
+        monkeypatch.setattr(session, "_run", fake_run)
+        with pytest.raises(SigningFailure, match=match):
+            session.nix_key()

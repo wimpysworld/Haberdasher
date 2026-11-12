@@ -1,6 +1,6 @@
 # Haberdasher
 
-Haberdasher is Martin Wimpress's personal publisher. It takes the prebuilt packages from the GitHub "Latest" release of each listed repository that Martin controls and publishes them as signed APT, RPM, Arch, Alpine, and Flatpak repositories, plus a Homebrew tap and a Scoop bucket, on Cloudflare R2. It is not a package builder.
+Haberdasher is Martin Wimpress's personal publisher. It takes the prebuilt packages from the GitHub "Latest" release of each listed repository that Martin controls and publishes them as signed APT, RPM, Arch, Alpine, Flatpak, and Nix repositories, plus a Homebrew tap and a Scoop bucket, on Cloudflare R2. It is not a package builder.
 
 ## Use
 
@@ -47,8 +47,9 @@ Each bucket holds a public `haberdasher.json` inventory of the packages in it. A
 | Flatpak `.flatpak` | `flatpak.wimpys.world` | `haberdasher-flatpak` |
 | Homebrew | `brew.wimpys.world` | `haberdasher-brew` |
 | Scoop | `scoop.wimpys.world` | `haberdasher-scoop` |
+| Nix | `nix.wimpys.world` | `haberdasher-nix` |
 
-The Homebrew tap and the Scoop bucket are not signed. They rely on HTTPS and on the `sha256` in each cask or the `hash` in each manifest.
+The Homebrew tap and the Scoop bucket are not signed. They rely on HTTPS and on the `sha256` in each cask or the `hash` in each manifest. Nix signs binary cache `.narinfo` metadata with a deterministic `nix.wimpys.world-1` Ed25519 key derived from the Haberdasher RSA4096 primary key.
 
 [Client setup](docs/clients.md) shows how to trust the key and add each repository.
 

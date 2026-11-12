@@ -18,13 +18,15 @@ Haberdasher derives every other setting:
 
 | Setting | Source |
 | --- | --- |
-| Format | Asset suffix: `.deb` APT, `.rpm` RPM, `.pkg.tar.zst` and `.pkg.tar.xz` Arch, `.apk` Alpine, `.flatpak` Flatpak. Native inspection confirms the type. Other assets are ignored. |
-| Architecture | Package metadata, never the file name |
-| Bucket and public URL | The `PUBLIC` table in `src/haberdasher/config.py` |
+| Format | Asset suffix and release layout: `.deb` APT, `.rpm` RPM, `.pkg.tar.zst` and `.pkg.tar.xz` Arch, `.apk` Alpine, `.flatpak` Flatpak, macOS binaries and `.zip` apps Homebrew, Windows `.exe` and `.zip` apps Scoop, and release `nix/` expressions or `.tar.gz`, `.deb`, `.dmg`, and macOS `.zip` assets Nix. Native inspection confirms the type. Other assets are ignored. |
+| Architecture | Package metadata or binary headers, never the file name |
+| Bucket and public URL | The `PUBLIC` table in `src/haberdasher/config.py` (`haberdasher-nix` and `https://nix.wimpys.world` for `nix`) |
 | APT suite and component | Constants in `src/haberdasher/formats/apt.py`: `stable` and `main`. `Release` has a `Date` and no `Valid-Until`. |
 | Upstream signatures | Not checked. RPM inputs lose upstream signatures before Haberdasher signs them. APK inputs lose their `.SIGN.*` stream. Arch ignores release `.sig` assets. APT publishes `.deb` packages unchanged. Flatpak commits lose their detached upstream signatures. |
 
 A `.flatpak` bundle supplies its own settings. The application ref gives the app ID, architecture, and branch. The application metadata gives the runtime. The bundle's `runtime-repo` gives the runtime repository, or Flathub (`https://dl.flathub.org/repo/flathub.flatpakrepo`) when the bundle has none. All applications go into one OSTree repository, with `wimpysworld.flatpakrepo` and one `<app-id>.flatpakref` per application at its root. The `.flatpakref` file takes its `Title` from the AppStream name and its `RuntimeRepo` from the bundle. A run fails when bundles name different runtime repositories, because `wimpysworld.flatpakrepo` holds one `RuntimeRepo`.
+
+For Nix, `haberdasher-nix` (`https://nix.wimpys.world`) serves a bare Git flake repository at `packages.git` over dumb HTTP and a signed HTTP binary cache (`nix-cache-info` with `Priority: 41` and `WantMassQuery: 1`, `<hash>.narinfo`, and `nar/<hash>.nar.zst`). When a release tag contains a package expression under `nix/` (such as `nix/default.nix`, `nix/linux.nix`, `nix/darwin.nix`, or `nix/package.nix`), the adapter uses that upstream expression and rewrites its `fetchurl` hashes to the verified SRI hashes of the release assets. When no upstream `nix/` package expression exists, the adapter derives a package expression from Linux and macOS `.tar.gz` release archives, or falls back to `.deb` and macOS `.dmg` or `.zip` assets when the release has no `.tar.gz` archives. Each commit in `packages.git` is tagged at `refs/tags/<rev>`, and the flake source tree and `x86_64-linux` store paths are signed with the deterministic `nix.wimpys.world-1` Ed25519 key and exported to the binary cache.
 
 ### Architectures
 
@@ -36,6 +38,7 @@ Each format accepts these architectures:
 | RPM | `x86_64`, `aarch64`, `noarch` | One repository holds every architecture |
 | Arch | `x86_64`, `aarch64`, `any` | `any` packages appear in every `<arch>/` directory and database |
 | Alpine | `x86_64`, `aarch64`, `noarch` | `noarch/` holds the package, and every `<arch>/APKINDEX.tar.gz` lists it, because `apk` fetches from the directory of the package architecture |
+| Nix | `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, `aarch64-darwin` | `packages.git` exposes each package under `packages.<system>.<name>` for its supported systems, and the binary cache serves `x86_64-linux` store paths and the flake source tree |
 
 Flatpak accepts application bundles for `x86_64` and `aarch64`. A package with another architecture is skipped with one line that names the file and the architecture, for example `apt   skipped tool_1.0_armhf.deb: unsupported APT architecture 'armhf'`. An Android `.apk` is skipped the same way. `just plan` and `just publish` print the same line, and continue with the other assets and sources.
 
@@ -144,7 +147,7 @@ Tests use a hidden `--local-root PATH` option on `python -m haberdasher publish`
 
 A local run takes its signing fingerprint from the key in `HD_SIGNING_KEY_FILE` or `HD_SIGNING_KEY`. Use a disposable test key outside the checkout, in a private file with mode `0400` or `0600`. Without a key, a local run can publish only output that needs no signature. Do not copy or decrypt the canonical SOPS key for this fixture.
 
-Production local signing reads the existing SOPS-managed path through `HD_SIGNING_KEY_FILE`. CI reads `HD_SIGNING_KEY`. Supply only one signing source. Keep the local SOPS convention. Do not copy, decrypt, or export the production key as a setup workaround. Signing requires the expected RSA4096 primary with signing and certification capabilities, without subkeys. Temporary keyrings and Alpine PKCS#8 conversion stay outside the checkout and Nix store. Cleanup stops owned agents and removes private exports.
+Production local signing reads the existing SOPS-managed path through `HD_SIGNING_KEY_FILE`. CI reads `HD_SIGNING_KEY`. Supply only one signing source. Keep the local SOPS convention. Do not copy, decrypt, or export the production key as a setup workaround. Signing requires the expected RSA4096 primary with signing and certification capabilities, without subkeys. Temporary keyrings, Alpine PKCS#8 conversion, and Nix Ed25519 derivation stay outside the checkout and Nix store. Cleanup stops owned agents and removes private exports.
 
 ### Remote publication
 
@@ -160,9 +163,9 @@ APT places each package at `pool/main/<prefix>/<source>/<package>_<version>_<arc
 
 `discovery.py` scans the latest release of each source and its assets, including assets added to that release later. Assets without a matching release checksum are skipped. Admission verifies source SHA256 before native import and rejects changed bytes under equivalent native identities.
 
-Each bucket's public `haberdasher.json` is the publication state for its format. It holds the inventory allow-list (package identity, source, published digests, and referenced objects) and the accepted history and metadata keys that the native adapter needs. There is no private state bucket. A run reads each inventory first. An asset whose bytes are already in the inventory needs no download. When a format changes, the run downloads only the published metadata that the inventory references, not the package pool. Unchanged runs avoid package downloads, inspection, indexing, and signing, and write nothing except the locks. Flatpak restoration downloads only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. `flatpak build-update-repo` needs those AppStream paths to keep unchanged applications in the AppStream catalogue. Payload files and earlier commits stay published and are not downloaded again.
+Each bucket's public `haberdasher.json` is the publication state for its format. It holds the inventory allow-list (package identity, source, published digests, and referenced objects) and the accepted history and metadata keys that the native adapter needs. There is no private state bucket. A run reads each inventory first. An asset whose bytes are already in the inventory needs no download. When a format changes, the run downloads only the published metadata that the inventory references, not the package pool. Unchanged runs avoid package downloads, inspection, indexing, and signing, and write nothing except the locks. Flatpak restoration downloads only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. `flatpak build-update-repo` needs those AppStream paths to keep unchanged applications in the AppStream catalogue. Payload files and earlier commits stay published and are not downloaded again. Nix restoration downloads only `packages.git` objects, tags, and refs, `nix-cache-info`, and `keys/haberdasher-nix.pub`. Published `nar/*.nar.zst` archives and `*.narinfo` files stay referenced in the inventory without re-downloading.
 
-Both OpenPGP exports appear in every published bucket. The native APK public key appears only with the first APK index. An empty APK bucket does not claim native APK trust. Changed public export bytes reject even when the fingerprint stays unchanged. Key rotation is not supported.
+Both OpenPGP exports appear in every published signed bucket. The native APK public key appears only with the first APK index, and `keys/haberdasher-nix.pub` appears with the first Nix publication. An empty APK or Nix bucket does not claim native cache or index trust. Changed public export bytes reject even when the fingerprint stays unchanged. Key rotation is not supported.
 
 For each format, a run writes the bootstrap keys and packages, then dependency metadata, then entry metadata, then `haberdasher.json`. A run replaces published entries only on the exact ETag that it read. Objects that the published inventory references never change. A run can overwrite an object that the published inventory does not reference, because an interrupted run can leave one with other signature bytes. RPM and Arch package signatures are not deterministic.
 
@@ -174,15 +177,15 @@ There is no multi-object atomicity. Split entry/signature pairs can temporarily 
 
 Each bucket serves one `index.html` with `Cache-Control: public, max-age=300`. `src/haberdasher/site.py` builds it from the bucket's `haberdasher.json`, with no per-project settings. The page shows, in order:
 
-1. The repository name, links to the seven repository sites, a "Works with" row of distribution logos, and an unofficial-repository notice.
-2. For the signed formats (APT, RPM, Arch, Alpine, and Flatpak), the full signing key fingerprint and one command that prints it. The Homebrew and Scoop pages have no signing-key step, because those repositories are not signed. Their trust comes from HTTPS, the `sha256` in each cask, and the `hash` in each manifest.
+1. The repository name, links to the eight repository sites, a "Works with" row of distribution logos, and an unofficial-repository notice.
+2. For the signed formats (APT, RPM, Arch, Alpine, Flatpak, and Nix), the full signing key fingerprint and one command that prints it. The Homebrew and Scoop pages have no signing-key step, because those repositories are not signed. Their trust comes from HTTPS, the `sha256` in each cask, and the `hash` in each manifest.
 3. The common setup steps for the format. The RPM page has DNF and zypper steps.
 4. One section for each source repository: its name, the package description, a GitHub link, the packages and architectures of its newest published release, and the install command.
 5. The commands that remove the repository.
-6. The published files as nested disclosures, each linked with its size. Flatpak `objects/` is one line with a file count and a total size.
+6. The published files as nested disclosures, each linked with its size. Flatpak `objects/`, Homebrew `tap.git/`, Scoop `wimpysworld/`, and Nix `packages.git/` and `nar/` each fold onto one summary line with a file count and a total size.
 7. The date of the last page write.
 
-The description comes from package metadata: DEB `Description`, RPM `Summary`, Arch `%DESC%`, and APK `T:`. Flatpak inspection stores the untranslated AppStream `summary` in the inventory. A source without a description in one format uses its description from another format in the same run, for example Sidra in Flatpak.
+The description comes from package metadata: DEB `Description`, RPM `Summary`, Arch `%DESC%`, APK `T:`, and release descriptions for Homebrew, Scoop, and Nix. Flatpak inspection stores the untranslated AppStream `summary` in the inventory. A source without a description in one format uses its description from another format in the same run, for example Sidra in Flatpak.
 
 Each page loads one µCSS theme and its fonts from pinned jsDelivr URLs with SRI hashes, and distribution logos from pinned `simple-icons` URLs. Browsers do not check SRI for images or for font files that a stylesheet loads. A few lines of inline JavaScript show a copy button beside each command. Without JavaScript, the commands stay selectable.
 
@@ -200,7 +203,7 @@ A run that stops without cleanup, for example after a killed process, leaves its
 just unlock
 ```
 
-`just unlock` deletes the existing locks in all seven buckets and exits without publishing. It prints one line for each bucket:
+`just unlock` deletes the existing locks in all eight buckets and exits without publishing. It prints one line for each bucket:
 
 ```text
 apk   no lock

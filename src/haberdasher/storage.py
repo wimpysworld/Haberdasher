@@ -42,8 +42,13 @@ UPLOAD_TRANSFERS = 16
 WRITE_ATTEMPTS = 3
 WRITE_RETRY_SECONDS = 5
 PRIVATE_KEY_HEADER = re.compile(rb"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY")
+NIX_CANDIDATE_KEY = re.compile(rb"[A-Za-z0-9_.-]{1,128}:([A-Za-z0-9+/]{86}==)(?![A-Za-z0-9+/=])")
 OPENPGP_SUFFIXES = (".asc", ".gpg", ".pgp", ".sig")
 OPENPGP_SECRET_TAGS = frozenset({5, 7})
+_ED_P = (1 << 255) - 19
+_ED_D = (-121665 * pow(121666, -1, _ED_P)) % _ED_P
+_ED_BY = (4 * pow(5, -1, _ED_P)) % _ED_P
+_ED_BX = 15112221349535400772501151409588531511454012693041857206046113283949847762202
 
 
 class StorageError(RuntimeError):
@@ -243,17 +248,59 @@ def _dearmour(data: bytes) -> Generator[bytes]:
             yield base64.b64decode(b"".join(lines), validate=True)
 
 
+def _ed_add(
+    left: tuple[int, int, int, int], right: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    x1, y1, z1, t1 = left
+    x2, y2, z2, t2 = right
+    a = ((y1 - x1) * (y2 - x2)) % _ED_P
+    b = ((y1 + x1) * (y2 + x2)) % _ED_P
+    c = (t1 * 2 * _ED_D * t2) % _ED_P
+    d = (z1 * 2 * z2) % _ED_P
+    e = (b - a) % _ED_P
+    f = (d - c) % _ED_P
+    g = (d + c) % _ED_P
+    h = (b + a) % _ED_P
+    return (e * f) % _ED_P, (g * h) % _ED_P, (f * g) % _ED_P, (e * h) % _ED_P
+
+
+def _is_ed25519_secret_key(raw: bytes) -> bool:
+    """Return True when `raw` is a 64-byte RFC 8032 Ed25519 `(seed_32 || pubkey_32)` pair."""
+    if len(raw) != 64:
+        return False
+    digest = bytearray(hashlib.sha512(raw[:32]).digest()[:32])
+    digest[0] &= 248
+    digest[31] = (digest[31] & 63) | 64
+    scalar = int.from_bytes(digest, "little")
+    point = (0, 1, 1, 0)
+    step_point = (_ED_BX, _ED_BY, 1, (_ED_BX * _ED_BY) % _ED_P)
+    while scalar:
+        if scalar & 1:
+            point = _ed_add(point, step_point)
+        step_point = _ed_add(step_point, step_point)
+        scalar >>= 1
+    x, y, z, _ = point
+    inv_z = pow(z, -1, _ED_P)
+    x = (x * inv_z) % _ED_P
+    y = (y * inv_z) % _ED_P
+    return (y | ((x & 1) << 255)).to_bytes(32, "little") == raw[32:]
+
+
 def _guard(ref: ObjectRef, path: Path) -> None:
-    """Reject an upload that holds a private key header or an OpenPGP secret-key packet."""
+    """Reject an upload that holds a private key header, OpenPGP secret packet, or Nix secret key."""
     refused = StorageError(
         f"Refuse to upload {ref.bucket_role} object {ref.key}: it holds private key material"
     )
     overlap = b""
     with path.open("rb") as stream:
         while block := stream.read(1024 * 1024):
-            if PRIVATE_KEY_HEADER.search(overlap + block):
+            window = overlap + block
+            if PRIVATE_KEY_HEADER.search(window):
                 raise refused
-            overlap = block[-64:]
+            for match in NIX_CANDIDATE_KEY.finditer(window):
+                if _is_ed25519_secret_key(base64.b64decode(match[1])):
+                    raise refused
+            overlap = window[-256:]
     if ref.key.startswith("keys/") or ref.key.endswith(OPENPGP_SUFFIXES):
         data = path.read_bytes()
         for packets in (data, *_dearmour(data)):

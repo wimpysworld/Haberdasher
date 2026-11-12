@@ -380,3 +380,43 @@ def test_package_ships_one_preview_image_per_format() -> None:
             "image/png",
             "public, max-age=86400",
         )
+
+
+def test_nix_page_renders_binary_cache_flake_and_folded_tree() -> None:
+    nix_asset = asset("nix", "tailor", "x86_64-linux", "0.6.0", {"desc": "Nix tool"})
+    objects = (
+        ref("nix", "packages.git/objects/aa/bb", 1200),
+        ref("nix", "packages.git/HEAD", 23),
+        ref("nix", "nar/0000000000000000000000000000000000000000000000000000.nar.zst", 8000),
+        ref("nix", "00000000000000000000000000000000.narinfo", 420),
+        ref("nix", "keys/haberdasher-nix.pub", 64),
+        ref("nix", "nix-cache-info", 48),
+    )
+    retained = RetainedFormat(
+        "nix",
+        (nix_asset,),
+        (nix_asset.inspected.identity,),
+        {"public_key": "nix.wimpys.world-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+        objects,
+    )
+    item = state.Published("nix", None, "d" * 64, objects, retained, None)
+    page = render("nix", item)
+    cmds = commands(page)
+    assert site.description(nix_asset) == "Nix tool"
+    assert any('extra-substituters = [ "https://nix.wimpys.world" ];' in c for c in cmds)
+    assert any(
+        'extra-trusted-public-keys = [ "nix.wimpys.world-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" ];'
+        in c
+        for c in cmds
+    )
+    assert 'inputs.haberdasher.url = "git+https://nix.wimpys.world/packages.git";' in cmds
+    assert "nix profile add 'git+https://nix.wimpys.world/packages.git#tailor'" in cmds
+    assert "sudo sed -i '/nix\\.wimpys\\.world/d' /etc/nix/nix.conf" in cmds
+    assert (
+        '<span class="name">packages.git/<span class="meta">2 files, Git repository</span></span>'
+        in page
+    )
+    assert (
+        '<span class="name">nar/<span class="meta">1 NAR archive, content-addressed</span></span>'
+        in page
+    )

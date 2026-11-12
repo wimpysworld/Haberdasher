@@ -560,6 +560,7 @@ def test_unlock_deletes_existing_locks_only_on_request(
         f"arch  removed lock from {host} started {NOW.isoformat()}",
         "brew  no lock",
         "flatpak no lock",
+        "nix   no lock",
         "rpm   no lock",
         "scoop no lock",
         "Removed 1 lock.",

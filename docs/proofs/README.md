@@ -11,7 +11,7 @@ just proof
 just proof apt
 ```
 
-The first command selects all formats, plus shared signing, HTTP, storage-client, and pipeline tests. Replace `apt` with `rpm`, `arch`, `apk`, or `flatpak` to select the native tests of one format.
+The first command selects all formats, plus shared signing, HTTP, storage-client, and pipeline tests. Replace `apt` with `rpm`, `arch`, `apk`, `flatpak`, `brew`, `scoop`, or `nix` to select the native tests of one format.
 
 The router clears inherited credentials and uses the declared tool path. The tests run with a private HOME and TMPDIR. Private workspaces isolate client configuration, packages, and keys. Cleanup removes private files and stops owned servers and agents.
 
@@ -21,7 +21,7 @@ The native tools need `x86_64-linux`, so the proof router rejects every other sy
 
 | Layer | Sources | Scope |
 | --- | --- | --- |
-| Production adapters | `src/haberdasher/formats/`, `tests/native/test_{apt,rpm,arch,apk,flatpak}.py` | Native preparation, verified retained state, native signatures, strict clients over loopback HTTP |
+| Production adapters | `src/haberdasher/formats/`, `tests/native/test_{apt,rpm,arch,apk,flatpak,brew,scoop,nix}.py` | Native preparation, verified retained state, native signatures, strict clients over loopback HTTP |
 | Complete local pipeline | `tests/native/test_pipeline.py` | Recorded GitHub discovery, real CLI, locked local publication, served public trust, no-op, late assets, full rerun after an interruption |
 
 The pipeline fetches both public OpenPGP exports over HTTP and compares full fingerprints with an independently supplied disposable identity. It checks public-only packets and uses the fetched keys for native client trust. APK also checks the served RSA key against that primary. Fresh clients and existing clients check installed records and payloads.
@@ -35,6 +35,7 @@ The pipeline interrupts one publication of each format before its first entry wr
 - [Arch](arch.md): strict package and database trust.
 - [Alpine APK](apk.md): RSA256 index trust and the native SHA1 boundary.
 - [Flatpak](flatpak.md): commit and summary trust, runtime origin, and payload restoration.
+- [Nix](nix.md): dumb-HTTP flake tags, deterministic Ed25519 cache signing, and `--max-jobs 0` binary substitution.
 
 ## Publisher implementation
 

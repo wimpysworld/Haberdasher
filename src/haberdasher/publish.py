@@ -94,6 +94,10 @@ def _adapter(name: str) -> Adapter:
             from haberdasher.formats import scoop
 
             return scoop
+        case "nix":
+            from haberdasher.formats import nix
+
+            return nix
         case _:
             raise ValueError("Unknown publication format")
 
@@ -108,16 +112,23 @@ class RunResult:
     pages: tuple[str, ...] = ()
 
 
-def _format(filename: str) -> str | None:
-    return discovery.asset_format(filename)
+def _siblings(scan: discovery.CompleteScan) -> dict[tuple[str, int], set[str]]:
+    groups: dict[tuple[str, int], set[str]] = {}
+    for asset in scan.state.assets:
+        groups.setdefault((asset.repository, asset.release_id), set()).add(asset.filename)
+    return groups
 
 
 def provided(scan: discovery.CompleteScan) -> set[str]:
     """Formats that the scanned release assets contain."""
+    siblings = _siblings(scan)
     return {
         name
         for record in scan.state.records
-        if (name := _format(record.source.filename)) is not None
+        for name in discovery.asset_formats(
+            record.source.filename,
+            siblings.get((record.source.repository, record.source.release_id), ()),
+        )
     }
 
 
@@ -125,15 +136,19 @@ def new_assets(
     scan: discovery.CompleteScan, published: Mapping[str, Published]
 ) -> dict[str, list[discovery.DiscoveredAsset]]:
     """Group checksummed assets by format, without the bytes that each inventory already holds."""
+    siblings = _siblings(scan)
     result: dict[str, list[discovery.DiscoveredAsset]] = {name: [] for name in published}
     for item in scan.checksummed:
-        name = _format(item.source.filename)
-        if name not in result or item.checksum is None:
+        if item.checksum is None:
             continue
-        accepted = published[name].retained.accepted_history
-        if any(asset.inspected.verified.sha256 == item.checksum.sha256 for asset in accepted):
-            continue
-        result[name].append(item)
+        group = siblings.get((item.source.repository, item.source.release_id), ())
+        for name in discovery.asset_formats(item.source.filename, group):
+            if name not in result:
+                continue
+            accepted = published[name].retained.accepted_history
+            if any(asset.inspected.verified.sha256 == item.checksum.sha256 for asset in accepted):
+                continue
+            result[name].append(item)
     return result
 
 
@@ -166,6 +181,13 @@ def prepare_bootstrap(
                     )
             elif item.retained.metadata.get("fingerprint") != signer.fingerprint:
                 raise StateError("Native metadata differs from the expected signing fingerprint")
+            if item.format == "nix":
+                _, nix_pub, _ = signer.nix_key()
+                nix_ref = next(
+                    ref for ref in item.referenced_objects if ref.key == "keys/haberdasher-nix.pub"
+                )
+                if sha256_file(nix_pub) != (nix_ref.sha256, nix_ref.size):
+                    raise StateError("Nix public key differs from the Haberdasher signing primary")
         for path in (armoured, binary):
             sha, size = sha256_file(path)
             ref = ObjectRef(
@@ -208,6 +230,7 @@ def _listing(name: str, refs: Sequence[ObjectRef]) -> list[str]:
         "flatpak": "objects/",
         "brew": "tap.git/objects/",
         "scoop": "wimpysworld/haberdasher.git/objects/",
+        "nix": "packages.git/objects/",
     }.get(name)
     objects = [ref for ref in refs if folded and ref.key.startswith(folded)]
     for ref in refs:
@@ -304,6 +327,7 @@ def inspect_new(
     runtime: Runtime,
     out: Path,
     report: Report = quiet,
+    verified_cache: dict[tuple[str, int], VerifiedAsset] | None = None,
 ) -> list[InspectedAsset]:
     """Download, verify, and inspect new assets. Skip an unsupported asset with one line."""
     adapter = _adapter(name)
@@ -311,9 +335,17 @@ def inspect_new(
     for index, item in enumerate(changed):
         if item.checksum is None:
             raise StateError("Changed input lacks a verified checksum")
-        verified = discovery.verify_asset(
-            item.source, item.checksum, runtime=runtime, out=out.with_name(f"{name}-{index}-asset")
-        )
+        cache_key = (item.source.repository, item.source.asset_id)
+        verified = None if verified_cache is None else verified_cache.get(cache_key)
+        if verified is None:
+            verified = discovery.verify_asset(
+                item.source,
+                item.checksum,
+                runtime=runtime,
+                out=out.with_name(f"{name}-{index}-asset"),
+            )
+            if verified_cache is not None:
+                verified_cache[cache_key] = verified
         try:
             inspected.append(
                 adapter.inspect(
@@ -358,6 +390,7 @@ def _reconcile(
     )
     with tempfile.TemporaryDirectory(prefix="hd-reconcile-", dir=runtime.root) as temporary:
         root = Path(temporary)
+        verified_cache: dict[tuple[str, int], VerifiedAsset] = {}
         inspected = {
             name: inspect_new(
                 name,
@@ -366,6 +399,7 @@ def _reconcile(
                 runtime=runtime,
                 out=root / name,
                 report=report,
+                verified_cache=verified_cache,
             )
             for name in names
         }
