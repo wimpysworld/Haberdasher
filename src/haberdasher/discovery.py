@@ -96,17 +96,14 @@ def asset_formats(filename: str, siblings: Iterable[str] = ()) -> tuple[str, ...
     primary = asset_format(filename)
     result = [primary] if primary is not None else []
     sibling_set = set(siblings) or {filename}
+    lower = filename.lower()
     if any(TARBALL.fullmatch(name) is not None for name in sibling_set):
         if TARBALL.fullmatch(filename) is not None:
             result.append("nix")
     elif (
         filename.endswith(".deb")
         or DMG.fullmatch(filename) is not None
-        or (
-            primary == "brew"
-            and filename.endswith(".zip")
-            and not any(DMG.fullmatch(name) is not None for name in sibling_set)
-        )
+        or (primary == "brew" and lower.endswith(".zip"))
     ):
         result.append("nix")
     return tuple(dict.fromkeys(result))

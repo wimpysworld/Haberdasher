@@ -929,12 +929,17 @@ def test_bare_digest_needs_a_per_asset_checksum_file() -> None:
         ),
         (
             "Sidra-1.3.0-mac-arm64.zip",
+            ["Sidra-1.3.0-mac-arm64.dmg", "Sidra-1.3.0-mac-arm64.zip"],
+            ("brew", "nix"),
+        ),
+        (
+            "Sidra-1.3.0-mac-arm64.zip",
             (
                 "Sidra-1.3.0-linux-amd64.deb",
                 "Sidra-1.3.0-mac-arm64.dmg",
                 "Sidra-1.3.0-mac-arm64.zip",
             ),
-            ("brew",),
+            ("brew", "nix"),
         ),
         (
             "Sidra-1.3.0-mac-arm64.zip",
@@ -946,7 +951,7 @@ def test_bare_digest_needs_a_per_asset_checksum_file() -> None:
     ],
 )
 def test_asset_formats_routes_tarballs_and_fallback_assets(
-    filename: str, siblings: tuple[str, ...], expected: tuple[str, ...]
+    filename: str, siblings: Sequence[str], expected: tuple[str, ...]
 ) -> None:
     assert discovery.asset_formats(filename, siblings) == expected
 
