@@ -777,47 +777,45 @@ def _tarball_nix(items: Sequence[InspectedAsset]) -> tuple[str, tuple[str, ...]]
         for sys_name in _item_systems(item):
             by_system[sys_name] = item
     systems = _ordered_systems(set(by_system))
-    any_dynamic = any(bool(item.metadata.get("dynamic_elf")) for item in items)
-    stdenv_arg = "stdenv" if any_dynamic else "stdenvNoCC"
-    extra_args = ",\n  autoPatchelfHook" if any_dynamic else ""
     src_entries: list[str] = []
     for sys_name in systems:
         item = by_system[sys_name]
         binary = _string(item.metadata.get("binary"), "tarball binary")
+        dynamic = "true" if item.metadata.get("dynamic_elf") else "false"
         src_entries.append(
             f"    {sys_name} = {{\n"
             f"      url = {_nix_str(item.verified.source.public_url)};\n"
             f"      hash = {_nix_str(_sri(item.verified.sha256))};\n"
             f"      bin = {_nix_str(binary)};\n"
+            f"      dynamic = {dynamic};\n"
             "    };"
         )
-    fixup_lines = (
-        "  nativeBuildInputs = lib.optionals stdenv.hostPlatform.isLinux [ autoPatchelfHook ];\n"
-        "  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ];\n"
-        "  dontFixup = stdenv.hostPlatform.isDarwin;\n"
-        if any_dynamic
-        else "  dontFixup = true;\n"
-    )
     expr = (
         "{\n"
         "  lib,\n"
         "  fetchurl,\n"
-        f"  {stdenv_arg}{extra_args},\n"
+        "  stdenv,\n"
+        "  stdenvNoCC,\n"
+        "  autoPatchelfHook,\n"
         "}:\n"
         "let\n"
-        f"  inherit ({stdenv_arg}.hostPlatform) system;\n"
+        "  inherit (stdenvNoCC.hostPlatform) system;\n"
         "  sources = {\n" + "\n".join(src_entries) + "\n  };\n"
         "  source = sources.${system};\n"
         "in\n"
-        f"{stdenv_arg}.mkDerivation {{\n"
+        "(if source.dynamic then stdenv else stdenvNoCC).mkDerivation {\n"
         f"  pname = {_nix_str(pname)};\n"
         f"  version = {_nix_str(ver)};\n"
         "  src = fetchurl {\n"
         "    inherit (source) url hash;\n"
         "  };\n"
         '  sourceRoot = ".";\n'
+        "  nativeBuildInputs = lib.optionals source.dynamic [ autoPatchelfHook ];\n"
+        "  buildInputs = lib.optionals source.dynamic [ stdenv.cc.cc.lib ];\n"
         "  dontConfigure = true;\n"
-        "  dontBuild = true;\n" + fixup_lines + "  installPhase = ''\n"
+        "  dontBuild = true;\n"
+        "  dontFixup = !source.dynamic;\n"
+        "  installPhase = ''\n"
         "    runHook preInstall\n"
         f'    install -Dm755 -- ${{lib.escapeShellArg source.bin}} "$out/bin/{pname}"\n'
         "    runHook postInstall\n"
@@ -834,20 +832,13 @@ def _fallback_nix(items: Sequence[InspectedAsset]) -> tuple[str, tuple[str, ...]
         for sys_name in _item_systems(item):
             by_system[sys_name] = item
     systems = _ordered_systems(set(by_system))
-    has_deb = any(item.metadata.get("mode") == "deb" for item in items)
-    has_zip = any(item.metadata.get("mode") == "zip" for item in items)
-    any_dynamic = any(bool(item.metadata.get("dynamic_elf")) for item in items)
-    stdenv_arg = "stdenv" if any_dynamic else "stdenvNoCC"
-    inputs = ["lib", "fetchurl", stdenv_arg]
-    if has_deb:
-        inputs += ["bintools", "gnutar", "xz", "zstd"]
-        if any_dynamic:
-            inputs.append("autoPatchelfHook")
-    if has_zip:
-        inputs += ["unzip", "makeWrapper"]
     src_entries: list[str] = []
     for sys_name in systems:
         item = by_system[sys_name]
+        kind = _string(item.metadata.get("mode"), "fallback mode")
+        if kind not in {"deb", "zip"}:
+            raise NixFailure(f"Unsupported Nix fallback mode {kind!r}")
+        dynamic = "true" if item.metadata.get("dynamic_elf") else "false"
         app = item.metadata.get("app")
         exe = item.metadata.get("executable")
         app_line = f"      app = {_nix_str(app)};\n" if isinstance(app, str) else ""
@@ -856,86 +847,92 @@ def _fallback_nix(items: Sequence[InspectedAsset]) -> tuple[str, tuple[str, ...]
             f"    {sys_name} = {{\n"
             f"      url = {_nix_str(item.verified.source.public_url)};\n"
             f"      hash = {_nix_str(_sri(item.verified.sha256))};\n"
-            + app_line
-            + exe_line
-            + "    };"
+            f"      kind = {_nix_str(kind)};\n"
+            f"      dynamic = {dynamic};\n" + app_line + exe_line + "    };"
         )
-    native_parts: list[str] = []
-    if has_deb:
-        deb_tools = "bintools gnutar xz zstd" + (" autoPatchelfHook" if any_dynamic else "")
-        native_parts.append(f"lib.optionals {stdenv_arg}.hostPlatform.isLinux [ {deb_tools} ]")
-    if has_zip:
-        native_parts.append(
-            f"lib.optionals {stdenv_arg}.hostPlatform.isDarwin [ unzip makeWrapper ]"
-        )
-    native_expr = " ++ ".join(native_parts) if native_parts else "[ ]"
-    build_inputs = (
-        "  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ];\n"
-        "  dontFixup = stdenv.hostPlatform.isDarwin;\n"
-        if any_dynamic
-        else "  dontFixup = true;\n"
-    )
-    deb_unpack = '${lib.getExe\' bintools "ar"} x "$src"\n      tar xf data.tar.*'
-    zip_unpack = 'unzip -q "$src"'
-    unpack_body = (
-        f"if {stdenv_arg}.hostPlatform.isDarwin then ''\n      {zip_unpack}\n    '' else ''\n      {deb_unpack}\n    ''"
-        if (has_deb and has_zip)
-        else f"''\n    {zip_unpack}\n  ''"
-        if has_zip
-        else f"''\n    {deb_unpack}\n  ''"
-    )
-    deb_install = (
-        "runHook preInstall\n"
-        'mkdir -p "$out"\n'
-        "for dir in usr/bin usr/share usr/lib usr/libexec; do\n"
-        '  if [ -d "$dir" ]; then\n'
-        '    target="$out/${dir#usr/}"\n'
-        '    mkdir -p "$target"\n'
-        '    cp -a "$dir"/. "$target"/\n'
-        "  fi\n"
-        "done\n"
-        "for dir in bin lib opt etc; do\n"
-        '  if [ -d "$dir" ]; then\n'
-        '    mkdir -p "$out/$dir"\n'
-        '    cp -a "$dir"/. "$out/$dir"/\n'
-        "  fi\n"
-        "done\n"
-        "runHook postInstall"
-    )
-    zip_install = (
-        "runHook preInstall\n"
-        'mkdir -p "$out/Applications" "$out/bin"\n'
-        'cp -R -- ${lib.escapeShellArg source.app} "$out/Applications/"\n'
-        'makeWrapper "$out/Applications/"'
-        '${lib.escapeShellArg "${source.app}/Contents/MacOS/${source.exe}"} '
-        f'"$out/bin/{pname}"\n'
-        "runHook postInstall"
-    )
-    install_body = (
-        f"if {stdenv_arg}.hostPlatform.isDarwin then ''\n{zip_install}\n  '' else ''\n{deb_install}\n  ''"
-        if (has_deb and has_zip)
-        else f"''\n{zip_install}\n  ''"
-        if has_zip
-        else f"''\n{deb_install}\n  ''"
-    )
-    args_header = ",\n  ".join(inputs)
     expr = (
-        f"{{\n  {args_header},\n}}:\n"
+        "{\n"
+        "  lib,\n"
+        "  fetchurl,\n"
+        "  stdenv,\n"
+        "  stdenvNoCC,\n"
+        "  bintools,\n"
+        "  gnutar,\n"
+        "  xz,\n"
+        "  zstd,\n"
+        "  autoPatchelfHook,\n"
+        "  unzip,\n"
+        "  makeWrapper,\n"
+        "}:\n"
         "let\n"
-        f"  inherit ({stdenv_arg}.hostPlatform) system;\n"
+        "  inherit (stdenvNoCC.hostPlatform) system;\n"
         "  sources = {\n" + "\n".join(src_entries) + "\n  };\n"
         "  source = sources.${system};\n"
         "in\n"
-        f"{stdenv_arg}.mkDerivation {{\n"
+        "(if source.dynamic then stdenv else stdenvNoCC).mkDerivation {\n"
         f"  pname = {_nix_str(pname)};\n"
         f"  version = {_nix_str(ver)};\n"
         "  src = fetchurl {\n"
         "    inherit (source) url hash;\n"
         "  };\n"
-        f"  nativeBuildInputs = {native_expr};\n" + build_inputs + "  dontConfigure = true;\n"
+        "  nativeBuildInputs =\n"
+        '    lib.optionals (source.kind == "deb") (\n'
+        "      [\n"
+        "        bintools\n"
+        "        gnutar\n"
+        "        xz\n"
+        "        zstd\n"
+        "      ]\n"
+        "      ++ lib.optionals source.dynamic [ autoPatchelfHook ]\n"
+        "    )\n"
+        '    ++ lib.optionals (source.kind == "zip") [\n'
+        "      unzip\n"
+        "      makeWrapper\n"
+        "    ];\n"
+        "  buildInputs = lib.optionals source.dynamic [ stdenv.cc.cc.lib ];\n"
+        "  dontConfigure = true;\n"
         "  dontBuild = true;\n"
-        f"  unpackPhase = {unpack_body};\n"
-        f"  installPhase = {install_body};\n" + _meta_block(first, pname, systems) + "\n}\n"
+        "  dontFixup = !source.dynamic;\n"
+        "  unpackPhase =\n"
+        '    if source.kind == "deb" then\n'
+        "      ''\n"
+        '        ${lib.getExe\' bintools "ar"} x "$src"\n'
+        "        tar xf data.tar.*\n"
+        "      ''\n"
+        "    else\n"
+        "      ''\n"
+        '        unzip -q "$src"\n'
+        "      '';\n"
+        "  installPhase =\n"
+        '    if source.kind == "deb" then\n'
+        "      ''\n"
+        "        runHook preInstall\n"
+        '        mkdir -p "$out"\n'
+        "        for dir in usr/bin usr/share usr/lib usr/libexec; do\n"
+        '          if [ -d "$dir" ]; then\n'
+        "            target=\"$out/''${dir#usr/}\"\n"
+        '            mkdir -p "$target"\n'
+        '            cp -a "$dir"/. "$target"/\n'
+        "          fi\n"
+        "        done\n"
+        "        for dir in bin lib opt etc; do\n"
+        '          if [ -d "$dir" ]; then\n'
+        '            mkdir -p "$out/$dir"\n'
+        '            cp -a "$dir"/. "$out/$dir"/\n'
+        "          fi\n"
+        "        done\n"
+        "        runHook postInstall\n"
+        "      ''\n"
+        "    else\n"
+        "      ''\n"
+        "        runHook preInstall\n"
+        '        mkdir -p "$out/Applications" "$out/bin"\n'
+        '        cp -R -- ${lib.escapeShellArg source.app} "$out/Applications/"\n'
+        '        makeWrapper "$out/Applications/"'
+        '${lib.escapeShellArg "${source.app}/Contents/MacOS/${source.exe}"} '
+        f'"$out/bin/{pname}"\n'
+        "        runHook postInstall\n"
+        "      '';\n" + _meta_block(first, pname, systems) + "\n}\n"
     )
     return expr, systems
 

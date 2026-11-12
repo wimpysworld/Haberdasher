@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import json
 import plistlib
+import shutil
 import struct
 import subprocess
 import tarfile
@@ -168,7 +170,8 @@ def test_inspect_tarball_static_dynamic_and_macho(tmp_path: Path) -> None:
         }
         static_expr, static_sys = nix._tarball_nix([static_item])  # pyright: ignore[reportPrivateUsage]
         assert static_sys == ("x86_64-linux",)
-        assert "stdenvNoCC" in static_expr and "autoPatchelfHook" not in static_expr
+        assert "stdenvNoCC" in static_expr
+        assert "dynamic = false;" in static_expr and "dynamic = true;" not in static_expr
 
         dyn_tar = tar_gz(("bin/tailor", elf64(0xB7, dynamic=True)))
         dyn_item = nix.inspect(
@@ -180,6 +183,7 @@ def test_inspect_tarball_static_dynamic_and_macho(tmp_path: Path) -> None:
         assert dyn_item.identity == NativeIdentity("nix", "tailor", "aarch64-linux", "0.6.0")
         assert dyn_item.metadata["dynamic_elf"] is True
         dyn_expr, _ = nix._tarball_nix([dyn_item])  # pyright: ignore[reportPrivateUsage]
+        assert "dynamic = true;" in dyn_expr
         assert "autoPatchelfHook" in dyn_expr and "stdenv.cc.cc.lib" in dyn_expr
 
         mac_tar = tar_gz(("tailor", fat(ARM, INTEL)))
@@ -593,3 +597,290 @@ def test_compare_and_validate_retained_and_prepared(tmp_path: Path) -> None:
             nix.validate_retained(
                 replace(retained, objects=bad_refs), policy=POLICY, runtime=runtime
             )
+
+
+def test_per_system_derivation_invariance_when_sibling_systems_added(tmp_path: Path) -> None:
+    with private_workspace(tmp_path) as runtime:
+        tar_x86_static = InspectedAsset(
+            verified_asset(
+                tmp_path,
+                "tailor_0.6.0_linux_x86_64.tar.gz",
+                tar_gz(("tailor", elf64(0x3E, dynamic=False))),
+                asset_id=40,
+            ),
+            NativeIdentity("nix", "tailor", "x86_64-linux", "0.6.0"),
+            {
+                "mode": "tarball",
+                "desc": "Fast tool",
+                "license": "MIT",
+                "binary": "tailor",
+                "dynamic_elf": False,
+            },
+            {},
+            "unsigned",
+        )
+        tar_x86_dynamic = replace(
+            tar_x86_static,
+            metadata={**tar_x86_static.metadata, "dynamic_elf": True},
+        )
+        tar_arm_dynamic = InspectedAsset(
+            verified_asset(
+                tmp_path,
+                "tailor_0.6.0_linux_arm64.tar.gz",
+                tar_gz(("tailor", elf64(0xB7, dynamic=True))),
+                asset_id=41,
+            ),
+            NativeIdentity("nix", "tailor", "aarch64-linux", "0.6.0"),
+            {
+                "mode": "tarball",
+                "desc": "Fast tool",
+                "license": "MIT",
+                "binary": "tailor",
+                "dynamic_elf": True,
+            },
+            {},
+            "unsigned",
+        )
+        tar_arm_static = replace(
+            tar_arm_dynamic,
+            metadata={**tar_arm_dynamic.metadata, "dynamic_elf": False},
+        )
+        tar_mac_universal = InspectedAsset(
+            verified_asset(
+                tmp_path,
+                "tailor_0.6.0_darwin_all.tar.gz",
+                tar_gz(("tailor", fat(ARM, INTEL))),
+                asset_id=42,
+            ),
+            NativeIdentity("nix", "tailor", "aarch64-darwin", "0.6.0"),
+            {
+                "mode": "tarball",
+                "desc": "Fast tool",
+                "license": "MIT",
+                "binary": "tailor",
+                "dynamic_elf": False,
+                "universal": True,
+            },
+            {},
+            "unsigned",
+        )
+
+        deb_x86_dynamic = InspectedAsset(
+            verified_asset(tmp_path, "tool_1.4.0_amd64.deb", b"deb-x86", asset_id=50),
+            NativeIdentity("nix", "tool", "x86_64-linux", "1.4.0"),
+            {
+                "mode": "deb",
+                "desc": "Fallback DEB tool",
+                "license": "GPL-3.0-only",
+                "dynamic_elf": True,
+            },
+            {},
+            "unsigned",
+        )
+        deb_x86_static = replace(
+            deb_x86_dynamic,
+            metadata={**deb_x86_dynamic.metadata, "dynamic_elf": False},
+        )
+        deb_arm_static = InspectedAsset(
+            verified_asset(tmp_path, "tool_1.4.0_arm64.deb", b"deb-arm", asset_id=51),
+            NativeIdentity("nix", "tool", "aarch64-linux", "1.4.0"),
+            {
+                "mode": "deb",
+                "desc": "Fallback DEB tool",
+                "license": "GPL-3.0-only",
+                "dynamic_elf": False,
+            },
+            {},
+            "unsigned",
+        )
+        deb_arm_dynamic = replace(
+            deb_arm_static,
+            metadata={**deb_arm_static.metadata, "dynamic_elf": True},
+        )
+        zip_mac = InspectedAsset(
+            verified_asset(tmp_path, "Tool-1.4.0-mac-arm64.zip", b"zip-mac", asset_id=52),
+            NativeIdentity("nix", "tool", "aarch64-darwin", "1.4.0"),
+            {
+                "mode": "zip",
+                "desc": "",
+                "license": "GPL-3.0-only",
+                "app": "Tool.app",
+                "executable": "ToolBin",
+            },
+            {},
+            "unsigned",
+        )
+
+        tar_solo_static, _ = nix._tarball_nix([tar_x86_static])  # pyright: ignore[reportPrivateUsage]
+        tar_multi_static, _ = nix._tarball_nix(  # pyright: ignore[reportPrivateUsage]
+            [tar_x86_static, tar_arm_dynamic, tar_mac_universal]
+        )
+        tar_solo_dyn, _ = nix._tarball_nix([tar_x86_dynamic])  # pyright: ignore[reportPrivateUsage]
+        tar_multi_dyn, _ = nix._tarball_nix(  # pyright: ignore[reportPrivateUsage]
+            [tar_x86_dynamic, tar_arm_static, tar_mac_universal]
+        )
+        fb_solo_dyn, _ = nix._fallback_nix([deb_x86_dynamic])  # pyright: ignore[reportPrivateUsage]
+        fb_multi_dyn, _ = nix._fallback_nix(  # pyright: ignore[reportPrivateUsage]
+            [deb_x86_dynamic, deb_arm_static, zip_mac]
+        )
+        fb_solo_static, _ = nix._fallback_nix([deb_x86_static])  # pyright: ignore[reportPrivateUsage]
+        fb_multi_static, _ = nix._fallback_nix(  # pyright: ignore[reportPrivateUsage]
+            [deb_x86_static, deb_arm_dynamic, zip_mac]
+        )
+        fb_solo_zip, _ = nix._fallback_nix([zip_mac])  # pyright: ignore[reportPrivateUsage]
+
+        expr_files: dict[str, Path] = {}
+        for idx, (label, expr) in enumerate(
+            [
+                ("tar_solo_static", tar_solo_static),
+                ("tar_multi_static", tar_multi_static),
+                ("tar_solo_dyn", tar_solo_dyn),
+                ("tar_multi_dyn", tar_multi_dyn),
+                ("fb_solo_dyn", fb_solo_dyn),
+                ("fb_multi_dyn", fb_multi_dyn),
+                ("fb_solo_static", fb_solo_static),
+                ("fb_multi_static", fb_multi_static),
+                ("fb_solo_zip", fb_solo_zip),
+            ]
+        ):
+            expr_path = tmp_path / f"expr-{idx}-{label}.nix"
+            atomic_write(expr_path, expr.encode("utf-8"))
+            fmt = runtime.run(["nixfmt", str(expr_path)])
+            assert fmt.returncode == 0, fmt.stderr.decode(errors="replace")
+            expr_files[label] = expr_path
+
+        tool_path = runtime.environment["PATH"]
+        if shutil.which("nix-instantiate", path=tool_path) is None:
+            return
+
+        harness = (
+            "let\n"
+            "  evalInputs = file: system:\n"
+            "    let\n"
+            "      fn = import file;\n"
+            "      lib = {\n"
+            "        optionals = cond: xs: if cond then xs else [ ];\n"
+            "        escapeShellArg = s:\n"
+            """          "'${builtins.replaceStrings [ "'" ] [ "'\\\\''" ] (toString s)}'";\n"""
+            '        getExe\' = pkg: prog: "${pkg}/bin/${prog}";\n'
+            "        licenses = {\n"
+            '          mit = "mit";\n'
+            '          gpl3Only = "gpl3Only";\n'
+            "        };\n"
+            '        sourceTypes.binaryNativeCode = "binaryNativeCode";\n'
+            "      };\n"
+            "      mkStdenv = name: {\n"
+            "        inherit name;\n"
+            "        hostPlatform = {\n"
+            "          inherit system;\n"
+            '          isLinux = builtins.elem system [ "x86_64-linux" "aarch64-linux" ];\n'
+            '          isDarwin = builtins.elem system [ "x86_64-darwin" "aarch64-darwin" ];\n'
+            "        };\n"
+            '        cc.cc.lib = "gcc-lib-${system}";\n'
+            '        mkDerivation = attrs: (removeAttrs attrs [ "meta" ]) // { builder = name; };\n'
+            "      };\n"
+            "      pool = {\n"
+            "        inherit lib;\n"
+            "        fetchurl = { url, hash }: { inherit url hash; };\n"
+            '        stdenv = mkStdenv "stdenv";\n'
+            '        stdenvNoCC = mkStdenv "stdenvNoCC";\n'
+            '        bintools = "bintools-${system}";\n'
+            '        gnutar = "gnutar-${system}";\n'
+            '        xz = "xz-${system}";\n'
+            '        zstd = "zstd-${system}";\n'
+            '        autoPatchelfHook = "autoPatchelfHook-${system}";\n'
+            '        unzip = "unzip-${system}";\n'
+            '        makeWrapper = "makeWrapper-${system}";\n'
+            "      };\n"
+            "    in\n"
+            "    fn (builtins.intersectAttrs (builtins.functionArgs fn) pool);\n"
+            "in\n"
+            "{\n"
+            + "".join(
+                f'  {label} = evalInputs {path} "{sys_name}";\n'
+                for label, path, sys_name in [
+                    ("tar_solo_static", expr_files["tar_solo_static"], "x86_64-linux"),
+                    ("tar_multi_static", expr_files["tar_multi_static"], "x86_64-linux"),
+                    ("tar_solo_dyn", expr_files["tar_solo_dyn"], "x86_64-linux"),
+                    ("tar_multi_dyn", expr_files["tar_multi_dyn"], "x86_64-linux"),
+                    ("fb_solo_dyn", expr_files["fb_solo_dyn"], "x86_64-linux"),
+                    ("fb_multi_dyn", expr_files["fb_multi_dyn"], "x86_64-linux"),
+                    ("fb_solo_static", expr_files["fb_solo_static"], "x86_64-linux"),
+                    ("fb_multi_static", expr_files["fb_multi_static"], "x86_64-linux"),
+                    ("fb_solo_zip", expr_files["fb_solo_zip"], "aarch64-darwin"),
+                    ("fb_multi_zip", expr_files["fb_multi_dyn"], "aarch64-darwin"),
+                ]
+            )
+            + "}\n"
+        )
+        eval_res = runtime.run(
+            ["nix-instantiate", "--readonly-mode", "--eval", "--strict", "--json", "-E", harness]
+        )
+        assert eval_res.returncode == 0, eval_res.stderr.decode(errors="replace")
+        evaluated = json.loads(eval_res.stdout)
+
+        assert evaluated["tar_solo_static"] == evaluated["tar_multi_static"]
+        assert evaluated["tar_solo_static"]["builder"] == "stdenvNoCC"
+        assert evaluated["tar_solo_static"]["nativeBuildInputs"] == []
+        assert evaluated["tar_solo_static"]["buildInputs"] == []
+        assert evaluated["tar_solo_static"]["dontFixup"] is True
+
+        assert evaluated["tar_solo_dyn"] == evaluated["tar_multi_dyn"]
+        assert evaluated["tar_solo_dyn"]["builder"] == "stdenv"
+        assert evaluated["tar_solo_dyn"]["nativeBuildInputs"] == ["autoPatchelfHook-x86_64-linux"]
+        assert evaluated["tar_solo_dyn"]["buildInputs"] == ["gcc-lib-x86_64-linux"]
+        assert evaluated["tar_solo_dyn"]["dontFixup"] is False
+
+        assert evaluated["fb_solo_dyn"] == evaluated["fb_multi_dyn"]
+        assert evaluated["fb_solo_dyn"]["builder"] == "stdenv"
+        assert evaluated["fb_solo_dyn"]["dontFixup"] is False
+        assert evaluated["fb_solo_dyn"]["unpackPhase"] == (
+            'bintools-x86_64-linux/bin/ar x "$src"\ntar xf data.tar.*\n'
+        )
+        assert 'target="$out/${dir#usr/}"' in evaluated["fb_solo_dyn"]["installPhase"]
+
+        assert evaluated["fb_solo_static"] == evaluated["fb_multi_static"]
+        assert evaluated["fb_solo_static"]["builder"] == "stdenvNoCC"
+        assert evaluated["fb_solo_static"]["dontFixup"] is True
+        assert (
+            "autoPatchelfHook-x86_64-linux" not in evaluated["fb_solo_static"]["nativeBuildInputs"]
+        )
+        assert evaluated["fb_solo_static"]["buildInputs"] == []
+
+        assert evaluated["fb_solo_zip"] == evaluated["fb_multi_zip"]
+        assert evaluated["fb_solo_zip"]["builder"] == "stdenvNoCC"
+        assert evaluated["fb_solo_zip"]["unpackPhase"] == 'unzip -q "$src"\n'
+
+        if shutil.which("haberdasher-nixpkgs", path=tool_path) is None:
+            return
+        nixpkgs_raw = json.loads(runtime.run(["haberdasher-nixpkgs"]).stdout)
+        store_path = nixpkgs_raw["store_path"]
+        real_expr = (
+            "let\n"
+            f'  pkgsLinux = import {store_path} {{ system = "x86_64-linux"; }};\n'
+            f'  pkgsDarwin = import {store_path} {{ system = "aarch64-darwin"; }};\n'
+            "  pair = pkgs: file:\n"
+            "    let drv = pkgs.callPackage file { }; in { inherit (drv) drvPath outPath; };\n"
+            "in {\n"
+            f"  tar_solo_static = pair pkgsLinux {expr_files['tar_solo_static']};\n"
+            f"  tar_multi_static = pair pkgsLinux {expr_files['tar_multi_static']};\n"
+            f"  tar_solo_dyn = pair pkgsLinux {expr_files['tar_solo_dyn']};\n"
+            f"  tar_multi_dyn = pair pkgsLinux {expr_files['tar_multi_dyn']};\n"
+            f"  fb_solo_dyn = pair pkgsLinux {expr_files['fb_solo_dyn']};\n"
+            f"  fb_multi_dyn = pair pkgsLinux {expr_files['fb_multi_dyn']};\n"
+            f"  fb_solo_static = pair pkgsLinux {expr_files['fb_solo_static']};\n"
+            f"  fb_multi_static = pair pkgsLinux {expr_files['fb_multi_static']};\n"
+            f"  fb_solo_zip = pair pkgsDarwin {expr_files['fb_solo_zip']};\n"
+            f"  fb_multi_zip = pair pkgsDarwin {expr_files['fb_multi_dyn']};\n"
+            "}\n"
+        )
+        real_res = runtime.run(
+            ["nix-instantiate", "--readonly-mode", "--eval", "--strict", "--json", "-E", real_expr]
+        )
+        assert real_res.returncode == 0, real_res.stderr.decode(errors="replace")
+        real_paths = json.loads(real_res.stdout)
+        assert real_paths["tar_solo_static"] == real_paths["tar_multi_static"]
+        assert real_paths["tar_solo_dyn"] == real_paths["tar_multi_dyn"]
+        assert real_paths["fb_solo_dyn"] == real_paths["fb_multi_dyn"]
+        assert real_paths["fb_solo_static"] == real_paths["fb_multi_static"]
+        assert real_paths["fb_solo_zip"] == real_paths["fb_multi_zip"]
