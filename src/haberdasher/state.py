@@ -268,12 +268,26 @@ class Published:
         return tuple(ref for ref in self.objects if ref.key in BOOTSTRAP_KEYS)
 
 
+def has_native_metadata(metadata: Mapping[str, JSONValue]) -> bool:
+    return any(key != "rejected" for key in metadata)
+
+
+def rejected(metadata: Mapping[str, JSONValue]) -> frozenset[str]:
+    """Rejected upstream asset SHA-256 digests recorded in inventory metadata."""
+    if "rejected" not in metadata:
+        return frozenset()
+    digests = [core.digest(item) for item in _items(metadata["rejected"])]
+    if len(set(digests)) != len(digests) or digests != sorted(digests):
+        raise ValueError("Invalid rejected digest list")
+    return frozenset(digests)
+
+
 def _paths(
     name: str, metadata: dict[str, JSONValue], move: Callable[[str, str], str]
 ) -> dict[str, JSONValue]:
     """Map every native metadata file between a local path and its public object key."""
     result = dict(metadata)
-    if not result:
+    if not has_native_metadata(result):
         return result
     for field in {
         "apt": ("files",),
@@ -334,11 +348,13 @@ def decode_published(name: str, data: bytes, etag: str | None) -> Published:
         active = tuple(
             decode_record(NativeIdentity, item) for item in _items(record.get("active_identities"))
         )
+        metadata = mapping(record.get("metadata"))
+        rejected(metadata)
         retained = RetainedFormat(
             name,
             history,
             active,
-            mapping(record.get("metadata")),
+            metadata,
             tuple(ref for ref in objects if ref.key not in BOOTSTRAP_KEYS),
         )
         if core.public_inventory(history, objects)["assets"] != value.get("assets"):
@@ -358,8 +374,9 @@ def materialise(store: Store, published: Published, *, out: Path) -> RetainedFor
     rebuilds stale entries from the accepted history and replaces them on the observed ETag.
     """
     retained = published.retained
-    if not retained.metadata:
-        return retained
+    native = {key: value for key, value in retained.metadata.items() if key != "rejected"}
+    if not native:
+        return replace(retained, metadata={})
     refs = {ref.key: ref for ref in published.objects}
     out = safe_path(out.parent, out.name)
     out.mkdir(mode=0o700, parents=True)
@@ -400,7 +417,7 @@ def materialise(store: Store, published: Published, *, out: Path) -> RetainedFor
             return str(out)
         return str(fetch(key))
 
-    metadata = _paths(retained.format, retained.metadata, move)
+    metadata = _paths(retained.format, native, move)
     metadata["etags"] = etags
     metadata["stale"] = list[JSONValue](sorted(stale))
     if retained.format == "apk":
@@ -425,7 +442,7 @@ def _record(retained: RetainedFormat, objects: tuple[ObjectRef, ...]) -> dict[st
     metadata = dict(retained.metadata)
     metadata.pop("etags", None)
     metadata.pop("stale", None)
-    if retained.format == "apk" and metadata:
+    if retained.format == "apk" and has_native_metadata(metadata):
         metadata["indexes"] = {
             arch: {key: item for key, item in mapping(value).items() if key != "etag"}
             for arch, value in mapping(metadata.get("indexes")).items()
@@ -459,7 +476,15 @@ def inventory(
     objects = (*prepared.referenced_objects, *bootstrap)
     value = core.public_inventory(prepared.retained.accepted_history, objects)
     if not prepared.outputs and published.record is not None:
-        value["state"] = published.record
+        record = dict(published.record)
+        metadata = dict(mapping(record.get("metadata", {})))
+        digests = sorted(rejected(prepared.retained.metadata))
+        if digests:
+            metadata["rejected"] = list[JSONValue](digests)
+        else:
+            metadata.pop("rejected", None)
+        record["metadata"] = metadata
+        value["state"] = record
     else:
         value["state"] = _record(prepared.retained, objects)
     return canonical_json(value)

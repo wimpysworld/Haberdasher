@@ -7,7 +7,7 @@ import hashlib
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -17,6 +17,7 @@ from haberdasher.config import Config, FormatPolicy, Policy
 from haberdasher.core import (
     AdmittedAsset,
     InspectedAsset,
+    JSONValue,
     NativeIdentity,
     ObjectRef,
     OutputObject,
@@ -137,16 +138,18 @@ def new_assets(
 ) -> dict[str, list[discovery.DiscoveredAsset]]:
     """Group checksummed assets by format, without the bytes that each inventory already holds."""
     siblings = _siblings(scan)
+    known = {
+        name: {asset.inspected.verified.sha256 for asset in item.retained.accepted_history}
+        | state.rejected(item.retained.metadata)
+        for name, item in published.items()
+    }
     result: dict[str, list[discovery.DiscoveredAsset]] = {name: [] for name in published}
     for item in scan.checksummed:
         if item.checksum is None:
             continue
         group = siblings.get((item.source.repository, item.source.release_id), ())
         for name in discovery.asset_formats(item.source.filename, group):
-            if name not in result:
-                continue
-            accepted = published[name].retained.accepted_history
-            if any(asset.inspected.verified.sha256 == item.checksum.sha256 for asset in accepted):
+            if name not in result or item.checksum.sha256 in known[name]:
                 continue
             result[name].append(item)
     return result
@@ -170,7 +173,7 @@ def prepare_bootstrap(
     for item in prepared:
         if item.format in UNSIGNED:
             continue
-        if item.retained.metadata:
+        if state.has_native_metadata(item.retained.metadata):
             if item.format == "apk":
                 native = next(
                     ref for ref in item.referenced_objects if ref.key == "keys/haberdasher.rsa.pub"
@@ -286,6 +289,17 @@ def _unchanged(published: Published) -> PreparedFormat:
     return PreparedFormat(published.format, published.retained, (), published.retained.objects)
 
 
+def _with_rejected(retained: RetainedFormat, digests: set[str]) -> RetainedFormat:
+    accepted = {asset.inspected.verified.sha256 for asset in retained.accepted_history}
+    merged = sorted((state.rejected(retained.metadata) | digests) - accepted)
+    metadata = {key: value for key, value in retained.metadata.items() if key != "rejected"}
+    if merged:
+        metadata["rejected"] = list[JSONValue](merged)
+    if metadata == retained.metadata:
+        return retained
+    return replace(retained, metadata=metadata)
+
+
 def reconcile(
     config: Config,
     policy: Policy,
@@ -328,6 +342,7 @@ def inspect_new(
     out: Path,
     report: Report = quiet,
     verified_cache: dict[tuple[str, int], VerifiedAsset] | None = None,
+    rejected: set[str] | None = None,
 ) -> list[InspectedAsset]:
     """Download, verify, and inspect new assets. Skip an unsupported asset with one line."""
     adapter = _adapter(name)
@@ -356,6 +371,8 @@ def inspect_new(
                 )
             )
         except UnsupportedAsset as error:
+            if rejected is not None:
+                rejected.add(verified.sha256)
             step(report, name, f"skipped {error}")
     return inspected
 
@@ -391,6 +408,7 @@ def _reconcile(
     with tempfile.TemporaryDirectory(prefix="hd-reconcile-", dir=runtime.root) as temporary:
         root = Path(temporary)
         verified_cache: dict[tuple[str, int], VerifiedAsset] = {}
+        rejected: dict[str, set[str]] = {name: set() for name in names}
         inspected = {
             name: inspect_new(
                 name,
@@ -400,21 +418,44 @@ def _reconcile(
                 out=root / name,
                 report=report,
                 verified_cache=verified_cache,
+                rejected=rejected[name],
             )
             for name in names
         }
         if not missing_bootstrap and not any(inspected.values()):
+            count = 0
+            repositories: list[str] = []
+            updated = dict(published)
             for name in names:
-                step(report, name, "unchanged")
+                current = published[name]
+                prior_rejected = set(state.rejected(current.retained.metadata))
+                all_rejected = prior_rejected | rejected[name]
+                if all_rejected == prior_rejected:
+                    step(report, name, "unchanged")
+                    continue
+                item = PreparedFormat(
+                    name,
+                    _with_rejected(current.retained, all_rejected),
+                    (),
+                    current.retained.objects,
+                )
+                data = state.inventory(item, current.bootstrap, current)
+                state.write_inventory(store, current, data)
+                step(report, name, f"wrote {state.INVENTORY_KEY}")
+                count += 1
+                repositories.append(name)
+                updated[name] = state.decode_published(name, data, None)
             if fingerprint is None:
-                return RunResult(False, 0, len(scan.pending))
+                return RunResult(
+                    bool(count), count, len(scan.pending), repositories=tuple(repositories)
+                )
             fallback = site.descriptions(
-                item.retained.accepted_history for item in published.values()
+                item.retained.accepted_history for item in updated.values()
             )
             writes = {
                 name: write_page(
                     store,
-                    published[name],
+                    updated[name],
                     fingerprint=fingerprint,
                     fallback=fallback,
                     now=now,
@@ -423,32 +464,47 @@ def _reconcile(
                 for name in names
             }
             pages = tuple(name for name in names if writes[name])
-            return RunResult(bool(pages), sum(writes.values()), len(scan.pending), pages=pages)
+            total = count + sum(writes.values())
+            return RunResult(
+                bool(total),
+                total,
+                len(scan.pending),
+                repositories=tuple(repositories),
+                pages=pages,
+            )
         if fingerprint is None:
             raise ValueError("Publication requires the expected signing fingerprint")
         prepared: list[PreparedFormat] = []
         with signing_session(runtime, expected_fingerprint=fingerprint) as signer:
             for name in names:
+                prior_rejected = set(state.rejected(published[name].retained.metadata))
+                all_rejected = prior_rejected | rejected[name]
                 if not inspected[name]:
-                    step(
-                        report,
-                        name,
-                        "adding public keys" if name in missing_bootstrap else "unchanged",
+                    if name in missing_bootstrap:
+                        step(report, name, "adding public keys")
+                    elif all_rejected == prior_rejected:
+                        step(report, name, "unchanged")
+                    unchanged = _unchanged(published[name])
+                    prepared.append(
+                        replace(
+                            unchanged,
+                            retained=_with_rejected(unchanged.retained, all_rejected),
+                        )
                     )
-                    prepared.append(_unchanged(published[name]))
                     continue
                 step(report, name, f"preparing {plural(len(inspected[name]), 'new package')}")
+                built = _prepare(
+                    name,
+                    inspected[name],
+                    state.materialise(store, published[name], out=root / f"{name}-published"),
+                    policy=policies[name],
+                    runtime=runtime,
+                    signer=signer,
+                    now=now,
+                    out=root / name,
+                )
                 prepared.append(
-                    _prepare(
-                        name,
-                        inspected[name],
-                        state.materialise(store, published[name], out=root / f"{name}-published"),
-                        policy=policies[name],
-                        runtime=runtime,
-                        signer=signer,
-                        now=now,
-                        out=root / name,
-                    )
+                    replace(built, retained=_with_rejected(built.retained, all_rejected))
                 )
                 if prepared[-1].outputs and name not in UNSIGNED:
                     step(report, name, "signed metadata")
@@ -460,7 +516,7 @@ def _reconcile(
             )
         count = 0
         packages = 0
-        repositories: list[str] = []
+        repositories = []
         written: list[str] = []
         fallback = site.descriptions(item.retained.accepted_history for item in prepared)
         for item in prepared:

@@ -728,6 +728,7 @@ def test_unsupported_asset_is_skipped_with_one_line(
     fixture = Fixture(tmp_path, monkeypatch, ("arch",))
     fixture.releases.add("other", "armhf")
     fixture.releases.add("tool", "1")
+    rejected_sha = core.sha256_file(fixture.releases.assets[0][1])[0]
     skipped = "arch  skipped other-armhf.pkg.tar.zst: unsupported Arch architecture 'armhf'"
     lines: list[str] = []
     result = fixture.run(lines.append)
@@ -735,10 +736,14 @@ def test_unsupported_asset_is_skipped_with_one_line(
     assert lines.count(skipped) == 1
     assert lines.index(skipped) < lines.index("arch  preparing 1 new package")
     assert fixture.path("arch", "x86_64/db").read_text() == "tool-1\n"
+    assert fixture.adapter.inspections == 2
+    published_state = cast(dict[str, object], fixture.inventory()["state"])
+    assert cast(dict[str, object], published_state["metadata"])["rejected"] == [rejected_sha]
     lines.clear()
     assert not fixture.run(lines.append).changed
-    assert lines == ["arch  locked", skipped, "arch  unchanged", "arch  unlocked"]
+    assert lines == ["arch  locked", "arch  unchanged", "arch  unlocked"]
     assert fixture.store.writes == ["arch/haberdasher.lock"]
+    assert fixture.adapter.inspections == 2
     inventory = fixture.path("arch", state.INVENTORY_KEY).read_bytes()
     scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
     fixture.path("arch", site.PAGE_KEY).unlink()
@@ -753,7 +758,6 @@ def test_unsupported_asset_is_skipped_with_one_line(
         cli.show_plan(scan, fixture.config, fixture.runtime, {"arch": "https://pkg.example"})
     output = capsys.readouterr().out.splitlines()
     assert output[1:] == [
-        skipped,
         "arch  would write og.png",
         "arch  would write index.html",
         "",
@@ -763,6 +767,7 @@ def test_unsupported_asset_is_skipped_with_one_line(
         "No new packages. 1 index page to write. 1 preview image to write. Nothing written. "
         "Run `just publish` to publish them.",
     ]
+    assert fixture.adapter.inspections == 2
     lines.clear()
     result = fixture.run(lines.append)
     assert (result.changed, result.pages, result.published_objects, fixture.store.writes) == (
@@ -773,12 +778,54 @@ def test_unsupported_asset_is_skipped_with_one_line(
     )
     assert lines == [
         "arch  locked",
-        skipped,
         "arch  unchanged",
         "arch  wrote og.png",
         "arch  wrote index.html",
         "arch  unlocked",
     ]
+    assert fixture.adapter.inspections == 2
+
+
+def test_rejected_only_format_persists_digests_across_reruns_and_later_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("first", "armhf")
+    first_sha = core.sha256_file(fixture.releases.assets[0][1])[0]
+    first = fixture.run()
+    assert first.changed and first.packages == 0
+    assert fixture.adapter.inspections == 1
+    assert not fixture.run().changed
+    assert fixture.adapter.inspections == 1
+    assert fixture.store.writes == ["arch/haberdasher.lock"]
+
+    fixture.releases.add("second", "armhf")
+    second_sha = core.sha256_file(fixture.releases.assets[1][1])[0]
+    lines: list[str] = []
+    second = fixture.run(lines.append)
+    assert second.changed and second.packages == 0 and second.repositories == ("arch",)
+    assert fixture.adapter.inspections == 2
+    assert "arch  unchanged" not in lines and "arch  wrote haberdasher.json" in lines
+    assert not fixture.run().changed
+    assert fixture.adapter.inspections == 2
+
+    fixture.releases.add("tool", "1")
+    third = fixture.run()
+    assert third.changed and third.packages == 1
+    assert fixture.adapter.inspections == 3
+    metadata = cast(
+        dict[str, object], cast(dict[str, object], fixture.inventory()["state"])["metadata"]
+    )
+    assert metadata["rejected"] == sorted([first_sha, second_sha])
+    assert not fixture.run().changed
+    assert fixture.adapter.inspections == 3
+
+    tampered = fixture.inventory()
+    cast(dict[str, object], cast(dict[str, object], tampered["state"])["metadata"])["rejected"] = [
+        "not-a-sha256"
+    ]
+    with pytest.raises(state.StateError, match="inventory is invalid"):
+        state.decode_published("arch", core.canonical_json(tampered), None)
 
 
 def test_preview_image_is_written_only_when_missing_or_changed(
