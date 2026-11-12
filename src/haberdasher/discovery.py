@@ -514,7 +514,10 @@ def tag_nix_files(repository: str, tag: str, runtime: Runtime) -> dict[str, str]
     )
     if value is _MISSING:
         return None
-    tree_obj = _mapping(value).get("tree")
+    tree_map = _mapping(value)
+    if tree_map.get("truncated", False) is not False:
+        raise DiscoveryFailure(f"{repository}@{tag}: GitHub git tree response is truncated")
+    tree_obj = tree_map.get("tree")
     if not isinstance(tree_obj, list):
         raise DiscoveryFailure("Expected a GitHub Git tree array")
     blobs: dict[str, tuple[str, int]] = {}

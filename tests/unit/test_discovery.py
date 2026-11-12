@@ -978,6 +978,7 @@ def test_tag_nix_files_filters_devshell_and_loads_release_expressions(
 
     # Tailor-style devShell tree: flake.nix + nix/loader.nix + nix/hooks.nix -> None
     github.pages["repos/example/tool/git/trees/v0.6.0?recursive=1"] = {  # pyright: ignore[reportArgumentType]
+        "truncated": False,
         "tree": [
             {
                 "path": "flake.nix",
@@ -1000,12 +1001,13 @@ def test_tag_nix_files_filters_devshell_and_loads_release_expressions(
                 "sha": hooks_sha,
                 "size": hooks_size,
             },
-        ]
+        ],
     }
     assert discovery.tag_nix_files("example/tool", "v0.6.0", github) is None
 
     # Sidra-style release tree: flake.nix + nix/linux.nix + nix/darwin.nix (+ devShell files ignored)
     github.pages["repos/example/tool/git/trees/1.3.0?recursive=1"] = {  # pyright: ignore[reportArgumentType]
+        "truncated": False,
         "tree": [
             {
                 "path": "flake.nix",
@@ -1035,7 +1037,7 @@ def test_tag_nix_files_filters_devshell_and_loads_release_expressions(
                 "sha": loader_sha,
                 "size": loader_size,
             },
-        ]
+        ],
     }
     github.pages[f"repos/example/tool/git/blobs/{flake_sha}"] = flake_blob  # pyright: ignore[reportArgumentType]
     github.pages[f"repos/example/tool/git/blobs/{linux_sha}"] = linux_blob  # pyright: ignore[reportArgumentType]
@@ -1047,3 +1049,14 @@ def test_tag_nix_files_filters_devshell_and_loads_release_expressions(
         "nix/linux.nix": "{ stdenv }: stdenv.mkDerivation {}\n",
     }
     assert not any(f"blobs/{loader_sha}" in call[-1] for call in github.calls)
+
+
+def test_tag_nix_files_rejects_truncated_tree(github: RecordedGitHub) -> None:
+    github.pages["repos/example/tool/git/trees/1.3.0?recursive=1"] = {  # pyright: ignore[reportArgumentType]
+        "truncated": True,
+        "tree": [],
+    }
+    with pytest.raises(
+        DiscoveryFailure, match="example/tool@1.3.0: GitHub git tree response is truncated"
+    ):
+        discovery.tag_nix_files("example/tool", "1.3.0", github)
