@@ -146,13 +146,24 @@ Haberdasher signs every commit and the summary with its own key, and removes any
 
 ## Nix
 
-The Nix binary cache public key appears at `https://nix.wimpys.world/keys/haberdasher-nix.pub` with the first published package. Haberdasher derives the `nix.wimpys.world-1` Ed25519 key deterministically from the RSA4096 primary key with HKDF-SHA256.
-
-Verify `https://nix.wimpys.world/keys/haberdasher.asc` or `haberdasher.gpg` against your independently verified primary fingerprint first, then read the binary cache public key from the same origin:
+The Nix binary cache public key appears at `https://nix.wimpys.world/keys/haberdasher-nix.pub` with the first published package. Haberdasher derives the `nix.wimpys.world-1` Ed25519 key deterministically from the secret RSA4096 primary numbers with HKDF-SHA256. A client cannot check that derivation from the public OpenPGP key alone. Verify `https://nix.wimpys.world/keys/haberdasher.gpg` against your independently verified primary fingerprint to check the origin's published OpenPGP key material, and trust `haberdasher-nix.pub` from `https://nix.wimpys.world/keys/haberdasher-nix.pub` over HTTPS, pinned by value in `extra-trusted-public-keys`:
 
 ```sh
-curl -fsSL https://nix.wimpys.world/keys/haberdasher.asc | gpg --show-keys
-curl -fsSL https://nix.wimpys.world/keys/haberdasher-nix.pub
+set -eu
+: "${EXPECTED_FINGERPRINT:?Set the independently verified full primary fingerprint}"
+: "${BOOTSTRAP_DIR:?Set a private temporary directory outside the checkout}"
+curl --fail --silent --show-error \
+  https://nix.wimpys.world/keys/haberdasher.gpg \
+  --output "$BOOTSTRAP_DIR/haberdasher.gpg"
+gpg --no-options --homedir "$BOOTSTRAP_DIR" --batch --no-autostart \
+  --with-colons --with-key-data --show-keys "$BOOTSTRAP_DIR/haberdasher.gpg" \
+  > "$BOOTSTRAP_DIR/key.txt"
+test "$(grep '^fpr:' "$BOOTSTRAP_DIR/key.txt" | cut -d: -f10)" \
+  = "$EXPECTED_FINGERPRINT"
+test "$(grep -E '^(pub|sub|sec|ssb):' "$BOOTSTRAP_DIR/key.txt" | cut -d: -f1)" \
+  = pub
+curl --fail --silent --show-error \
+  https://nix.wimpys.world/keys/haberdasher-nix.pub
 ```
 
 Add the binary cache and its `nix.wimpys.world-1:<base64>` public key to your NixOS configuration:
