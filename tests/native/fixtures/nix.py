@@ -9,7 +9,7 @@ import shutil
 import struct
 import subprocess
 import tarfile
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -247,7 +247,7 @@ def bind_github_metadata(
     description: str = "Disposable Nix fixture",
     licence: str = "MIT",
     upstream_by_repo: Mapping[str, Mapping[str, str]] | None = None,
-) -> Iterator[None]:
+) -> Generator[None]:
     """Intercept `gh api` calls for `release_details` and `tag_nix_files` while running native tools."""
     real_run: Callable[..., subprocess.CompletedProcess[bytes]] = runtime.run
     blobs: dict[tuple[str, str], bytes] = {}
@@ -425,11 +425,7 @@ class NixClient:
         assert proc.stdout.decode("utf-8") == expected_output + "\n"
 
     def make_writable(self) -> None:
-        for path in (self.base, *self.base.rglob("*")):
-            if path.is_symlink():
-                continue
-            mode = path.stat().st_mode
-            path.chmod(mode | 0o200)
+        make_tree_writable(self.base)
 
 
 def make_tree_writable(root: Path) -> None:
