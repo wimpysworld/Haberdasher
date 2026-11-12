@@ -19,6 +19,7 @@ from haberdasher.core import AdmittedAsset, ObjectRef, plural, size_text
 from haberdasher.formats.apt import COMPONENT, SUITE
 from haberdasher.formats.brew import TAP, TAP_NAME
 from haberdasher.formats.flatpak import FLATHUB, FLATPAKREPO, REMOTE, TITLE
+from haberdasher.formats.nix import REPO as NIX_REPO
 from haberdasher.formats.scoop import BUCKET, REPO
 from haberdasher.site_style import (
     BASE_CSS,
@@ -42,7 +43,6 @@ OWNER = "Martin Wimpress"
 OWNER_URL = "https://github.com/flexiondotorg"
 SOURCE = "https://github.com/wimpysworld/Haberdasher"
 APT_KEYRING = "/etc/apt/keyrings/haberdasher.gpg"
-NIX_REPO = "packages.git"
 _HASH = re.compile(rb'<meta name="haberdasher-content" content="([0-9a-f]{64})">')
 _CDN = "https://cdn.jsdelivr.net/npm/"
 _ICONS = _CDN + "simple-icons@16.37.0/icons/"
