@@ -275,6 +275,10 @@ def test_two_generations_dumb_http_flake_cache_substitution_and_rejections() -> 
                 "build", "--no-link", tool2_store_path, check=False, trusted_keys=""
             )
             assert res_missing.returncode != 0
+            assert (
+                "not signed by any of the keys in 'trusted-public-keys'"
+                in res_missing.stderr.decode(errors="replace")
+            )
             assert not missing_key_client.real_store_path(tool2_store_path).exists()
 
             wrong_key_client = NixClient(runtime, "wrong-key", http.url("nix"), wrong_nix_pub)
@@ -282,6 +286,10 @@ def test_two_generations_dumb_http_flake_cache_substitution_and_rejections() -> 
                 "build", "--no-link", tool2_store_path, check=False
             )
             assert res_wrong.returncode != 0
+            assert (
+                "not signed by any of the keys in 'trusted-public-keys'"
+                in res_wrong.stderr.decode(errors="replace")
+            )
             assert not wrong_key_client.real_store_path(tool2_store_path).exists()
 
         # 6. Negative integrity controls: tampered .narinfo Sig, tampered NarSize, and tampered .nar.zst.
@@ -294,15 +302,14 @@ def test_two_generations_dumb_http_flake_cache_substitution_and_rejections() -> 
             if tamper_kind == "sig":
                 tampered_sig = f"Sig: {NIX_KEY_NAME}:{'A' * 86}==\n"
                 narinfo_path.write_text(
-                    re.sub(r"^Sig: .*$", tampered_sig.strip(), narinfo_text, flags=re.M) + "\n",
+                    re.sub(r"^Sig: .*$", tampered_sig.strip(), narinfo_text, flags=re.M),
                     encoding="utf-8",
                 )
             elif tamper_kind == "narsize":
                 info = parse_narinfo(narinfo_path)
                 bad_size = int(info["NarSize"]) + 1
                 narinfo_path.write_text(
-                    re.sub(r"^NarSize: \d+$", f"NarSize: {bad_size}", narinfo_text, flags=re.M)
-                    + "\n",
+                    re.sub(r"^NarSize: \d+$", f"NarSize: {bad_size}", narinfo_text, flags=re.M),
                     encoding="utf-8",
                 )
             else:
@@ -317,4 +324,10 @@ def test_two_generations_dumb_http_flake_cache_substitution_and_rejections() -> 
                 )
                 res_bad = bad_client.run_nix("build", "--no-link", target_store_path, check=False)
                 assert res_bad.returncode != 0
+                bad_stderr = res_bad.stderr.decode(errors="replace")
+                if tamper_kind in ("sig", "narsize"):
+                    assert "not signed by any of the keys in 'trusted-public-keys'" in bad_stderr
+                else:
+                    assert f"copying path '{target_store_path}'" in bad_stderr
+                    assert "Failed to open archive" in bad_stderr
                 assert not bad_client.real_store_path(target_store_path).exists()
