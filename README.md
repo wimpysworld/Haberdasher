@@ -65,7 +65,7 @@ Haberdasher reads credentials only from the runtime environment:
 
 Local runs take the Cloudflare values from SOPS. GitHub Secrets use the same names. When `GH_TOKEN` and `GITHUB_TOKEN` are unset, Haberdasher reads the token of the stored `gh` login with `gh auth token`.
 
-One RSA4096 key signs every format. Never commit a credential or a private key.
+The RSA4096 key signs every signed format except Nix, which uses the Ed25519 key derived from it. Never commit a credential or a private key.
 
 The [publish workflow](.github/workflows/publish.yml) is a manual run with no schedule. It runs when the repository variable `HD_PUBLISH_ENABLED` is `true`, the ref is the default branch, and the `publisher` environment allows it. One concurrency group serialises its runs.
 
