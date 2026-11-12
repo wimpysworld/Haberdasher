@@ -838,7 +838,7 @@ def test_second_source_with_a_different_release_layout(tmp_path: Path) -> None:
             "org.example.Other.flatpak",
         }
         assert not result.pending
-        assert publish.provided(result) == {"apt", "rpm", "arch", "apk", "flatpak"}
+        assert publish.provided(result) == {"apt", "rpm", "arch", "apk", "flatpak", "nix"}
         assert lines == [
             "example/other: latest release 1.2.3",
             "  1.2.3  checksums OK  no cosign bundle  5 packages",
@@ -893,3 +893,170 @@ def test_bare_digest_needs_a_per_asset_checksum_file() -> None:
     assert parse_checksums(data, source)[0].filename == "app.deb"
     with pytest.raises(DiscoveryFailure, match="Malformed"):
         parse_checksums(data, checksum_source(data))
+
+
+@pytest.mark.parametrize(
+    ("filename", "siblings", "expected"),
+    [
+        (
+            "tailor_0.6.0_linux_amd64.deb",
+            ("tailor_0.6.0_linux_amd64.deb", "tailor_0.6.0_linux_x86_64.tar.gz"),
+            ("apt",),
+        ),
+        (
+            "tailor_0.6.0_linux_x86_64.tar.gz",
+            ("tailor_0.6.0_linux_amd64.deb", "tailor_0.6.0_linux_x86_64.tar.gz"),
+            ("nix",),
+        ),
+        ("tailor_0.6.0_darwin_arm64.tar.gz", ("tailor_0.6.0_darwin_arm64.tar.gz",), ("nix",)),
+        (
+            "Sidra-1.3.0-linux-amd64.deb",
+            (
+                "Sidra-1.3.0-linux-amd64.deb",
+                "Sidra-1.3.0-mac-arm64.dmg",
+                "Sidra-1.3.0-mac-arm64.zip",
+            ),
+            ("apt", "nix"),
+        ),
+        (
+            "Sidra-1.3.0-mac-arm64.dmg",
+            (
+                "Sidra-1.3.0-linux-amd64.deb",
+                "Sidra-1.3.0-mac-arm64.dmg",
+                "Sidra-1.3.0-mac-arm64.zip",
+            ),
+            ("nix",),
+        ),
+        (
+            "Sidra-1.3.0-mac-arm64.zip",
+            ["Sidra-1.3.0-mac-arm64.dmg", "Sidra-1.3.0-mac-arm64.zip"],
+            ("brew", "nix"),
+        ),
+        (
+            "Sidra-1.3.0-mac-arm64.zip",
+            (
+                "Sidra-1.3.0-linux-amd64.deb",
+                "Sidra-1.3.0-mac-arm64.dmg",
+                "Sidra-1.3.0-mac-arm64.zip",
+            ),
+            ("brew", "nix"),
+        ),
+        (
+            "Sidra-1.3.0-mac-arm64.zip",
+            ("Sidra-1.3.0-linux-amd64.deb", "Sidra-1.3.0-mac-arm64.zip"),
+            ("brew", "nix"),
+        ),
+        ("Sidra-1.3.0-win-x64.zip", ("Sidra-1.3.0-win-x64.zip",), ("scoop",)),
+        ("source.tar.gz", ("source.tar.gz",), ()),
+    ],
+)
+def test_asset_formats_routes_tarballs_and_fallback_assets(
+    filename: str, siblings: Sequence[str], expected: tuple[str, ...]
+) -> None:
+    assert discovery.asset_formats(filename, siblings) == expected
+
+
+def test_tag_nix_files_filters_devshell_and_loads_release_expressions(
+    github: RecordedGitHub,
+) -> None:
+    import base64
+
+    def blob_payload(text: str) -> tuple[str, int, dict[str, object]]:
+        raw = text.encode("utf-8")
+        sha = hashlib.sha256(raw).hexdigest()[:40]
+        return (
+            sha,
+            len(raw),
+            {"encoding": "base64", "content": base64.b64encode(raw).decode("ascii")},
+        )
+
+    flake_sha, flake_size, flake_blob = blob_payload("{ outputs = _: {}; }\n")
+    linux_sha, linux_size, linux_blob = blob_payload("{ stdenv }: stdenv.mkDerivation {}\n")
+    darwin_sha, darwin_size, darwin_blob = blob_payload("{ stdenv }: stdenv.mkDerivation {}\n")
+    loader_sha, loader_size, _ = blob_payload("# Tailor devShell loader\n")
+    hooks_sha, hooks_size, _ = blob_payload("# Tailor devShell hooks\n")
+
+    # Tailor-style devShell tree: flake.nix + nix/loader.nix + nix/hooks.nix -> None
+    github.pages["repos/example/tool/git/trees/v0.6.0?recursive=1"] = {  # pyright: ignore[reportArgumentType]
+        "truncated": False,
+        "tree": [
+            {
+                "path": "flake.nix",
+                "type": "blob",
+                "mode": "100644",
+                "sha": flake_sha,
+                "size": flake_size,
+            },
+            {
+                "path": "nix/loader.nix",
+                "type": "blob",
+                "mode": "100644",
+                "sha": loader_sha,
+                "size": loader_size,
+            },
+            {
+                "path": "nix/hooks.nix",
+                "type": "blob",
+                "mode": "100644",
+                "sha": hooks_sha,
+                "size": hooks_size,
+            },
+        ],
+    }
+    assert discovery.tag_nix_files("example/tool", "v0.6.0", github) is None
+
+    # Sidra-style release tree: flake.nix + nix/linux.nix + nix/darwin.nix (+ devShell files ignored)
+    github.pages["repos/example/tool/git/trees/1.3.0?recursive=1"] = {  # pyright: ignore[reportArgumentType]
+        "truncated": False,
+        "tree": [
+            {
+                "path": "flake.nix",
+                "type": "blob",
+                "mode": "100644",
+                "sha": flake_sha,
+                "size": flake_size,
+            },
+            {
+                "path": "nix/linux.nix",
+                "type": "blob",
+                "mode": "100644",
+                "sha": linux_sha,
+                "size": linux_size,
+            },
+            {
+                "path": "nix/darwin.nix",
+                "type": "blob",
+                "mode": "100644",
+                "sha": darwin_sha,
+                "size": darwin_size,
+            },
+            {
+                "path": "nix/loader.nix",
+                "type": "blob",
+                "mode": "100644",
+                "sha": loader_sha,
+                "size": loader_size,
+            },
+        ],
+    }
+    github.pages[f"repos/example/tool/git/blobs/{flake_sha}"] = flake_blob  # pyright: ignore[reportArgumentType]
+    github.pages[f"repos/example/tool/git/blobs/{linux_sha}"] = linux_blob  # pyright: ignore[reportArgumentType]
+    github.pages[f"repos/example/tool/git/blobs/{darwin_sha}"] = darwin_blob  # pyright: ignore[reportArgumentType]
+    loaded = discovery.tag_nix_files("example/tool", "1.3.0", github)
+    assert loaded == {
+        "flake.nix": "{ outputs = _: {}; }\n",
+        "nix/darwin.nix": "{ stdenv }: stdenv.mkDerivation {}\n",
+        "nix/linux.nix": "{ stdenv }: stdenv.mkDerivation {}\n",
+    }
+    assert not any(f"blobs/{loader_sha}" in call[-1] for call in github.calls)
+
+
+def test_tag_nix_files_rejects_truncated_tree(github: RecordedGitHub) -> None:
+    github.pages["repos/example/tool/git/trees/1.3.0?recursive=1"] = {  # pyright: ignore[reportArgumentType]
+        "truncated": True,
+        "tree": [],
+    }
+    with pytest.raises(
+        DiscoveryFailure, match="example/tool@1.3.0: GitHub git tree response is truncated"
+    ):
+        discovery.tag_nix_files("example/tool", "1.3.0", github)

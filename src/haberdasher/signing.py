@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import hmac
+import math
 import os
 import re
+import shutil
 import stat
 import tempfile
 import time
@@ -17,10 +21,21 @@ from haberdasher.runtime import Runtime, RuntimeFailure, private_workspace
 
 MAX_KEY_BYTES = 1024 * 1024
 ALPINE_SIGNATURE_MEMBER = ".SIGN.RSA256.haberdasher.rsa.pub"
+NIX_KEY_NAME = "nix.wimpys.world-1"
+_NIX_HKDF_SALT = b"haberdasher-nix-ed25519-v1"
+_ED25519_PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
+_ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 
 
 class SigningFailure(RuntimeError):
     pass
+
+
+def _mpint(value: int) -> bytes:
+    if value <= 0:
+        raise SigningFailure("Expected positive RSA integer")
+    raw = value.to_bytes((value.bit_length() + 7) // 8, "big")
+    return len(raw).to_bytes(4, "big") + raw
 
 
 def _checked(runtime: Runtime, argv: Sequence[str], *, data: bytes | None = None) -> bytes:
@@ -112,6 +127,7 @@ class SigningSession:
         self._grip = ""
         self._active = True
         self._alpine: tuple[Path, Path] | None = None
+        self._nix: tuple[Path, Path, str] | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -305,6 +321,85 @@ class SigningSession:
         atomic_write(public, exported)
         self._alpine = private, public
         return self._alpine
+
+    def nix_key(self) -> tuple[Path, Path, str]:
+        self._validate()
+        if self._nix is not None:
+            return self._nix
+        private_pem, _ = self.alpine_key()
+        rsa_der = self._run(
+            ["openssl", "rsa", "-traditional", "-in", str(private_pem), "-outform", "DER"]
+        )
+        try:
+            asn1 = self._run(["openssl", "asn1parse", "-inform", "DER"], data=rsa_der).decode(
+                "ascii"
+            )
+        except UnicodeError:
+            raise SigningFailure("Invalid PKCS#1 ASN.1 output") from None
+        integers = [
+            int(match[1], 16)
+            for line in asn1.splitlines()
+            if (
+                match := re.search(
+                    r"d=1\s+hl=\d+\s+l=\s*\d+\s+prim:\s+INTEGER\s+:([0-9A-F]+)$", line
+                )
+            )
+        ]
+        if len(integers) != 9 or integers[0] != 0:
+            raise SigningFailure("Invalid PKCS#1 RSA private structure")
+        _, n, e, d, p, q, _, _, _ = integers
+        if (
+            n.bit_length() != 4096
+            or e <= 1
+            or p <= 1
+            or q <= 1
+            or p == q
+            or p * q != n
+            or (e * d) % math.lcm(p - 1, q - 1) != 1
+        ):
+            raise SigningFailure("Invalid RSA secret numbers")
+        p_hi, p_lo = (p, q) if p > q else (q, p)
+        d_canon = pow(e, -1, (p_hi - 1) * (p_lo - 1))
+        ikm = b"".join(_mpint(x) for x in (n, e, d_canon, p_hi, p_lo))
+        prk = hmac.digest(_NIX_HKDF_SALT, ikm, "sha256")
+        seed = hmac.digest(prk, NIX_KEY_NAME.encode("ascii") + b"\x01", "sha256")
+        spki = self._run(
+            ["openssl", "pkey", "-inform", "DER", "-pubout", "-outform", "DER"],
+            data=_ED25519_PKCS8_PREFIX + seed,
+        )
+        if len(spki) != 44 or not spki.startswith(_ED25519_SPKI_PREFIX):
+            raise SigningFailure("Invalid derived Ed25519 public key")
+        pubkey = spki[12:]
+        secret_text = f"{NIX_KEY_NAME}:{base64.b64encode(seed + pubkey).decode('ascii')}\n".encode()
+        public_value = f"{NIX_KEY_NAME}:{base64.b64encode(pubkey).decode('ascii')}"
+        public_text = f"{public_value}\n".encode()
+        if shutil.which("nix", path=self._runtime.environment["PATH"]) is not None:
+            try:
+                converted = (
+                    self._run(
+                        [
+                            "nix",
+                            "--extra-experimental-features",
+                            "nix-command",
+                            "key",
+                            "convert-secret-to-public",
+                        ],
+                        data=secret_text,
+                    )
+                    .decode("ascii")
+                    .strip()
+                )
+            except UnicodeError:
+                raise SigningFailure("Invalid native Nix key output") from None
+            if converted != public_value:
+                raise SigningFailure("Derived Nix key disagrees with native Nix key conversion")
+        root = self._home.parent
+        secret = root / "haberdasher.nix.sec"
+        public = root / "haberdasher.nix.pub"
+        atomic_write(secret, secret_text)
+        atomic_write(public, public_text)
+        self._nix = secret, public, public_value
+        return self._nix
 
     def public_exports(self, out: Path) -> tuple[Path, Path, Path]:
         paths = tuple(

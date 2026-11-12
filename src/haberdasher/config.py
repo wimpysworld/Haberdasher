@@ -118,6 +118,7 @@ PUBLIC: dict[str, tuple[str, str]] = {
     "flatpak": ("haberdasher-flatpak", "https://flatpak.wimpys.world"),
     "brew": ("haberdasher-brew", "https://brew.wimpys.world"),
     "scoop": ("haberdasher-scoop", "https://scoop.wimpys.world"),
+    "nix": ("haberdasher-nix", "https://nix.wimpys.world"),
 }
 # Concrete architectures that each repository layout indexes. Every format also accepts its
 # architecture-independent packages: APT all, RPM noarch, Arch any, and Alpine noarch.
@@ -131,6 +132,7 @@ ARCHITECTURES: dict[str, tuple[str, ...]] = {
     "flatpak": ("x86_64", "aarch64"),
     "brew": ("arm", "intel", "universal"),
     "scoop": ("64bit", "32bit", "arm64"),
+    "nix": ("x86_64-linux", "aarch64-linux", "x86_64-darwin", "aarch64-darwin"),
 }
 
 

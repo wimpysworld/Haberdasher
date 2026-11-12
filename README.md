@@ -1,6 +1,6 @@
 # Haberdasher
 
-Haberdasher is Martin Wimpress's personal publisher. It takes the prebuilt packages from the GitHub "Latest" release of each listed repository that Martin controls and publishes them as signed APT, RPM, Arch, Alpine, and Flatpak repositories, plus a Homebrew tap and a Scoop bucket, on Cloudflare R2. It is not a package builder.
+Haberdasher is Martin Wimpress's personal publisher. It takes the prebuilt packages from the GitHub "Latest" release of each listed repository that Martin controls and publishes them as signed APT, RPM, Arch, Alpine, Flatpak, and Nix repositories, plus a Homebrew tap and a Scoop bucket, on Cloudflare R2. It is not a package builder.
 
 ## Use
 
@@ -47,8 +47,9 @@ Each bucket holds a public `haberdasher.json` inventory of the packages in it. A
 | Flatpak `.flatpak` | `flatpak.wimpys.world` | `haberdasher-flatpak` |
 | Homebrew | `brew.wimpys.world` | `haberdasher-brew` |
 | Scoop | `scoop.wimpys.world` | `haberdasher-scoop` |
+| Nix | `nix.wimpys.world` | `haberdasher-nix` |
 
-The Homebrew tap and the Scoop bucket are not signed. They rely on HTTPS and on the `sha256` in each cask or the `hash` in each manifest.
+The Homebrew tap and the Scoop bucket are not signed. They rely on HTTPS and on the `sha256` in each cask or the `hash` in each manifest. Nix signs binary cache `.narinfo` metadata with a deterministic `nix.wimpys.world-1` Ed25519 key derived from the Haberdasher RSA4096 primary key.
 
 [Client setup](docs/clients.md) shows how to trust the key and add each repository.
 
@@ -64,7 +65,7 @@ Haberdasher reads credentials only from the runtime environment:
 
 Local runs take the Cloudflare values from SOPS. GitHub Secrets use the same names. When `GH_TOKEN` and `GITHUB_TOKEN` are unset, Haberdasher reads the token of the stored `gh` login with `gh auth token`.
 
-One RSA4096 key signs every format. Never commit a credential or a private key.
+The RSA4096 key signs every signed format except Nix, which uses the Ed25519 key derived from it. Never commit a credential or a private key.
 
 The [publish workflow](.github/workflows/publish.yml) is a manual run with no schedule. It runs when the repository variable `HD_PUBLISH_ENABLED` is `true`, the ref is the default branch, and the `publisher` environment allows it. One concurrency group serialises its runs.
 

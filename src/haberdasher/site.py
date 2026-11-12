@@ -19,6 +19,7 @@ from haberdasher.core import AdmittedAsset, ObjectRef, plural, size_text
 from haberdasher.formats.apt import COMPONENT, SUITE
 from haberdasher.formats.brew import TAP, TAP_NAME
 from haberdasher.formats.flatpak import FLATHUB, FLATPAKREPO, REMOTE, TITLE
+from haberdasher.formats.nix import REPO as NIX_REPO
 from haberdasher.formats.scoop import BUCKET, REPO
 from haberdasher.site_style import (
     BASE_CSS,
@@ -48,6 +49,10 @@ _ICONS = _CDN + "simple-icons@16.37.0/icons/"
 _PM = {"dnf": "DNF", "zypper": "zypper"}
 
 
+def _url(name: str) -> str:
+    return PUBLIC[name][1] if name in PUBLIC else f"https://{name}.wimpys.world"
+
+
 def apt_sources(url: str, keyring: str, architecture: str) -> str:
     """The deb822 source that the page shows and the APT client test uses."""
     return (
@@ -67,6 +72,16 @@ def rpm_repo(url: str, gpgkey: str) -> str:
 def pacman_repo(server: str) -> str:
     """The pacman.conf section that the page shows and the pacman client test uses."""
     return f"[haberdasher]\nSigLevel = Required\nServer = {server}\n"
+
+
+def nix_settings(url: str, public_key: str) -> str:
+    """The NixOS binary cache configuration that the page shows."""
+    return (
+        "nix.settings = {\n"
+        f'  extra-substituters = [ "{url}" ];\n'
+        f'  extra-trusted-public-keys = [ "{public_key}" ];\n'
+        "};"
+    )
 
 
 def _heredoc(command: str, path: str, body: str, *, expand: bool = False) -> str:
@@ -106,7 +121,7 @@ class Step:
 def check_command(name: str) -> str:
     """The command that prints the fingerprint of the published signing key."""
     fetch = "wget -qO-" if name == "apk" else "curl -fsSL"
-    return f"{fetch} {PUBLIC[name][1]}/keys/haberdasher.asc | gpg --show-keys"
+    return f"{fetch} {_url(name)}/keys/haberdasher.asc | gpg --show-keys"
 
 
 def install(name: str, packages: Sequence[str]) -> list[Command]:
@@ -128,6 +143,9 @@ def install(name: str, packages: Sequence[str]) -> list[Command]:
             return [(None, "\n".join(f"brew install --cask {TAP_NAME}/{p}" for p in packages))]
         case "scoop":
             return [(None, "\n".join(f"scoop install {BUCKET}/{p}" for p in packages))]
+        case "nix":
+            repo = f"git+{_url('nix')}/{NIX_REPO}"
+            return [(None, "\n".join(f"nix profile add '{repo}#{p}'" for p in packages))]
         case _:
             return [(None, f"flatpak --user install {REMOTE} {app}") for app in packages]
 
@@ -137,15 +155,20 @@ def scoop_step() -> Step:
     return Step(
         "Add the bucket",
         "Scoop clones the bucket over HTTPS with Git and checks the SHA-256 of each download.",
-        ((None, f"scoop bucket add {BUCKET} {PUBLIC['scoop'][1]}/{REPO}"),),
+        ((None, f"scoop bucket add {BUCKET} {_url('scoop')}/{REPO}"),),
     )
 
 
 def steps(
-    name: str, history: Sequence[AdmittedAsset], packages: Sequence[str], fingerprint: str
+    name: str,
+    history: Sequence[AdmittedAsset],
+    packages: Sequence[str],
+    fingerprint: str,
+    *,
+    public_key: str | None = None,
 ) -> list[Step]:
     """Trust the key, add the repository, and install the packages of one project."""
-    url = PUBLIC[name][1]
+    url = _url(name)
     key = f"{url}/keys/haberdasher.asc"
     trust = "Trust the signing key"
     add = "Add the repository"
@@ -166,6 +189,37 @@ def steps(
                     "flag after install.",
                     last.commands,
                 ),
+            ]
+        case "nix":
+            conf_key = public_key or f"$(curl -fsSL {url}/keys/haberdasher-nix.pub)"
+            conf = _heredoc(
+                "sudo tee -a",
+                "/etc/nix/nix.conf",
+                f"extra-substituters = {url}\nextra-trusted-public-keys = {conf_key}\n",
+                expand=public_key is None,
+            )
+            cache_commands = (
+                ((None, nix_settings(url, public_key)), (None, conf))
+                if public_key
+                else ((None, conf),)
+            )
+            return [
+                Step(
+                    "Trust the binary cache",
+                    'Haberdasher derives <a href="keys/haberdasher-nix.pub">'
+                    '<code class="nw">keys/haberdasher-nix.pub</code></a> from OpenPGP primary '
+                    f'<code style="overflow-wrap:anywhere">{_e(fingerprint)}</code> to sign '
+                    "store paths. Add the cache in NixOS, or append it to "
+                    '<code class="nw">/etc/nix/nix.conf</code>.',
+                    cache_commands,
+                ),
+                Step(
+                    "Add the flake input",
+                    'Add this input in <code class="nw">flake.nix</code> for NixOS or Home '
+                    "Manager, or skip to step 3.",
+                    ((None, f'inputs.haberdasher.url = "git+{url}/{NIX_REPO}";'),),
+                ),
+                last,
             ]
         case "apt":
             sources = _heredoc(
@@ -294,7 +348,7 @@ def steps(
 
 def remove(name: str, fingerprint: str) -> tuple[str, list[Command]]:
     """A caption and the commands that undo the setup steps."""
-    url = PUBLIC[name][1]
+    url = _url(name)
     keyid = f"gpg-pubkey-{fingerprint[-8:].lower()}"
     match name:
         case "apt":
@@ -331,6 +385,13 @@ def remove(name: str, fingerprint: str) -> tuple[str, list[Command]]:
             return ("Uninstall its casks first.", [(None, f"brew untap {TAP_NAME}")])
         case "scoop":
             return ("Uninstall its apps first.", [(None, f"scoop bucket rm {BUCKET}")])
+        case "nix":
+            host = (urlsplit(url).hostname or "nix.wimpys.world").replace(".", r"\.")
+            return (
+                "Remove installed packages from your profile first. "
+                "On NixOS, delete the flake input and cache settings instead.",
+                [(None, f"sudo sed -i '/{host}/d' /etc/nix/nix.conf")],
+            )
         case "apk":
             return (
                 "Run these commands as root.",
@@ -366,7 +427,7 @@ def description(asset: AdmittedAsset) -> str:
             return _field(r"^%DESC%\n(.*)$", metadata.get("desc"))
         case "apk":
             return _field(r"^T:(.*)$", metadata.get("stanza"))
-        case "brew" | "scoop":
+        case "brew" | "scoop" | "nix":
             return _field(r"(.+)", metadata.get("desc"))
         case _:
             return _field(r"(.+)", metadata.get("summary"))
@@ -500,15 +561,19 @@ def files(objects: Sequence[ObjectRef]) -> dict[str, int]:
     return {ref.key: ref.size for ref in objects if ref.key not in hidden}
 
 
-# The top-level directory that each format shows on one row, and the description of its files.
-FOLDS = {
-    "flatpak": ("objects", "OSTree object", "content-addressed"),
-    "brew": (TAP, "file", "Git repository"),
-    "scoop": (REPO.split("/")[0], "file", "Git repository"),
+# The top-level directories that each format shows on one row, and the description of their files.
+FOLDS: dict[str, dict[str, tuple[str, str]]] = {
+    "flatpak": {"objects": ("OSTree object", "content-addressed")},
+    "brew": {TAP: ("file", "Git repository")},
+    "scoop": {REPO.split("/")[0]: ("file", "Git repository")},
+    "nix": {
+        NIX_REPO: ("file", "Git repository"),
+        "nar": ("NAR archive", "content-addressed"),
+    },
 }
 
 
-def _tree(sizes: Mapping[str, int], prefix: str, fold: tuple[str, str, str] | None) -> str:
+def _tree(sizes: Mapping[str, int], prefix: str, folds: Mapping[str, tuple[str, str]]) -> str:
     directories: dict[str, dict[str, int]] = {}
     leaves: list[tuple[str, int]] = []
     for key, size in sizes.items():
@@ -521,18 +586,19 @@ def _tree(sizes: Mapping[str, int], prefix: str, fold: tuple[str, str, str] | No
     for directory in sorted(directories):
         inner = directories[directory]
         total = size_text(sum(inner.values()))
-        if fold and not prefix and directory == fold[0]:
+        if not prefix and directory in folds:
+            noun, note = folds[directory]
             items.append(
                 f'<li><div class="frow"><span></span>{FOLDER_CLOSED}<span class="name">'
-                f'{_e(directory)}/<span class="meta">{plural(len(inner), fold[1])}, '
-                f'{fold[2]}</span></span><span class="size">{total}</span></div></li>'
+                f'{_e(directory)}/<span class="meta">{plural(len(inner), noun)}, '
+                f'{note}</span></span><span class="size">{total}</span></div></li>'
             )
             continue
         items.append(
             f"<li><details><summary>{CHEVRON}{FOLDER_CLOSED}{FOLDER_OPEN}"
             f'<span class="name">{_e(directory)}/<span class="meta">'
             f'{plural(len(inner), "file")}</span></span><span class="size">{total}</span>'
-            f"</summary>{_tree(inner, f'{prefix}{directory}/', fold)}</details></li>"
+            f"</summary>{_tree(inner, f'{prefix}{directory}/', folds)}</details></li>"
         )
     for name, size in sorted(leaves):
         aux = ' class="aux"' if name.endswith((".sig", ".asc")) and len(leaves) > 2 else ""
@@ -546,8 +612,8 @@ def _tree(sizes: Mapping[str, int], prefix: str, fold: tuple[str, str, str] | No
 
 
 def tree(name: str, sizes: Mapping[str, int]) -> str:
-    """Nested disclosures of the published files, with Flatpak objects/ and tap.git/ on one row."""
-    return _tree(sizes, "", FOLDS.get(name))
+    """Nested disclosures of the published files, with large object and Git trees on one row."""
+    return _tree(sizes, "", FOLDS.get(name, {}))
 
 
 def _favicon(colour: str) -> str:
@@ -586,6 +652,7 @@ def _panel(
     fingerprint: str,
     *,
     hidden: bool,
+    public_key: str | None = None,
 ) -> str:
     title, slug = _title(project)
     names = _names(project)
@@ -604,11 +671,11 @@ def _panel(
             f'<p class="note">One command installs {_e(names[0])} with the repository and its '
             f'runtime. Or open <a href="{_e(quote(flatpakref))}">{_e(flatpakref)}</a> in a '
             "software centre.</p>"
-            f"{_code(f'flatpak --user install {PUBLIC[name][1]}/{flatpakref}')}</div>"
+            f"{_code(f'flatpak --user install {_url(name)}/{flatpakref}')}</div>"
             '<h4 class="alt">Or add the repository by hand</h4>'
         )
     items: list[str] = []
-    for step in steps(name, history, names, fingerprint):
+    for step in steps(name, history, names, fingerprint, public_key=public_key):
         blocks = "".join(_code(command, variant) for variant, command in step.commands)
         check = ""
         if step.check:
@@ -714,7 +781,7 @@ def _document(
     now: datetime | None,
 ) -> str:
     theme = THEMES[name]
-    url = PUBLIC[name][1]
+    url = _url(name)
     title = f"{TITLE} {theme.label} repository"
     lead = f"Packages for projects managed and maintained by {OWNER}."
     lead_html = _e(lead).replace(_e(OWNER), f'<a href="{OWNER_URL}">{_e(OWNER)}</a>')
@@ -747,8 +814,10 @@ def _document(
         if len(entries) > 1
         else ""
     )
+    raw_key = published.retained.metadata.get("public_key")
+    public_key = raw_key if isinstance(raw_key, str) and raw_key else None
     panels = "".join(
-        _panel(name, project, history, refs, fingerprint, hidden=i > 0)
+        _panel(name, project, history, refs, fingerprint, hidden=i > 0, public_key=public_key)
         for i, project in enumerate(entries)
     ) or _empty(name)
     caption, commands = remove(name, fingerprint)

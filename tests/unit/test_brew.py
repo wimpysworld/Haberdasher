@@ -126,13 +126,18 @@ def verified(tmp_path: Path, filename: str, data: bytes, asset_id: int = 1) -> V
 
 
 def inspect(tmp_path: Path, filename: str, data: bytes, asset_id: int = 1) -> InspectedAsset:
-    with patch.object(
-        discovery, "release_details", return_value=("v0.6.0", 'Ready-to-wear "templates" #1', "MIT")
+    with (
+        private_workspace(tmp_path) as runtime,
+        patch.object(
+            discovery,
+            "release_details",
+            return_value=("v0.6.0", 'Ready-to-wear "templates" #1', "MIT"),
+        ),
     ):
         return brew.inspect(
             verified(tmp_path, filename, data, asset_id),
             policy=POLICY,
-            runtime=None,  # pyright: ignore[reportArgumentType]
+            runtime=runtime,
             out=tmp_path / "out",
         )
 
@@ -210,7 +215,8 @@ def test_cask_with_a_universal_binary(tmp_path: Path) -> None:
 
 
 @pytest.fixture
-def runtime() -> Iterator[Runtime]:
+def runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[Runtime]:
+    monkeypatch.delenv("HABERDASHER_TOOL_PATH", raising=False)
     with private_workspace() as value:
         yield value
 

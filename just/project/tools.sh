@@ -19,7 +19,7 @@ case "${HABERDASHER_TOOL_SYSTEM:-}" in
             apt-ftparchive apt-get apt-config dpkg dpkg-deb dpkg-query createrepo_c modifyrepo_c
             rpm rpmsign rpmbuild rpmkeys dnf5 fakechroot fakeroot
             apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp
-            flatpak ostree update-mime-database appstreamcli ruby
+            flatpak ostree update-mime-database appstreamcli ruby nix haberdasher-nixpkgs
         )
         ;;
     aarch64-darwin)

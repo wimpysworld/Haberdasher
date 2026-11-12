@@ -27,6 +27,12 @@ def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
     assert config.format_policy("apt").architectures == ("amd64", "arm64")
     for name in ("rpm", "arch", "apk", "flatpak"):
         assert config.format_policy(name).architectures == ("x86_64", "aarch64")
+    assert config.format_policy("nix").architectures == (
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+    )
     assert PUBLIC == {
         "apt": ("haberdasher-apt", "https://apt.wimpys.world"),
         "rpm": ("haberdasher-rpm", "https://rpm.wimpys.world"),
@@ -35,6 +41,7 @@ def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
         "flatpak": ("haberdasher-flatpak", "https://flatpak.wimpys.world"),
         "brew": ("haberdasher-brew", "https://brew.wimpys.world"),
         "scoop": ("haberdasher-scoop", "https://scoop.wimpys.world"),
+        "nix": ("haberdasher-nix", "https://nix.wimpys.world"),
     }
     StoragePolicy("r2", {name: bucket for name, (bucket, _) in PUBLIC.items()})
 

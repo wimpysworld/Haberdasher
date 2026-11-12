@@ -44,6 +44,7 @@
             "ostree"
             "shared-mime-info"
             "appstream"
+            "nix"
           ];
         in
         assert builtins.all (name: builtins.elem name names == pkgs.stdenv.hostPlatform.isLinux) linuxTools;

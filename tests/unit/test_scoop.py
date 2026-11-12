@@ -152,13 +152,18 @@ def test_tool_name_is_the_asset_name_before_its_platform(filename: str, expected
 def inspect(
     tmp_path: Path, filename: str, data: bytes, asset_id: int = 1, licence: str = "MIT"
 ) -> InspectedAsset:
-    with patch.object(
-        discovery, "release_details", return_value=("v0.6.0", "Ready-to-wear templates", licence)
+    with (
+        private_workspace(tmp_path) as runtime,
+        patch.object(
+            discovery,
+            "release_details",
+            return_value=("v0.6.0", "Ready-to-wear templates", licence),
+        ),
     ):
         return scoop.inspect(
             verified(tmp_path, filename, data, asset_id),
             policy=POLICY,
-            runtime=None,  # pyright: ignore[reportArgumentType]
+            runtime=runtime,
             out=tmp_path / "out",
         )
 
@@ -244,7 +249,8 @@ def test_empty_page_shows_the_setup_command() -> None:
 
 
 @pytest.fixture
-def runtime() -> Iterator[Runtime]:
+def runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[Runtime]:
+    monkeypatch.delenv("HABERDASHER_TOOL_PATH", raising=False)
     with private_workspace() as value:
         yield value
 

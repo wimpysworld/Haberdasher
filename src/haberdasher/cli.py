@@ -22,7 +22,7 @@ from haberdasher.config import (
     StoragePolicy,
     load_config,
 )
-from haberdasher.core import plural, step, utc_now
+from haberdasher.core import VerifiedAsset, plural, step, utc_now
 from haberdasher.runtime import Runtime, private_workspace
 from haberdasher.storage import LocalStore, R2Store, Store
 
@@ -216,6 +216,7 @@ def show_plan(
         scan, {name: published[name] for name in names if name in published}
     )
     with tempfile.TemporaryDirectory(prefix="hd-plan-", dir=runtime.root) as temporary:
+        verified_cache: dict[tuple[str, int], VerifiedAsset] = {}
         new = {
             name: publish.inspect_new(
                 name,
@@ -224,6 +225,7 @@ def show_plan(
                 runtime=runtime,
                 out=Path(temporary) / name,
                 report=say,
+                verified_cache=verified_cache,
             )
             for name, items in changed.items()
         }

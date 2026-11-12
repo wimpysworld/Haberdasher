@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -42,8 +43,11 @@ UPLOAD_TRANSFERS = 16
 WRITE_ATTEMPTS = 3
 WRITE_RETRY_SECONDS = 5
 PRIVATE_KEY_HEADER = re.compile(rb"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY")
+NIX_CANDIDATE_KEY = re.compile(rb"[A-Za-z0-9_.-]{1,128}:([A-Za-z0-9+/]{86}==)(?![A-Za-z0-9+/=])")
 OPENPGP_SUFFIXES = (".asc", ".gpg", ".pgp", ".sig")
 OPENPGP_SECRET_TAGS = frozenset({5, 7})
+_ED25519_PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
+_ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 
 
 class StorageError(RuntimeError):
@@ -243,17 +247,49 @@ def _dearmour(data: bytes) -> Generator[bytes]:
             yield base64.b64decode(b"".join(lines), validate=True)
 
 
+def _is_ed25519_secret_key(raw: bytes) -> bool:
+    """Return True when `raw` is a 64-byte RFC 8032 Ed25519 `(seed_32 || pubkey_32)` pair."""
+    if len(raw) != 64:
+        return False
+    path = os.environ.get("HABERDASHER_TOOL_PATH") or os.environ.get("PATH", os.defpath)
+    executable = shutil.which("openssl", path=path)
+    if executable is None:
+        raise StorageError("Pinned openssl is required to inspect candidate Nix keys")
+    try:
+        result = subprocess.run(
+            [executable, "pkey", "-inform", "DER", "-pubout", "-outform", "DER"],
+            env={"PATH": path, "LC_ALL": "C"},
+            input=_ED25519_PKCS8_PREFIX + raw[:32],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise StorageError("OpenSSL Ed25519 key check failed") from error
+    if (
+        result.returncode != 0
+        or len(result.stdout) != 44
+        or not result.stdout.startswith(_ED25519_SPKI_PREFIX)
+    ):
+        raise StorageError("OpenSSL Ed25519 key check failed")
+    return result.stdout[12:] == raw[32:]
+
+
 def _guard(ref: ObjectRef, path: Path) -> None:
-    """Reject an upload that holds a private key header or an OpenPGP secret-key packet."""
+    """Reject an upload that holds a private key header, OpenPGP secret packet, or Nix secret key."""
     refused = StorageError(
         f"Refuse to upload {ref.bucket_role} object {ref.key}: it holds private key material"
     )
     overlap = b""
     with path.open("rb") as stream:
         while block := stream.read(1024 * 1024):
-            if PRIVATE_KEY_HEADER.search(overlap + block):
+            window = overlap + block
+            if PRIVATE_KEY_HEADER.search(window):
                 raise refused
-            overlap = block[-64:]
+            for match in NIX_CANDIDATE_KEY.finditer(window):
+                if _is_ed25519_secret_key(base64.b64decode(match[1])):
+                    raise refused
+            overlap = window[-256:]
     if ref.key.startswith("keys/") or ref.key.endswith(OPENPGP_SUFFIXES):
         data = path.read_bytes()
         for packets in (data, *_dearmour(data)):

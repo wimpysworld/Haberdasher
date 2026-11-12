@@ -90,6 +90,9 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
   Name and version each tool the same way as Homebrew. Take each architecture from the PE header, never from the file name.
   Publish an app's portable zip, never its self-updating installer. Skip the installer that a release's `latest.yml` names, without downloading it.
   Give a GUI executable a Start Menu shortcut and a console executable a `bin` entry, from the PE subsystem field.
+- For Nix, publish a flake repository served over dumb HTTP at `packages.git` and a signed HTTP binary cache (`nix-cache-info` with `Priority: 41` and `WantMassQuery: 1`, `<hash>.narinfo`, and `nar/<hash>.nar.zst`).
+  Use the project's `nix/` expression from the release tag when present, and derive from `.deb` or release archives as a fallback.
+  Tag each `packages.git` commit at `refs/tags/<rev>` so that locked flake revisions resolve over dumb HTTP.
 
 ## Testing
 
@@ -108,7 +111,7 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
 
 ## Security and secrets
 
-Treat the seven package buckets as public:
+Treat the eight package buckets as public:
 
 | Domain | Bucket |
 | --- | --- |
@@ -119,19 +122,20 @@ Treat the seven package buckets as public:
 | `flatpak.wimpys.world` | `haberdasher-flatpak` |
 | `brew.wimpys.world` | `haberdasher-brew` |
 | `scoop.wimpys.world` | `haberdasher-scoop` |
+| `nix.wimpys.world` | `haberdasher-nix` |
 
-- Use one dedicated Haberdasher RSA4096 private primary with signing and certification capabilities, without subkeys or per-format keypairs.
-  Sign directly with that primary for APT, RPM, Arch, and Flatpak. Convert the same RSA private numbers to PKCS#8 PEM for Alpine.
+- Use one dedicated Haberdasher RSA4096 private primary with signing and certification capabilities, without subkeys or separate per-format keypairs.
+  Sign directly with that primary for APT, RPM, Arch, and Flatpak. Convert the same RSA private numbers to PKCS#8 PEM for Alpine, and derive the `nix.wimpys.world-1` Ed25519 key deterministically from the same RSA private numbers with HKDF-SHA256 for Nix.
 - Keep one canonical private OpenPGP export in local SOPS and GitHub Secrets. An offline backup copies the same key.
   Never generate another key, and do not require a certificate authority or certificate service.
-- Derive the Alpine PEM only in temporary private directories outside the checkout and Nix store, with directories at `0700` and files at `0600`.
+- Derive the Alpine PEM and Nix Ed25519 key only in temporary private directories outside the checkout and Nix store, with directories at `0700` and files at `0600`.
   Clean up keyrings, agents, and exports even on failure. `src/haberdasher/signing.py` holds the conversion steps.
 - Never put plaintext private keys in the repository, R2, or public manifests.
 - Configure scoped public-key trust for each native client. Do not require personal keys, keyservers, or the public web of trust.
 - Permit one public, non-secret `haberdasher.json` package inventory per bucket for package identity, source, published digests, referenced objects, and the publication state that the adapters need.
   Enforce the explicit public inventory allow-list. Never include secrets or local paths.
 - Permit a temporary `haberdasher.lock` per bucket that holds only a run identifier, the publisher host or CI run URL, and the start time.
-- Reject any object that holds a private key header or an OpenPGP secret-key packet before it is uploaded.
+- Reject any object that holds a private key header, an OpenPGP secret-key packet, or a Nix Ed25519 secret key before it is uploaded.
 - Permit one public `index.html` per bucket, generated from the published inventory and package metadata.
   It holds the setup steps, one install section per project, and a fold-down tree of the published files.
   Theme it with µCSS and each distribution's colours, fonts, and logos, loaded from pinned jsDelivr URLs with SRI hashes.

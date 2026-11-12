@@ -33,7 +33,7 @@ printf 'PASS: both Linux systems require repository tools.\n'
 
 for tool in apt-ftparchive apt-get apt-config dpkg dpkg-deb dpkg-query createrepo_c modifyrepo_c \
     rpm rpmsign rpmbuild rpmkeys dnf5 fakechroot fakeroot \
-    apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp flatpak ostree update-mime-database appstreamcli ruby; do
+    apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp flatpak ostree update-mime-database appstreamcli ruby nix haberdasher-nixpkgs; do
     ln -s "$fixture/tool" "$fixture/bin/$tool"
 done
 for system in x86_64-linux aarch64-linux; do
@@ -41,7 +41,7 @@ for system in x86_64-linux aarch64-linux; do
 done
 printf 'PASS: both Linux systems accept all tools without executing them.\n'
 
-for tool in bash openssl gpgsm gpgconf cosign getopt dnf5 fakechroot fakeroot python3 tailor-python uv ruff basedpyright aws miniserve appstreamcli apt-get rpmkeys vercmp update-mime-database; do
+for tool in bash openssl gpgsm gpgconf cosign getopt dnf5 fakechroot fakeroot python3 tailor-python uv ruff basedpyright aws miniserve appstreamcli apt-get rpmkeys vercmp update-mime-database nix haberdasher-nixpkgs; do
     rm "$fixture/bin/$tool"
     if check x86_64-linux; then
         printf 'FAIL: inherited PATH hid missing %s.\n' "$tool" >&2
@@ -88,7 +88,7 @@ printf '%s\n' "$*" >native.log
 EOF
 chmod +x "$fixture/project/.venv/bin/python"
 router x86_64-linux all
-[[ $(cat "$fixture/project/native.log") == '-m pytest -p no:cacheprovider tests/native/test_apt.py tests/native/test_rpm.py tests/native/test_arch.py tests/native/test_apk.py tests/native/test_flatpak.py tests/native/test_brew.py tests/native/test_scoop.py tests/native/test_signing.py tests/native/test_http.py tests/native/test_storage_clients.py tests/native/test_pipeline.py' ]]
+[[ $(cat "$fixture/project/native.log") == '-m pytest -p no:cacheprovider tests/native/test_apt.py tests/native/test_rpm.py tests/native/test_arch.py tests/native/test_apk.py tests/native/test_flatpak.py tests/native/test_brew.py tests/native/test_scoop.py tests/native/test_nix.py tests/native/test_signing.py tests/native/test_http.py tests/native/test_storage_clients.py tests/native/test_pipeline.py' ]]
 rm "$fixture/project/native.log"
 if router aarch64-linux all; then
     printf 'FAIL: unqualified native architecture accepted.\n' >&2
@@ -97,6 +97,9 @@ fi
 grep -q 'not qualified on aarch64-linux' "$fixture/output"
 router x86_64-linux apt
 [[ $(cat "$fixture/project/native.log") == '-m pytest -p no:cacheprovider tests/native/test_apt.py' ]]
+rm "$fixture/project/native.log"
+router x86_64-linux nix
+[[ $(cat "$fixture/project/native.log") == '-m pytest -p no:cacheprovider tests/native/test_nix.py' ]]
 rm "$fixture/project/native.log"
 if router x86_64-linux unknown; then
     printf 'FAIL: unknown proof format accepted.\n' >&2

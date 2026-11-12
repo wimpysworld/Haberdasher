@@ -29,6 +29,7 @@ AUTHOR = ("Haberdasher", "code@wimpress.io")
 # Dumb HTTP clients read these mutable files, in this order, after the immutable objects.
 ENTRIES = ("info/refs", "objects/info/packs", "refs/heads/main", "HEAD")
 _OBJECT = re.compile(r"objects/(?:[0-9a-f]{2}/[0-9a-f]{38}|pack/pack-[0-9a-f]{40}\.(?:pack|idx))")
+_TAG = re.compile(r"refs/tags/[0-9a-f]{40}")
 _NAME = re.compile(r"[a-z0-9][a-z0-9.+-]*")
 _VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 IMMUTABLE = "public, max-age=31536000, immutable"
@@ -109,6 +110,7 @@ def repository(
     out: Path,
     now: datetime,
     message: str,
+    tag_head: bool = False,
 ) -> tuple[str, Path]:
     """Restore the objects, commit changed files on main, and update the server info.
 
@@ -119,7 +121,7 @@ def repository(
     repo = out / "repo.git"
     _git(runtime, repo, "init", "--quiet", "--bare", "--initial-branch=main")
     for name, path in objects.items():
-        if _OBJECT.fullmatch(name) is None:
+        if _OBJECT.fullmatch(name) is None and not (tag_head and _TAG.fullmatch(name) is not None):
             raise MirrorFailure(f"Unexpected Git object: {name}")
         target = safe_path(repo, name)
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -137,6 +139,8 @@ def repository(
         parent = ("-p", head) if head is not None else ()
         head = _git(runtime, repo, "commit-tree", tree, *parent, "-m", message, now=now)
         _git(runtime, repo, "update-ref", "refs/heads/main", head)
+    if tag_head:
+        _git(runtime, repo, "update-ref", f"refs/tags/{head}", head)
     _git(runtime, repo, "update-server-info")
     return head, repo
 
@@ -146,7 +150,11 @@ def published_files(repo: Path) -> dict[str, Path]:
     result = {
         name: path
         for path in sorted(repo.rglob("*"))
-        if path.is_file() and _OBJECT.fullmatch(name := path.relative_to(repo).as_posix())
+        if path.is_file()
+        and (
+            _OBJECT.fullmatch(name := path.relative_to(repo).as_posix()) is not None
+            or _TAG.fullmatch(name) is not None
+        )
     }
     for name in ENTRIES:
         path = safe_path(repo, name)
@@ -158,7 +166,7 @@ def published_files(repo: Path) -> dict[str, Path]:
 
 def _ref(form: str, path: Path, name: str, kind: str) -> ObjectRef:
     digest, size = sha256_file(path)
-    if kind == "entry":
+    if kind == "entry" or "/refs/tags/" in f"/{name}":
         content_type = "text/plain; charset=utf-8"
     else:
         content_type = "application/zip" if name.endswith(".zip") else "application/octet-stream"

@@ -40,7 +40,7 @@ from haberdasher.core import (
 from haberdasher.runtime import Runtime, private_workspace
 from haberdasher.signing import signing_session
 from haberdasher.storage import LocalStore
-from tests.native.fixtures import apk, apt, arch, flatpak, rpm
+from tests.native.fixtures import apk, apt, arch, flatpak, nix, rpm
 from tests.native.test_flatpak import (
     add_remotes,
     client_run,
@@ -157,11 +157,14 @@ class RecordedGitHub:
         input: bytes | None = None,
         timeout: float = 120,
         env_kind: str = "native",
+        progress: Callable[[str], None] | None = None,
     ) -> CompletedProcess[bytes]:
         if argv[0] != "gh":
             self.record_native(argv, input)
             assert self.real_run is not None
-            return self.real_run(argv, cwd=cwd, input=input, timeout=timeout, env_kind=env_kind)
+            return self.real_run(
+                argv, cwd=cwd, input=input, timeout=timeout, env_kind=env_kind, progress=progress
+            )
         assert env_kind == "github"
         rows, contents = self.rows()
         release = {"id": 1, "draft": False, "prerelease": False, "tag_name": "fixture"}
@@ -172,7 +175,14 @@ class RecordedGitHub:
             return CompletedProcess(argv, 0, b"", b"")
         assert argv[1] == "api"
         endpoint = argv[-1]
-        if "?" in endpoint:
+        if "/git/trees/" in endpoint:
+            return CompletedProcess(argv, 1, b"", b"gh: Not Found (HTTP 404)\n")
+        if endpoint == "repos/wimpysworld/fixture":
+            value: object = {
+                "description": "Disposable pipeline fixture",
+                "license": {"spdx_id": "MIT"},
+            }
+        elif "?" in endpoint:
             value = (
                 [] if endpoint.endswith("page=2") else rows if "/assets?" in endpoint else [release]
             )
@@ -224,7 +234,12 @@ if args[:2]==['release','download']:
 else:
     assert args[0]=='api'
     endpoint=args[-1]
-    if '?' in endpoint:
+    if '/git/trees/' in endpoint:
+        sys.stderr.write('gh: Not Found (HTTP 404)\\n')
+        sys.exit(1)
+    if endpoint=='repos/wimpysworld/fixture':
+        value={'description':'Disposable pipeline fixture','license':{'spdx_id':'MIT'}}
+    elif '?' in endpoint:
         value=[] if endpoint.endswith('page=2') else data['rows'] if '/assets?' in endpoint else [release]
     elif '/assets/' in endpoint:
         value=next(row for row in data['rows'] if row['id']==int(endpoint.rsplit('/',1)[1]))
@@ -255,6 +270,9 @@ else:
         "ostree",
         "appstreamcli",
         "haberdasher-flatpak-metadata",
+        "nix",
+        "nixfmt",
+        "haberdasher-nixpkgs",
     ):
         target = shutil.which(command)
         assert target is not None
@@ -263,7 +281,8 @@ else:
             f"""import json,os,subprocess,sys
 from pathlib import Path
 assert not any(k.startswith(('HD_','GH_','GITHUB_','AWS_','RCLONE_')) for k in os.environ)
-data=sys.stdin.buffer.read() if {command!r}=='haberdasher-flatpak-metadata' else None
+stdin_commands={{'haberdasher-flatpak-metadata','nix'}}
+data=sys.stdin.buffer.read() if {command!r} in stdin_commands and 'convert-secret-to-public' in sys.argv else (sys.stdin.buffer.read() if {command!r}=='haberdasher-flatpak-metadata' else None)
 with (Path(__file__).parent/'native.jsonl').open('a') as log:
     log.write(json.dumps({{'argv':[{command!r},*sys.argv[1:]],'input':data.decode() if data else None}})+'\\n')
 if {recorded.forbid_native!r} and {command!r}!='gpgconf' and '--show-keys' not in sys.argv: sys.exit(88)
@@ -385,6 +404,12 @@ def assets_for(name: str, runtime: Runtime) -> list[VerifiedAsset]:
             return [
                 flatpak.bundle(runtime, runtime.root, "1", 1),
                 flatpak.bundle(runtime, runtime.root, "2", 2),
+            ]
+        case "nix":
+            return [
+                nix.tarball_asset(runtime, "hd-dependency", "1.0.0", "dependency", asset_id=1),
+                nix.tarball_asset(runtime, "hd-application", "1.0.0", "first", asset_id=2),
+                nix.tarball_asset(runtime, "hd-application", "2.0.0", "second", asset_id=3),
             ]
         case _:
             raise ValueError(name)
@@ -517,6 +542,49 @@ def native_client(
                 installed(fp_client, commit, str(version), runtime_commits)
 
             return check_flatpak
+        case "nix":
+            nix_pub_path = trust / "haberdasher-nix.pub"
+            with urlopen(url + "/keys/haberdasher-nix.pub", timeout=10) as response:
+                assert response.status == 200
+                nix_pub_path.write_bytes(response.read())
+            nix_pub = nix_pub_path.read_text(encoding="utf-8").strip()
+            assert nix_pub.startswith("nix.wimpys.world-1:")
+
+            def check_nix(retained: RetainedFormat, version: int) -> None:
+                assert retained.metadata.get("public_key") == nix_pub
+                head = str(retained.metadata["head"])
+                clone_dir = runtime.root / f"{label}-nix-clone-{version}"
+                if clone_dir.exists():
+                    shutil.rmtree(clone_dir)
+                run(runtime, "git", "clone", "--quiet", f"{url}/packages.git", str(clone_dir))
+                assert (
+                    run(runtime, "git", "-C", str(clone_dir), "rev-parse", f"refs/tags/{head}")
+                    .decode()
+                    .strip()
+                    == head
+                )
+                app_ver = f"{version}.0.0"
+                expected_out = "first" if version == 1 else "second"
+                app_store_path = ""
+                dep_store_path = ""
+                for ref in retained.objects:
+                    if not ref.key.endswith(".narinfo"):
+                        continue
+                    with urlopen(f"{url}/{ref.key}", timeout=10) as narinfo_resp:
+                        text = narinfo_resp.read().decode("utf-8")
+                    for line in text.splitlines():
+                        if line.startswith("StorePath: "):
+                            sp = line.removeprefix("StorePath: ").strip()
+                            if sp.endswith(f"-hd-application-{app_ver}"):
+                                app_store_path = sp
+                            elif sp.endswith("-hd-dependency-1.0.0"):
+                                dep_store_path = sp
+                assert app_store_path and dep_store_path
+                nix_client = nix.NixClient(runtime, f"{label}-v{version}", url, nix_pub)
+                nix_client.substitute_and_run(app_store_path, "hd-application", expected_out)
+                nix_client.substitute_and_run(dep_store_path, "hd-dependency", "dependency")
+
+            return check_nix
         case _:
             raise ValueError(name)
 
@@ -570,7 +638,7 @@ def committed(store: LocalStore, runtime: Runtime, name: str) -> RetainedFormat:
     return retained
 
 
-@pytest.mark.parametrize("name", ["apt", "rpm", "arch", "apk", "flatpak"])
+@pytest.mark.parametrize("name", ["apt", "rpm", "arch", "apk", "flatpak", "nix"])
 @pytest.mark.parametrize("interrupted", [False, True], ids=["cli", "rerun"])
 def test_recorded_pipeline_and_full_rerun(
     name: str,
@@ -654,6 +722,8 @@ def test_recorded_pipeline_and_full_rerun(
         else:
             first = reconcile()
         assert first.changed and first.published_objects > 0
+        expected_buckets = {bucket, local_root / "public/nix"} if name == "apt" else {bucket}
+        assert set((local_root / "public").iterdir()) == expected_buckets
         assert not (bucket / state.LOCK_KEY).exists()
         first_page = check_page(bucket, name, key.fingerprint)
         bootstrap_paths = sorted((bucket / "keys").iterdir())
