@@ -206,12 +206,12 @@ def steps(
             return [
                 Step(
                     "Trust the binary cache",
-                    'Haberdasher signs store paths with <a href="keys/haberdasher-nix.pub">'
-                    '<code class="nw">keys/haberdasher-nix.pub</code></a>, derived from the '
-                    "OpenPGP signing key. Add the cache in NixOS, or append it to "
+                    'Haberdasher derives <a href="keys/haberdasher-nix.pub">'
+                    '<code class="nw">keys/haberdasher-nix.pub</code></a> from OpenPGP primary '
+                    f'<code style="overflow-wrap:anywhere">{_e(fingerprint)}</code> to sign '
+                    "store paths. Add the cache in NixOS, or append it to "
                     '<code class="nw">/etc/nix/nix.conf</code>.',
                     cache_commands,
-                    check=True,
                 ),
                 Step(
                     "Add the flake input",
