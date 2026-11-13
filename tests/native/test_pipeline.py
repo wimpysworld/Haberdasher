@@ -428,7 +428,7 @@ def native_client(
     ]
     listings: list[bytes] = []
     for suffix in ("asc", "gpg"):
-        path = trust / f"haberdasher.{suffix}"
+        path = trust / f"wimpysworld.{suffix}"
         with urlopen(url + f"/keys/{path.name}", timeout=10) as response:
             assert response.status == 200
             path.write_bytes(response.read())
@@ -444,7 +444,7 @@ def native_client(
         assert b":secret key packet:" not in packets.stdout
         assert b":secret sub key packet:" not in packets.stdout
     assert listings[0] == listings[1]
-    key = replace(key, public_file=trust / "haberdasher.gpg", key_file=trust / "absent-private")
+    key = replace(key, public_file=trust / "wimpysworld.gpg", key_file=trust / "absent-private")
     match name:
         case "apt":
             apt_client = apt.Client(runtime, label, url, key.public_file)
@@ -479,8 +479,8 @@ def native_client(
 
             return check_arch
         case "apk":
-            public = trust / "haberdasher.rsa.pub"
-            with urlopen(url + "/keys/haberdasher.rsa.pub", timeout=10) as response:
+            public = trust / "wimpysworld.rsa.pub"
+            with urlopen(url + "/keys/wimpysworld.rsa.pub", timeout=10) as response:
                 assert response.status == 200
                 public.write_bytes(response.read())
             assert public.read_bytes().startswith(b"-----BEGIN PUBLIC KEY-----")
@@ -875,7 +875,7 @@ def test_public_bootstrap_interruption_converges_with_a_full_rerun(
         recorded = RecordedGitHub(assets)
         storage = StoragePolicy("local", {"apt": str(fixtures.root / "store/public/apt")})
         bucket = Path(storage.public["apt"])
-        target = "keys/haberdasher.gpg" if after else "keys/haberdasher.asc"
+        target = "keys/wimpysworld.gpg" if after else "keys/wimpysworld.asc"
 
         class KeyFailure(LocalStore):
             def create(self, ref: ObjectRef, source: Path) -> WriteReceipt:
@@ -902,7 +902,7 @@ def test_public_bootstrap_interruption_converges_with_a_full_rerun(
         assert not (bucket / "dists").exists()
         assert not (bucket / state.INVENTORY_KEY).exists()
         assert not (bucket / state.LOCK_KEY).exists()
-        assert (bucket / "keys/haberdasher.asc").exists() == after
+        assert (bucket / "keys/wimpysworld.asc").exists() == after
         store = LocalStore(storage)
         with private_workspace() as runtime:
             recorded.bind(runtime)
@@ -915,6 +915,56 @@ def test_public_bootstrap_interruption_converges_with_a_full_rerun(
         with serve(fixtures.root / "store/public") as http:
             client = native_client("apt", fixtures, "rerun", http.url("apt"), key, "", ("", ""))
             client(retained, 1)
+
+
+@pytest.mark.parametrize("name", ["apt", "rpm", "arch", "apk"])
+def test_former_keys_move_to_current_keys_and_install(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with private_workspace() as fixtures, disposable_key() as key:
+        recorded = RecordedGitHub(assets_for(name, fixtures))
+        storage = StoragePolicy("local", {name: str(fixtures.root / "store/public" / name)})
+        bucket = Path(storage.public[name])
+        store = LocalStore(storage)
+        config = Config(("wimpysworld/fixture",))
+        policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
+        monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
+
+        def reconcile() -> publish.RunResult:
+            with private_workspace() as runtime:
+                recorded.bind(runtime)
+                return publish.reconcile(
+                    config, policy, store=store, runtime=runtime, now=datetime.now(UTC)
+                )
+
+        def former(text: str) -> str:
+            return (
+                text.replace("keys/wimpysworld", "keys/haberdasher")
+                .replace("/wimpysworld.db", "/haberdasher.db")
+                .replace("/wimpysworld.files", "/haberdasher.files")
+            )
+
+        assert reconcile().changed
+        inventory = bucket / state.INVENTORY_KEY
+        keys = [item["key"] for item in json.loads(inventory.read_bytes())["objects"]]
+        moved = {key: former(key) for key in keys if former(key) != key}
+        assert moved
+        for current, old in moved.items():
+            (bucket / current).rename(bucket / old)
+        inventory.write_text(former(inventory.read_text()))
+        result = reconcile()
+        assert result.changed and result.repositories == (name,)
+        keys = [item["key"] for item in json.loads(inventory.read_bytes())["objects"]]
+        assert set(moved) <= set(keys) and not set(moved.values()) & set(keys)
+        assert all((bucket / old).is_file() for old in moved.values())
+        if name == "apt":
+            assert "Origin: Wimpy's World\n" in (bucket / "dists/stable/Release").read_text()
+        with private_workspace() as runtime:
+            retained = committed(store, runtime, name)
+        with serve(fixtures.root / "store/public") as http:
+            client = native_client(name, fixtures, "moved", http.url(name), key, "", ("", ""))
+            client(retained, 1)
+        assert not reconcile().changed
 
 
 def test_flatpak_runs_download_only_the_working_set() -> None:

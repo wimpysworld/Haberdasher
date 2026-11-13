@@ -1012,9 +1012,9 @@ NARINFO_WITH_SIG = (
     "key,data",
     [
         ("pool/tool.deb", PACKAGE_SIZED + b"-----BEGIN OPENSSH PRIVATE KEY-----" + bytes(64)),
-        ("keys/haberdasher.asc", b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nxcA=\n"),
-        ("keys/haberdasher.gpg", bytes([0x95, 0, 3]) + b"key"),
-        ("keys/haberdasher.gpg", PUBLIC_KEY + _packet(7, b"secret subkey")),
+        ("keys/wimpysworld.asc", b"-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nxcA=\n"),
+        ("keys/wimpysworld.gpg", bytes([0x95, 0, 3]) + b"key"),
+        ("keys/wimpysworld.gpg", PUBLIC_KEY + _packet(7, b"secret subkey")),
         (
             "Release.gpg",
             ARMOURED_PUBLIC.replace(
@@ -1049,8 +1049,8 @@ def test_upload_rejects_private_key_material(
 @pytest.mark.parametrize(
     ("key", "data"),
     [
-        ("keys/haberdasher.gpg", PUBLIC_KEY),
-        ("keys/haberdasher.gpg", ARMOURED_PUBLIC),
+        ("keys/wimpysworld.gpg", PUBLIC_KEY),
+        ("keys/wimpysworld.gpg", ARMOURED_PUBLIC),
         ("keys/haberdasher-nix.pub", NIX_PUBLIC_KEY),
         ("00000000000000000000000000000000.narinfo", NARINFO_WITH_SIG),
     ],

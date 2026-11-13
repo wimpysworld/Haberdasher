@@ -42,7 +42,7 @@ MAX_IMAGE_BYTES = 1024 * 1024
 OWNER = "Martin Wimpress"
 OWNER_URL = "https://github.com/flexiondotorg"
 SOURCE = "https://github.com/wimpysworld/Haberdasher"
-APT_KEYRING = "/etc/apt/keyrings/haberdasher.gpg"
+APT_KEYRING = "/etc/apt/keyrings/wimpysworld.gpg"
 _HASH = re.compile(rb'<meta name="haberdasher-content" content="([0-9a-f]{64})">')
 _CDN = "https://cdn.jsdelivr.net/npm/"
 _ICONS = _CDN + "simple-icons@16.37.0/icons/"
@@ -64,14 +64,14 @@ def apt_sources(url: str, keyring: str, architecture: str) -> str:
 def rpm_repo(url: str, gpgkey: str) -> str:
     """The repository definition that the page shows and the DNF client test uses."""
     return (
-        f"[haberdasher]\nname=Haberdasher\nbaseurl={url}\nenabled=1\ngpgcheck=1\n"
+        f"[wimpysworld]\nname=Wimpy's World\nbaseurl={url}\nenabled=1\ngpgcheck=1\n"
         f"repo_gpgcheck=1\ngpgkey={gpgkey}\nskip_if_unavailable=0\n"
     )
 
 
 def pacman_repo(server: str) -> str:
     """The pacman.conf section that the page shows and the pacman client test uses."""
-    return f"[haberdasher]\nSigLevel = Required\nServer = {server}\n"
+    return f"[wimpysworld]\nSigLevel = Required\nServer = {server}\n"
 
 
 def nix_settings(url: str, public_key: str) -> str:
@@ -112,10 +112,10 @@ def nix_steps(
     return [
         Step(
             "Trust the binary cache",
-            f'Haberdasher derives <a href="{nix.PUBKEY_KEY}"><code class="nw">'
-            f"{nix.PUBKEY_KEY}</code></a> from OpenPGP primary "
-            f'<code style="overflow-wrap:anywhere">{_e(fingerprint)}</code> to sign '
-            "store paths. Add the cache in NixOS, or append it to "
+            f'The cache signs store paths with <a href="{nix.PUBKEY_KEY}"><code class="nw">'
+            f"{nix.PUBKEY_KEY}</code></a>, derived from OpenPGP primary "
+            f'<code style="overflow-wrap:anywhere">{_e(fingerprint)}</code>. '
+            "Add the cache in NixOS, or append it to "
             '<code class="nw">/etc/nix/nix.conf</code>.',
             cache,
         ),
@@ -182,7 +182,7 @@ class Step:
 def check_command(name: str) -> str:
     """The command that prints the fingerprint of the published signing key."""
     fetch = "wget -qO-" if name == "apk" else "curl -fsSL"
-    return f"{fetch} {_url(name)}/keys/haberdasher.asc | gpg --show-keys"
+    return f"{fetch} {_url(name)}/keys/wimpysworld.asc | gpg --show-keys"
 
 
 def install(name: str, packages: Sequence[str]) -> list[Command]:
@@ -229,7 +229,7 @@ def steps(
 ) -> list[Step]:
     """Trust the key, add the repository, and install the packages of one project."""
     url = _url(name)
-    key = f"{url}/keys/haberdasher.asc"
+    key = f"{url}/keys/wimpysworld.asc"
     trust = "Trust the signing key"
     add = "Add the repository"
     if name == "nix":
@@ -255,7 +255,7 @@ def steps(
         case "apt":
             sources = _heredoc(
                 "sudo tee",
-                "/etc/apt/sources.list.d/haberdasher.sources",
+                "/etc/apt/sources.list.d/wimpysworld.sources",
                 apt_sources(url, APT_KEYRING, "$(dpkg --print-architecture)"),
                 expand=True,
             )
@@ -268,7 +268,7 @@ def steps(
                         (
                             None,
                             "sudo install -d -m 0755 /etc/apt/keyrings\n"
-                            f"curl -fsSL {url}/keys/haberdasher.gpg | sudo tee {APT_KEYRING} "
+                            f"curl -fsSL {url}/keys/wimpysworld.gpg | sudo tee {APT_KEYRING} "
                             "> /dev/null",
                         ),
                     ),
@@ -282,7 +282,7 @@ def steps(
                 last,
             ]
         case "rpm":
-            repo = _heredoc("sudo tee", "/etc/yum.repos.d/haberdasher.repo", rpm_repo(url, key))
+            repo = _heredoc("sudo tee", "/etc/yum.repos.d/wimpysworld.repo", rpm_repo(url, key))
             return [
                 Step(
                     trust,
@@ -297,7 +297,7 @@ def steps(
                         ("dnf", repo),
                         (
                             "zypper",
-                            f"sudo zypper addrepo --gpgcheck --refresh {url} haberdasher\n"
+                            f"sudo zypper addrepo --gpgcheck --refresh {url} wimpysworld\n"
                             "sudo zypper refresh",
                         ),
                     ),
@@ -336,13 +336,13 @@ def steps(
                 Step(
                     trust,
                     'Run these commands as root. APK trusts the PEM file <a href="keys/'
-                    'haberdasher.rsa.pub"><code class="nw">keys/haberdasher.rsa.pub</code></a>, '
+                    'wimpysworld.rsa.pub"><code class="nw">keys/wimpysworld.rsa.pub</code></a>, '
                     "the same RSA key.",
                     (
                         (
                             None,
-                            "wget -qO /etc/apk/keys/haberdasher.rsa.pub "
-                            f"{url}/keys/haberdasher.rsa.pub",
+                            "wget -qO /etc/apk/keys/wimpysworld.rsa.pub "
+                            f"{url}/keys/wimpysworld.rsa.pub",
                         ),
                     ),
                     check=True,
@@ -388,7 +388,7 @@ def remove(name: str, fingerprint: str) -> tuple[str, list[Command]]:
                 [
                     (
                         None,
-                        f"sudo rm /etc/apt/sources.list.d/haberdasher.sources {APT_KEYRING}\n"
+                        f"sudo rm /etc/apt/sources.list.d/wimpysworld.sources {APT_KEYRING}\n"
                         "sudo apt-get update",
                     )
                 ],
@@ -397,8 +397,8 @@ def remove(name: str, fingerprint: str) -> tuple[str, list[Command]]:
             return (
                 "",
                 [
-                    ("dnf", f"sudo rm /etc/yum.repos.d/haberdasher.repo\nsudo rpm -e {keyid}"),
-                    ("zypper", f"sudo zypper removerepo haberdasher\nsudo rpm -e {keyid}"),
+                    ("dnf", f"sudo rm /etc/yum.repos.d/wimpysworld.repo\nsudo rpm -e {keyid}"),
+                    ("zypper", f"sudo zypper removerepo wimpysworld\nsudo rpm -e {keyid}"),
                 ],
             )
         case "arch":
@@ -407,7 +407,7 @@ def remove(name: str, fingerprint: str) -> tuple[str, list[Command]]:
                 [
                     (
                         None,
-                        "sudo sed -i '/^\\[haberdasher\\]$/,/^Server = /d' /etc/pacman.conf\n"
+                        "sudo sed -i '/^\\[wimpysworld\\]$/,/^Server = /d' /etc/pacman.conf\n"
                         f"sudo pacman-key --delete {fingerprint}",
                     )
                 ],
@@ -430,7 +430,7 @@ def remove(name: str, fingerprint: str) -> tuple[str, list[Command]]:
                     (
                         None,
                         f"sed -i '\\|^{url}$|d' /etc/apk/repositories\n"
-                        "rm /etc/apk/keys/haberdasher.rsa.pub",
+                        "rm /etc/apk/keys/wimpysworld.rsa.pub",
                     )
                 ],
             )

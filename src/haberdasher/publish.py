@@ -28,6 +28,7 @@ from haberdasher.core import (
     VerifiedAsset,
     plural,
     quiet,
+    safe_path,
     sha256_file,
     size_text,
     stale_entries,
@@ -140,6 +141,9 @@ def new_assets(
 
 # Homebrew and Scoop trust HTTPS and the manifest hash, so their buckets hold no public keys.
 UNSIGNED = frozenset({"brew", "scoop"})
+# The entry metadata of these formats names the repository. A run that copies objects from
+# former keys rebuilds it.
+NAMED = frozenset({"apt", "apk", "brew", "scoop"})
 
 
 def prepare_bootstrap(
@@ -159,7 +163,7 @@ def prepare_bootstrap(
         if state.has_native_metadata(item.retained.metadata):
             if item.format == "apk":
                 native = next(
-                    ref for ref in item.referenced_objects if ref.key == "keys/haberdasher.rsa.pub"
+                    ref for ref in item.referenced_objects if ref.key == "keys/wimpysworld.rsa.pub"
                 )
                 if sha256_file(rsa) != (native.sha256, native.size):
                     raise StateError(
@@ -169,9 +173,7 @@ def prepare_bootstrap(
                 raise StateError("Native metadata differs from the expected signing fingerprint")
             if item.format == "nix":
                 _, nix_pub, _ = signer.nix_key()
-                nix_ref = next(
-                    ref for ref in item.referenced_objects if ref.key == "keys/haberdasher-nix.pub"
-                )
+                nix_ref = next(ref for ref in item.referenced_objects if ref.key == nix.PUBKEY_KEY)
                 if sha256_file(nix_pub) != (nix_ref.sha256, nix_ref.size):
                     raise StateError("Nix public key differs from the Haberdasher signing primary")
         for path in (armoured, binary):
@@ -209,13 +211,56 @@ def _write(store: Store, output: OutputObject) -> None:
         store.replace(output.ref, output.local_path, expected_etag=observed.etag)
 
 
+def _send(store: Store, name: str, outputs: Sequence[OutputObject], report: Report) -> int:
+    """Upload new immutable objects in one batch, then write the rest in order. Count the writes."""
+    batch = [
+        output
+        for output in outputs
+        if output.mode == "create" and output.ref.object_class != "entry"
+    ]
+    if batch:
+        size = sum(output.ref.size for output in batch)
+        step(report, name, f"uploading {plural(len(batch), 'object')} ({size_text(size)})")
+        for line in _listing(name, [output.ref for output in batch]):
+            step(report, name, line)
+        started = time.monotonic()
+        store.upload(batch, progress=lambda line: step(report, name, line))
+        elapsed = _duration(time.monotonic() - started)
+        step(report, name, f"uploaded {plural(len(batch), 'object')} in {elapsed}")
+    for output in outputs:
+        if output in batch:
+            continue
+        step(report, name, f"  {output.ref.key} ({size_text(output.ref.size)})")
+        _write(store, output)
+    return len(outputs)
+
+
+def copy_moved(store: Store, published: Published, *, out: Path, report: Report = quiet) -> int:
+    """Copy each object that the inventory names by a former key to its current key.
+
+    Entries follow the other objects. The objects at former keys stay in the bucket.
+    """
+    refs = sorted(
+        (ref for ref in published.objects if ref.key in published.moved),
+        key=lambda ref: ref.object_class == "entry",
+    )
+    outputs: list[OutputObject] = []
+    for ref in refs:
+        path = safe_path(out, ref.key)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        store.download(replace(ref, key=published.moved[ref.key]), path)
+        outputs.append(OutputObject(ref, path, "create", None, len(outputs)))
+    step(report, published.format, f"copying {plural(len(outputs), 'object')} to current keys")
+    return _send(store, published.format, outputs, report)
+
+
 def _listing(name: str, refs: Sequence[ObjectRef]) -> list[str]:
     """Name each object and its size in key order, with Flatpak and Git objects as one line."""
     lines: dict[str, str] = {}
     folded = {
         "flatpak": "objects/",
         "brew": "tap.git/objects/",
-        "scoop": "wimpysworld/haberdasher.git/objects/",
+        "scoop": "wimpysworld/bucket.git/objects/",
     }.get(name)
     objects = [ref for ref in refs if folded and ref.key.startswith(folded)]
     for ref in refs:
@@ -395,8 +440,15 @@ def _reconcile(
         if fingerprint is not None
         else set()
     )
+    moving = any(item.moved for item in published.values())
+    rebuild: frozenset[str] = NAMED & set(names) if moving else frozenset()
     with tempfile.TemporaryDirectory(prefix="hd-reconcile-", dir=runtime.root) as temporary:
         root = Path(temporary)
+        moved = sum(
+            copy_moved(store, published[name], out=root / f"{name}-moved", report=report)
+            for name in names
+            if published[name].moved
+        )
         verified_cache: dict[tuple[str, int], VerifiedAsset] = {}
         rejected: dict[str, set[str]] = {name: set() for name in names}
         inspected = {
@@ -412,8 +464,8 @@ def _reconcile(
             )
             for name in names
         }
-        if not missing_bootstrap and not any(inspected.values()) and not flakes:
-            count = 0
+        if not missing_bootstrap and not any(inspected.values()) and not flakes and not rebuild:
+            count = moved
             repositories: list[str] = []
             updated = dict(published)
             for name in names:
@@ -423,7 +475,11 @@ def _reconcile(
                 retained = current.retained
                 if name == "nix":
                     retained = nix.with_references(retained, targets)
-                if all_rejected == prior_rejected and retained is current.retained:
+                if (
+                    all_rejected == prior_rejected
+                    and retained is current.retained
+                    and not current.moved
+                ):
                     step(report, name, "unchanged")
                     continue
                 item = PreparedFormat(
@@ -489,7 +545,7 @@ def _reconcile(
                         if built.outputs:
                             step(report, name, "signed metadata")
                         continue
-                if not inspected[name]:
+                if not inspected[name] and name not in rebuild:
                     if name in missing_bootstrap:
                         step(report, name, "adding public keys")
                     elif all_rejected == prior_rejected:
@@ -502,11 +558,19 @@ def _reconcile(
                         )
                     )
                     continue
-                step(report, name, f"preparing {plural(len(inspected[name]), 'new package')}")
+                if inspected[name]:
+                    step(report, name, f"preparing {plural(len(inspected[name]), 'new package')}")
+                else:
+                    step(report, name, "rebuilding metadata")
                 built = _prepare(
                     name,
                     inspected[name],
-                    state.materialise(store, published[name], out=root / f"{name}-published"),
+                    state.materialise(
+                        store,
+                        published[name],
+                        out=root / f"{name}-published",
+                        rebuild=name in rebuild,
+                    ),
                     policy=policies[name],
                     runtime=runtime,
                     signer=signer,
@@ -530,7 +594,7 @@ def _reconcile(
                 signer,
                 out=root / "bootstrap",
             )
-        count = 0
+        count = moved
         packages = 0
         repositories = []
         written: list[str] = []
@@ -555,33 +619,7 @@ def _reconcile(
                     written.append(item.format)
                     count += wrote
                 continue
-            batch = [
-                output
-                for output in outputs
-                if output.mode == "create" and output.ref.object_class != "entry"
-            ]
-            if batch:
-                size = sum(output.ref.size for output in batch)
-                step(
-                    report,
-                    item.format,
-                    f"uploading {plural(len(batch), 'object')} ({size_text(size)})",
-                )
-                for line in _listing(item.format, [output.ref for output in batch]):
-                    step(report, item.format, line)
-                started = time.monotonic()
-                store.upload(
-                    batch, progress=lambda line, name=item.format: step(report, name, line)
-                )
-                elapsed = _duration(time.monotonic() - started)
-                step(report, item.format, f"uploaded {plural(len(batch), 'object')} in {elapsed}")
-                count += len(batch)
-            for output in outputs:
-                if output in batch:
-                    continue
-                step(report, item.format, f"  {output.ref.key} ({size_text(output.ref.size)})")
-                _write(store, output)
-                count += 1
+            count += _send(store, item.format, outputs, report)
             state.write_inventory(store, current, data)
             step(report, item.format, f"wrote {state.INVENTORY_KEY}")
             count += 1

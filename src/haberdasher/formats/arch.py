@@ -35,7 +35,7 @@ from haberdasher.signing import SigningSession
 
 ARCHITECTURES = ("x86_64", "aarch64")
 SUFFIXES = (".pkg.tar.zst", ".pkg.tar.xz")
-REPOSITORY = "haberdasher"
+REPOSITORY = "wimpysworld"
 MAX_METADATA = 16 * 1024 * 1024
 
 

@@ -242,8 +242,8 @@ def test_empty_page_shows_the_setup_command() -> None:
     )
     text = re.sub(r"<[^>]+>", "", page.decode())
     assert "No Windows packages are published yet." in text
-    assert "https://scoop.wimpys.world/wimpysworld/haberdasher.git" in text
-    assert "scoop bucket rm haberdasher" in text
+    assert "https://scoop.wimpys.world/wimpysworld/bucket.git" in text
+    assert "scoop bucket rm wimpysworld" in text
     apt, _ = site.page("apt", state.unpublished("apt"), fingerprint="A" * 40, fallback={}, now=NOW)
     assert 'href="https://scoop.wimpys.world/"' in apt.decode()
 

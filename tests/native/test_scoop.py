@@ -59,10 +59,10 @@ def test_publish_serves_a_bucket_that_git_clones_over_http(
 
         clone = tmp_path / "clone"
         with serve(root / "public") as http:
-            url = http.url("scoop/wimpysworld/haberdasher.git")
+            url = http.url("scoop/wimpysworld/bucket.git")
             git("ls-remote", url, cwd=tmp_path)
             git("clone", "--quiet", url, str(clone), cwd=tmp_path)
-        assert git("log", "--format=%an <%ae>", cwd=clone) == "Haberdasher <code@wimpress.io>"
+        assert git("log", "--format=%an <%ae>", cwd=clone) == "Wimpy's World <code@wimpress.io>"
         assert sorted(path.name for path in (clone / "bucket").iterdir()) == [
             "tool.json",
             "viewer.json",
@@ -80,7 +80,7 @@ def test_publish_serves_a_bucket_that_git_clones_over_http(
         }
         viewer = json.loads((clone / "bucket/viewer.json").read_text())
         assert viewer["architecture"]["64bit"]["bin"] == [["viewer-1.0.0/viewer.exe", "viewer"]]
-        assert "scoop bucket add haberdasher" in (clone / "README.md").read_text()
+        assert "scoop bucket add wimpysworld" in (clone / "README.md").read_text()
 
         github.contents["tool-windows-amd64.exe"] = pe(AMD64, tail=b"v2")
         github.contents["tool-windows-arm64.exe"] = pe(ARM64, tail=b"v2")
@@ -92,7 +92,7 @@ def test_publish_serves_a_bucket_that_git_clones_over_http(
             RELEASE["tag_name"] = "v1.0.0"
         assert later.packages == 2
         with serve(root / "public") as http:
-            url = http.url("scoop/wimpysworld/haberdasher.git")
+            url = http.url("scoop/wimpysworld/bucket.git")
             git("pull", "--quiet", "--ff-only", url, "main", cwd=clone)
         assert git("rev-list", "--count", "main", cwd=clone) == "2"
         assert json.loads((clone / "bucket/tool.json").read_text())["version"] == "1.1.0"

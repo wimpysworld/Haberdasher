@@ -25,7 +25,7 @@ from haberdasher.core import (
 )
 from haberdasher.runtime import Runtime
 
-AUTHOR = ("Haberdasher", "code@wimpress.io")
+AUTHOR = ("Wimpy's World", "code@wimpress.io")
 # Dumb HTTP clients read these mutable files, in this order, after the immutable objects.
 ENTRIES = ("info/refs", "objects/info/packs", "refs/heads/main", "HEAD")
 _OBJECT = re.compile(r"objects/(?:[0-9a-f]{2}/[0-9a-f]{38}|pack/pack-[0-9a-f]{40}\.(?:pack|idx))")

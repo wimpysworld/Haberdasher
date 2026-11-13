@@ -115,8 +115,8 @@ def test_native_signatures_exports_and_same_rsa(
                 assert b" 1 8 " in status
             private, public = signer.alpine_key()
             assert signer.alpine_key() == (private, public)
-            assert public.name == "haberdasher.rsa.pub"
-            assert ALPINE_SIGNATURE_MEMBER == ".SIGN.RSA256.haberdasher.rsa.pub"
+            assert public.name == "wimpysworld.rsa.pub"
+            assert ALPINE_SIGNATURE_MEMBER == ".SIGN.RSA256.wimpysworld.rsa.pub"
             rsa_signature = runtime.root / "signature.rsa"
             run(
                 runtime,
@@ -163,7 +163,7 @@ def test_native_signatures_exports_and_same_rsa(
             exports = runtime.root / "keys"
             exports.mkdir(mode=0o700)
             asc, binary, pem = signer.public_exports(exports)
-            assert asc.name == "haberdasher.asc" and binary.name == "haberdasher.gpg"
+            assert asc.name == "wimpysworld.asc" and binary.name == "wimpysworld.gpg"
             assert pem.read_bytes() == public.read_bytes()
             assert b"PRIVATE" not in asc.read_bytes() + pem.read_bytes()
             run(runtime, "gpg", "--batch", "--import", str(asc), str(binary))

@@ -46,6 +46,7 @@ from haberdasher.signing import SigningSession
 
 SUITE = "stable"
 COMPONENT = "main"
+ORIGIN = "Wimpy's World"
 
 
 class AptFailure(ValueError):
@@ -256,6 +257,8 @@ def _verify_release(retained: RetainedFormat, policy: FormatPolicy) -> None:
     if any(
         release.get(key) != value
         for key, value in {
+            "Origin": ORIGIN,
+            "Label": ORIGIN,
             "Suite": SUITE,
             "Codename": SUITE,
             "Components": COMPONENT,
@@ -475,6 +478,8 @@ def prepare(
         "MD5": "false",
         "SHA1": "false",
         "SHA512": "false",
+        "Origin": ORIGIN,
+        "Label": ORIGIN,
         "Suite": SUITE,
         "Codename": SUITE,
         "Architectures": " ".join(policy.architectures),

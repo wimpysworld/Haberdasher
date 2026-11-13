@@ -103,7 +103,7 @@ class Client:
         client.path("root/var/lib/dpkg/status").touch()
         client.path("config/sources.list").touch()
         client.path("config/sources.list.d").mkdir()
-        client.path("config/sources.list.d/haberdasher.sources").write_text(
+        client.path("config/sources.list.d/wimpysworld.sources").write_text(
             site.apt_sources(url, str(keyring), "amd64")
         )
         self.config = client.path("config/apt.conf")

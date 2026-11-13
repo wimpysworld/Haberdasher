@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import socket
 import tempfile
 import types
@@ -37,7 +38,12 @@ from haberdasher.storage import LocalStore, ObjectChanged, PreconditionFailed, R
 type Store = LocalStore | R2Store
 LOCK_KEY = "haberdasher.lock"
 INVENTORY_KEY = "haberdasher.json"
-BOOTSTRAP_KEYS = frozenset({"keys/haberdasher.asc", "keys/haberdasher.gpg"})
+BOOTSTRAP_KEYS = frozenset({"keys/wimpysworld.asc", "keys/wimpysworld.gpg"})
+# Earlier runs published these objects under the tool's name. A run copies each one to its
+# current key, then writes an inventory that names only current keys.
+_FORMER_KEY = re.compile(r"keys/haberdasher([.-].+)")
+_FORMER_ARCH = re.compile(r"(x86_64|aarch64)/haberdasher(\.(?:db|files)(?:\.tar\.gz)?(?:\.sig)?)")
+_FORMER_SCOOP = "wimpysworld/haberdasher.git/"
 MAX_INVENTORY_BYTES = 32 * 1024 * 1024
 MAX_LOCK_BYTES = 64 * 1024
 RPM_ROOT = "."
@@ -45,6 +51,17 @@ RPM_ROOT = "."
 
 class StateError(RuntimeError):
     pass
+
+
+def current_key(name: str, key: str) -> str:
+    """The current key of an object that an earlier run published under a former key."""
+    if match := _FORMER_KEY.fullmatch(key):
+        return f"keys/wimpysworld{match[1]}"
+    if name == "arch" and (match := _FORMER_ARCH.fullmatch(key)):
+        return f"{match[1]}/wimpysworld{match[2]}"
+    if name == "scoop" and key.startswith(_FORMER_SCOOP):
+        return "wimpysworld/bucket.git/" + key.removeprefix(_FORMER_SCOOP)
+    return key
 
 
 _RECORDS = (
@@ -254,7 +271,11 @@ def break_locks(
 
 @dataclass(frozen=True)
 class Published:
-    """A format's committed state. Metadata paths are object keys until materialised."""
+    """A format's committed state. Metadata paths are object keys until materialised.
+
+    The objects and record name current keys. `moved` maps each current key that the published
+    inventory names by a former key to that former key.
+    """
 
     format: str
     etag: str | None
@@ -262,6 +283,7 @@ class Published:
     objects: tuple[ObjectRef, ...]
     retained: RetainedFormat
     record: dict[str, JSONValue] | None = None
+    moved: Mapping[str, str] = types.MappingProxyType({})
 
     @property
     def bootstrap(self) -> tuple[ObjectRef, ...]:
@@ -297,7 +319,7 @@ def _paths(
         "scoop": ("files",),
     }.get(name, ()):
         result[field] = {
-            key: move(text(value, "metadata path"), key)
+            current_key(name, key): move(text(value, "metadata path"), current_key(name, key))
             for key, value in mapping(result.get(field)).items()
         }
     if name == "apk":
@@ -311,12 +333,12 @@ def _paths(
         result["indexes"] = indexes
         public = dict(mapping(result.get("public_key")))
         public["local_path"] = move(
-            text(public.get("local_path"), "APK key path"), "keys/haberdasher.rsa.pub"
+            text(public.get("local_path"), "APK key path"), "keys/wimpysworld.rsa.pub"
         )
         result["public_key"] = public
     field = {"apt": "keyring", "rpm": "keyring", "arch": "public_key"}.get(name)
     if field is not None:
-        result[field] = move(text(result.get(field), "public key path"), "keys/haberdasher.gpg")
+        result[field] = move(text(result.get(field), "public key path"), "keys/wimpysworld.gpg")
     if name == "rpm":
         result["root"] = move(text(result.get("root"), "RPM root"), RPM_ROOT)
     return result
@@ -341,6 +363,19 @@ def decode_published(name: str, data: bytes, etag: str | None) -> Published:
         value = parse(data)
         objects = tuple(decode_record(ObjectRef, item) for item in _items(value.get("objects")))
         record = mapping(value.get("state"))
+        moved = {
+            current: ref.key
+            for ref in objects
+            if (current := current_key(name, ref.key)) != ref.key
+        }
+        if moved:
+            objects = tuple(replace(ref, key=current_key(name, ref.key)) for ref in objects)
+            record = dict(record)
+            record["metadata"] = _paths(
+                name,
+                mapping(record.get("metadata")),
+                lambda path, _: current_key(name, path),
+            )
         history = tuple(
             decode_record(AdmittedAsset, item) for item in _items(record.get("history"))
         )
@@ -362,15 +397,18 @@ def decode_published(name: str, data: bytes, etag: str | None) -> Published:
         raise StateError(f"The published {name} inventory is invalid: {error}") from error
     if any(ref.bucket_role != name for ref in objects):
         raise StateError(f"The published {name} inventory names another bucket")
-    return Published(name, etag, hashlib.sha256(data).hexdigest(), objects, retained, record)
+    return Published(name, etag, hashlib.sha256(data).hexdigest(), objects, retained, record, moved)
 
 
-def materialise(store: Store, published: Published, *, out: Path) -> RetainedFormat:
+def materialise(
+    store: Store, published: Published, *, out: Path, rebuild: bool = False
+) -> RetainedFormat:
     """Download the published metadata that adapters read, and observe entry ETags.
 
     An entry whose bytes differ from the inventory is left out and listed as stale. Under the
     bucket lock only an interrupted run of this publisher writes entries, so the adapter
     rebuilds stale entries from the accepted history and replaces them on the observed ETag.
+    With rebuild, every entry is stale.
     """
     retained = published.retained
     native = {key: value for key, value in retained.metadata.items() if key != "rejected"}
@@ -388,7 +426,7 @@ def materialise(store: Store, published: Published, *, out: Path) -> RetainedFor
         if observed is None:
             raise StateError(f"Published {published.format} entry {ref.key} is missing")
         etags[ref.key] = observed.etag
-        if observed.size != ref.size:
+        if rebuild or observed.size != ref.size:
             stale.add(ref.key)
 
     def fetch(key: str) -> Path:

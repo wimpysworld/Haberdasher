@@ -175,7 +175,7 @@ plugins=0
 """)
         # Librepo 1.20 needs preseeded scoped public trust for its missing-key retry.
         ring = self.client.path(
-            f"cache/haberdasher-{hashlib.sha256(url.encode()).hexdigest()[:16]}/pubring"
+            f"cache/wimpysworld-{hashlib.sha256(url.encode()).hexdigest()[:16]}/pubring"
         )
         ring.mkdir(parents=True, mode=0o700)
         shutil.copyfile(keyring, ring / "pubring.gpg")
@@ -231,7 +231,7 @@ plugins=0
             "1",
             "--no-plugins",
             "--repo",
-            "haberdasher",
+            "wimpysworld",
             "--assumeyes",
             "--refresh",
         ]

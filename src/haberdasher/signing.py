@@ -20,7 +20,7 @@ from haberdasher.core import atomic_write, safe_path
 from haberdasher.runtime import Runtime, RuntimeFailure, private_workspace
 
 MAX_KEY_BYTES = 1024 * 1024
-ALPINE_SIGNATURE_MEMBER = ".SIGN.RSA256.haberdasher.rsa.pub"
+ALPINE_SIGNATURE_MEMBER = ".SIGN.RSA256.wimpysworld.rsa.pub"
 NIX_KEY_NAME = "nix.wimpys.world-1"
 _NIX_HKDF_SALT = b"haberdasher-nix-ed25519-v1"
 _ED25519_PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
@@ -269,8 +269,8 @@ class SigningSession:
         listing = _records(self._sm("--with-colons", "--with-keygrip", "--list-secret-keys"))
         if _field(listing, "grp", 9) != self._grip:
             raise SigningFailure("Conversion changed the keygrip")
-        private = root / "haberdasher.rsa"
-        public = root / "haberdasher.rsa.pub"
+        private = root / "wimpysworld.rsa"
+        public = root / "wimpysworld.rsa.pub"
         pem = self._sm("--armor", "--export-secret-key-p8", _field(listing, "fpr", 9))
         if not pem:
             raise SigningFailure("Key conversion produced no private key")
@@ -404,7 +404,7 @@ class SigningSession:
     def public_exports(self, out: Path) -> tuple[Path, Path, Path]:
         paths = tuple(
             safe_path(out, name)
-            for name in ("haberdasher.asc", "haberdasher.gpg", "haberdasher.rsa.pub")
+            for name in ("wimpysworld.asc", "wimpysworld.gpg", "wimpysworld.rsa.pub")
         )
         _, public = self.alpine_key()
         armoured = self._gpg("--armor", "--export", self.fingerprint)

@@ -112,7 +112,7 @@ apt   preparing 18 new packages
 apt   signed metadata
 ...
 apt   uploading 10 objects (214 MB)
-apt     keys/haberdasher.asc (3 KB)
+apt     keys/wimpysworld.asc (3 KB)
 apt     pool/main/s/sidra/sidra_1.3.0_amd64.deb (104 MB)
 ...
 apt   138.106 MiB / 204.513 MiB, 68%, 156.941 KiB/s, ETA 7m13s
@@ -127,7 +127,7 @@ apt   wrote haberdasher.json
 apt   wrote index.html
 ...
 flatpak uploading 530 objects (226 MB)
-flatpak   keys/haberdasher.asc (2 KB)
+flatpak   keys/wimpysworld.asc (2 KB)
 flatpak   objects/ 522 files (225 MB)
 ...
 flatpak uploaded 530 objects in 1m02s
@@ -165,7 +165,9 @@ APT places each package at `pool/main/<prefix>/<source>/<package>_<version>_<arc
 
 Each bucket's public `haberdasher.json` is the publication state for its format. It holds the inventory allow-list (package identity, source, published digests, and referenced objects) and the accepted history and metadata keys that the native adapter needs. There is no private state bucket. A run reads each inventory first. An asset whose bytes are already in the inventory needs no download. When a format changes, the run downloads only the published metadata that the inventory references, not the package pool. Unchanged runs avoid package downloads, inspection, indexing, and signing, and write nothing except the locks. Flatpak restoration downloads only a working set: the repository entries, the current summaries, each head commit and its signature, the AppStream trees, and the `/metadata` and `/files/share/app-info` paths of each application head. `flatpak build-update-repo` needs those AppStream paths to keep unchanged applications in the AppStream catalogue. Payload files and earlier commits stay published and are not downloaded again. Nix restoration downloads nothing. The inventory records the tag, flake, and store path of each package, so a run evaluates only a new release tag or a moved `latest` tag. Published `nar/*.nar.zst` archives and `*.narinfo` files stay referenced in the inventory without re-downloading.
 
-Both OpenPGP exports appear in every published signed bucket. The native APK public key appears only with the first APK index, and `keys/haberdasher-nix.pub` appears with the first Nix publication. An empty APK or Nix bucket does not claim native cache or index trust. Changed public export bytes reject even when the fingerprint stays unchanged. Key rotation is not supported.
+Both OpenPGP exports appear in every published signed bucket. The native APK public key appears only with the first APK index, and `keys/wimpysworld-nix.pub` appears with the first Nix publication. An empty APK or Nix bucket does not claim native cache or index trust. Changed public export bytes reject even when the fingerprint stays unchanged. Key rotation is not supported.
+
+Earlier runs published some objects under the tool's name: `keys/haberdasher.*`, `keys/haberdasher-nix.pub`, the Arch `haberdasher.db` and `haberdasher.files` databases, and the Scoop repository at `wimpysworld/haberdasher.git`. `state.current_key` maps each of these keys to its `wimpysworld` key. When an inventory names a former key, a run copies the object to its current key before any other write. The run then rebuilds the APT, APK, Homebrew, and Scoop entry metadata, because that metadata names the repository, and writes an inventory with current keys only. The objects at former keys stay in the bucket. `just plan` reports the objects to copy.
 
 For each format, a run writes the bootstrap keys and packages, then dependency metadata, then entry metadata, then `haberdasher.json`. A run replaces published entries only on the exact ETag that it read. Objects that the published inventory references never change. A run can overwrite an object that the published inventory does not reference, because an interrupted run can leave one with other signature bytes. RPM and Arch package signatures are not deterministic.
 

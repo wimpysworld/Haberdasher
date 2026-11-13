@@ -425,6 +425,7 @@ def retained_history(
     indexes = _indexes(history, config)
     now = datetime(2026, 1, 1, tzinfo=UTC)
     release = (
+        f"Origin: {apt.ORIGIN}\nLabel: {apt.ORIGIN}\n"
         f"Suite: {apt.SUITE}\nCodename: {apt.SUITE}\nComponents: {apt.COMPONENT}\n"
         f"Architectures: {' '.join(config.architectures)}\nAcquire-By-Hash: yes\n"
         f"Date: {format_datetime(now, usegmt=True)}\nSHA256:\n"

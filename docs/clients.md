@@ -1,6 +1,6 @@
 # Native client setup
 
-In each signed package repository (APT, RPM, Arch, Alpine, Flatpak, and Nix), the client trusts the Haberdasher public key for that repository, with native signature checks enabled.
+In each signed package repository (APT, RPM, Arch, Alpine, Flatpak, and Nix), the client trusts the Wimpy's World public key for that repository, with native signature checks enabled.
 
 For the setup and install commands, use the page of each repository: [APT](https://apt.wimpys.world/), [RPM](https://rpm.wimpys.world/), [Arch Linux](https://pkg.wimpys.world/), [Alpine Linux](https://apk.wimpys.world/), [Flatpak](https://flatpak.wimpys.world/), [Homebrew](https://brew.wimpys.world/), [Scoop](https://scoop.wimpys.world/), and [Nix](https://nix.wimpys.world/). Each page lists its packages and published files. This guide explains the trust model and the tested client configuration. The Homebrew and Scoop repositories are not signed, so they have no key to trust. They rely on HTTPS and the `sha256` in each cask or the `hash` in each manifest.
 
@@ -10,17 +10,17 @@ The native tests run pinned Nix clients on `x86_64-linux` against disposable roo
 
 Obtain the full primary fingerprint through an independent trusted channel. A fingerprint fetched beside the key is not independent evidence.
 
-Every published repository serves `keys/haberdasher.asc` and `keys/haberdasher.gpg`. Download from the same origin as the repository. For example, for APT:
+Every published repository serves `keys/wimpysworld.asc` and `keys/wimpysworld.gpg`. Download from the same origin as the repository. For example, for APT:
 
 ```sh
 set -eu
 : "${EXPECTED_FINGERPRINT:?Set the independently verified full primary fingerprint}"
 : "${BOOTSTRAP_DIR:?Set a private temporary directory outside the checkout}"
 curl --fail --silent --show-error \
-  https://apt.wimpys.world/keys/haberdasher.gpg \
-  --output "$BOOTSTRAP_DIR/haberdasher.gpg"
+  https://apt.wimpys.world/keys/wimpysworld.gpg \
+  --output "$BOOTSTRAP_DIR/wimpysworld.gpg"
 gpg --no-options --homedir "$BOOTSTRAP_DIR" --batch --no-autostart \
-  --with-colons --with-key-data --show-keys "$BOOTSTRAP_DIR/haberdasher.gpg" \
+  --with-colons --with-key-data --show-keys "$BOOTSTRAP_DIR/wimpysworld.gpg" \
   > "$BOOTSTRAP_DIR/key.txt"
 test "$(grep '^fpr:' "$BOOTSTRAP_DIR/key.txt" | cut -d: -f10)" \
   = "$EXPECTED_FINGERPRINT"
@@ -34,7 +34,7 @@ Create `BOOTSTRAP_DIR` with mode `0700` before these commands. The checks requir
 
 ## APT
 
-Install the verified binary export as `/etc/apt/keyrings/haberdasher.gpg`, readable by APT. Use this deb822 content in `/etc/apt/sources.list.d/haberdasher.sources`:
+Install the verified binary export as `/etc/apt/keyrings/wimpysworld.gpg`, readable by APT. Use this deb822 content in `/etc/apt/sources.list.d/wimpysworld.sources`:
 
 ```deb822
 Types: deb
@@ -42,7 +42,7 @@ URIs: https://apt.wimpys.world
 Suites: stable
 Components: main
 Architectures: amd64
-Signed-By: /etc/apt/keyrings/haberdasher.gpg
+Signed-By: /etc/apt/keyrings/wimpysworld.gpg
 ```
 
 The publisher uses suite `stable` and component `main`, and indexes `amd64` and `arm64`. Set `Architectures` to the client architecture. The native fixture uses `stable/main/amd64`. The deb822 form expresses the same scoped Signed-By trust.
@@ -53,50 +53,50 @@ APT verifies signed repository metadata, not signatures on individual DEBs. Immu
 
 ## RPM
 
-Verify the public export from `https://rpm.wimpys.world/keys/haberdasher.gpg`. Keep a verified armoured export for package-key import. Use this repository definition:
+Verify the public export from `https://rpm.wimpys.world/keys/wimpysworld.gpg`. Keep a verified armoured export for package-key import. Use this repository definition:
 
 ```ini
-[haberdasher]
-name=Haberdasher
+[wimpysworld]
+name=Wimpy's World
 baseurl=https://rpm.wimpys.world
 enabled=1
 gpgcheck=1
 repo_gpgcheck=1
-gpgkey=file:///etc/pki/rpm-gpg/haberdasher.asc
+gpgkey=file:///etc/pki/rpm-gpg/wimpysworld.asc
 skip_if_unavailable=0
 ```
 
-Both package and metadata verification are required. Import only the verified public key with `rpm --import /etc/pki/rpm-gpg/haberdasher.asc`.
+Both package and metadata verification are required. Import only the verified public key with `rpm --import /etc/pki/rpm-gpg/wimpysworld.asc`.
 
 RPM package trust is global to the selected RPM database, not a per-repository signer allow-list. A repository's `gpgkey` does not remove that wider trust. Use a separate installation root/database when that boundary is required.
 
 The pinned DNF5/librepo client requires a pre-seeded repository-specific metadata keyring. `tests/native/fixtures/rpm.py::DnfClient` defines the exact cache-keyring setup and private root. Do not assume another distribution needs the same workaround. Ordinary `dnf5 --refresh install PACKAGE` and `dnf5 --refresh upgrade PACKAGE` keep both checks.
 
-The production adapter removes upstream RPM signatures with `rpmsign --delsign`, then signs with the Haberdasher key. Clients need only the Haberdasher key.
+The production adapter removes upstream RPM signatures with `rpmsign --delsign`, then signs with the Haberdasher key. Clients need only the Wimpy's World key.
 
 ## Arch
 
-Verify the public export from `https://pkg.wimpys.world/keys/haberdasher.gpg`. Initialise a dedicated GnuPG directory and import only that key. Set owner trust only after independent fingerprint verification. Without owner trust, pacman fails with `unknown trust`.
+Verify the public export from `https://pkg.wimpys.world/keys/wimpysworld.gpg`. Initialise a dedicated GnuPG directory and import only that key. Set owner trust only after independent fingerprint verification. Without owner trust, pacman fails with `unknown trust`.
 
 ```sh
-sudo install -d -m 0700 /etc/pacman.d/haberdasher-gnupg
-curl -fsSL https://pkg.wimpys.world/keys/haberdasher.gpg \
-  | sudo gpg --homedir /etc/pacman.d/haberdasher-gnupg --import
+sudo install -d -m 0700 /etc/pacman.d/wimpysworld-gnupg
+curl -fsSL https://pkg.wimpys.world/keys/wimpysworld.gpg \
+  | sudo gpg --homedir /etc/pacman.d/wimpysworld-gnupg --import
 echo 'B39939A127C7A8D338F53A3AE132098A87DB88E0:6:' \
-  | sudo gpg --homedir /etc/pacman.d/haberdasher-gnupg --import-ownertrust
+  | sudo gpg --homedir /etc/pacman.d/wimpysworld-gnupg --import-ownertrust
 ```
 
-Use these settings in the selected pacman configuration. Set `Architecture` to `x86_64` or `aarch64`. Each architecture has its own signed `haberdasher` database under `$arch`.
+Use these settings in the selected pacman configuration. Set `Architecture` to `x86_64` or `aarch64`. Each architecture has its own signed `wimpysworld` database under `$arch`.
 
 ```ini
 [options]
 Architecture = x86_64
-GPGDir = /etc/pacman.d/haberdasher-gnupg
+GPGDir = /etc/pacman.d/wimpysworld-gnupg
 SigLevel = Required TrustedOnly
 LocalFileSigLevel = Required TrustedOnly
 RemoteFileSigLevel = Required TrustedOnly
 
-[haberdasher]
+[wimpysworld]
 Server = https://pkg.wimpys.world/$arch
 ```
 
@@ -106,11 +106,11 @@ The native tests import the verified key and explicit owner trust, then run stri
 
 ## Alpine APK
 
-The native public key appears at `https://apk.wimpys.world/keys/haberdasher.rsa.pub` with the first APK index. An empty APK role needs no native RSA-key claim.
+The native public key appears at `https://apk.wimpys.world/keys/wimpysworld.rsa.pub` with the first APK index. An empty APK role needs no native RSA-key claim.
 
 Fetch that public PEM and both OpenPGP exports. Verify the OpenPGP primary independently. Compare the PEM modulus and exponent with that primary's RSA public numbers before trust. `tests/native/test_pipeline.py::native_client` checks this binding for the fixed-exponent RSA4096 primary.
 
-Install the verified PEM with the exact basename `haberdasher.rsa.pub` in the selected APK keys directory. The index signature member is `.SIGN.RSA256.haberdasher.rsa.pub`. A different basename does not establish the required trust.
+Install the verified PEM with the exact basename `wimpysworld.rsa.pub` in the selected APK keys directory. The index signature member is `.SIGN.RSA256.wimpysworld.rsa.pub`. A different basename does not establish the required trust.
 
 The repository entry is the base URL:
 
@@ -132,7 +132,7 @@ Install an application with one command from its `.flatpakref` file at the bucke
 flatpak --user install https://flatpak.wimpys.world/world.wimpys.sidra.flatpakref
 ```
 
-The file holds the Haberdasher public key, so no separate key import is necessary. Flatpak adds the `wimpysworld` remote. It also adds the runtime repository from the file's `RuntimeRepo` key, which is Flathub for Sidra, when the runtime is not already installed. Each application has its own `<app-id>.flatpakref` file.
+The file holds the Wimpy's World public key, so no separate key import is necessary. Flatpak adds the `wimpysworld` remote. It also adds the runtime repository from the file's `RuntimeRepo` key, which is Flathub for Sidra, when the runtime is not already installed. Each application has its own `<app-id>.flatpakref` file.
 
 To add only the remote, use its remote description. `flatpak remote-add` does not act on `RuntimeRepo`, so add Flathub first:
 
@@ -146,24 +146,24 @@ Haberdasher signs every commit and the summary with its own key, and removes any
 
 ## Nix
 
-The Nix binary cache public key appears at `https://nix.wimpys.world/keys/haberdasher-nix.pub` with the first published package. Haberdasher derives the `nix.wimpys.world-1` Ed25519 key deterministically from the secret RSA4096 primary numbers with HKDF-SHA256. A client cannot check that derivation from the public OpenPGP key alone. Verify `https://nix.wimpys.world/keys/haberdasher.gpg` against your independently verified primary fingerprint to check the origin's published OpenPGP key material, and trust `haberdasher-nix.pub` from `https://nix.wimpys.world/keys/haberdasher-nix.pub` over HTTPS, pinned by value in `extra-trusted-public-keys`:
+The Nix binary cache public key appears at `https://nix.wimpys.world/keys/wimpysworld-nix.pub` with the first published package. Haberdasher derives the `nix.wimpys.world-1` Ed25519 key deterministically from the secret RSA4096 primary numbers with HKDF-SHA256. A client cannot check that derivation from the public OpenPGP key alone. Verify `https://nix.wimpys.world/keys/wimpysworld.gpg` against your independently verified primary fingerprint to check the origin's published OpenPGP key material, and trust `wimpysworld-nix.pub` from `https://nix.wimpys.world/keys/wimpysworld-nix.pub` over HTTPS, pinned by value in `extra-trusted-public-keys`:
 
 ```sh
 set -eu
 : "${EXPECTED_FINGERPRINT:?Set the independently verified full primary fingerprint}"
 : "${BOOTSTRAP_DIR:?Set a private temporary directory outside the checkout}"
 curl --fail --silent --show-error \
-  https://nix.wimpys.world/keys/haberdasher.gpg \
-  --output "$BOOTSTRAP_DIR/haberdasher.gpg"
+  https://nix.wimpys.world/keys/wimpysworld.gpg \
+  --output "$BOOTSTRAP_DIR/wimpysworld.gpg"
 gpg --no-options --homedir "$BOOTSTRAP_DIR" --batch --no-autostart \
-  --with-colons --with-key-data --show-keys "$BOOTSTRAP_DIR/haberdasher.gpg" \
+  --with-colons --with-key-data --show-keys "$BOOTSTRAP_DIR/wimpysworld.gpg" \
   > "$BOOTSTRAP_DIR/key.txt"
 test "$(grep '^fpr:' "$BOOTSTRAP_DIR/key.txt" | cut -d: -f10)" \
   = "$EXPECTED_FINGERPRINT"
 test "$(grep -E '^(pub|sub|sec|ssb):' "$BOOTSTRAP_DIR/key.txt" | cut -d: -f1)" \
   = pub
 curl --fail --silent --show-error \
-  https://nix.wimpys.world/keys/haberdasher-nix.pub
+  https://nix.wimpys.world/keys/wimpysworld-nix.pub
 ```
 
 Add the binary cache and its `nix.wimpys.world-1:<base64>` public key to your NixOS configuration:

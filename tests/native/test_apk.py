@@ -120,7 +120,7 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
         public.mkdir()
         with serve(public) as http:
             http.set_generation_mtime(publish(generation1, public), 1)
-            client = Client(runtime, "trusted", http.url(), public / "keys/haberdasher.rsa.pub")
+            client = Client(runtime, "trusted", http.url(), public / "keys/wimpysworld.rsa.pub")
             standalone = client.run("verify", str(first.local_path), check=False)
             assert standalone.returncode != 0
             client.add("hd-main=1.0-r1")
@@ -211,14 +211,14 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
                 )
             for name, trust in (
                 ("missing-key", None),
-                ("bad-key", public / "keys/haberdasher.rsa.pub"),
+                ("bad-key", public / "keys/wimpysworld.rsa.pub"),
             ):
                 negative = Client(runtime, name, http.url(), trust)
                 if name == "bad-key":
                     wrong_public_key(
                         runtime,
-                        public / "keys/haberdasher.rsa.pub",
-                        negative.keys / "haberdasher.rsa.pub",
+                        public / "keys/wimpysworld.rsa.pub",
+                        negative.keys / "wimpysworld.rsa.pub",
                     )
                 assert (
                     negative.run(
@@ -257,7 +257,7 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
                 )
             with serve(root) as http:
                 negative = Client(
-                    runtime, f"bad-{kind}", http.url(), root / "keys/haberdasher.rsa.pub"
+                    runtime, f"bad-{kind}", http.url(), root / "keys/wimpysworld.rsa.pub"
                 )
                 assert (
                     negative.run(
@@ -315,7 +315,7 @@ def test_unsigned_two_generations_http_and_rejections() -> None:
         with patch.object(
             type(signer),
             "alpine_key",
-            return_value=(runtime.root / "absent-key", public / "keys/haberdasher.rsa.pub"),
+            return_value=(runtime.root / "absent-key", public / "keys/wimpysworld.rsa.pub"),
         ):
             with pytest.raises(apk.ApkFailure, match="Missing APK signing"):
                 apk.prepare(
@@ -444,7 +444,7 @@ def test_signed_upstream_loses_its_signature(mixed_order: str | None) -> None:
         assert key.fingerprint != upstream_key.fingerprint
         publisher_public = signer.alpine_key()[1]
         upstream_public = upstream_signer.alpine_key()[1]
-        assert publisher_public.name == upstream_public.name == "haberdasher.rsa.pub"
+        assert publisher_public.name == upstream_public.name == "wimpysworld.rsa.pub"
         assert sha256_file(publisher_public) != sha256_file(upstream_public)
         dependency = "hd-mixed-dependency>=1.0-r0" if mixed_order else ""
         signed = fixture(
@@ -513,13 +513,13 @@ def test_signed_upstream_loses_its_signature(mixed_order: str | None) -> None:
         publish(generation, root)
         with serve(root) as http:
             http.set_generation_mtime([root / "x86_64/APKINDEX.tar.gz"], 1)
-            client = Client(runtime, "signed", http.url(), root / "keys/haberdasher.rsa.pub")
+            client = Client(runtime, "signed", http.url(), root / "keys/wimpysworld.rsa.pub")
             upstream_client = Client(runtime, "upstream-only", http.url(), upstream_public)
             upstream_client.run("verify", str(signed.local_path))
             assert client.run("verify", str(signed.local_path), check=False).returncode != 0
             published = root / "x86_64/hd-signed-1.0-r0.apk"
             assert sha256_file(published) == (plain.sha256, plain.size)
-            assert ".SIGN.RSA256.haberdasher.rsa.pub" not in apk._members(published, runtime)
+            assert ".SIGN.RSA256.wimpysworld.rsa.pub" not in apk._members(published, runtime)
             client.run("verify", str(root / "x86_64/APKINDEX.tar.gz"))
             assert (
                 upstream_client.run(
@@ -601,7 +601,7 @@ def test_signed_upstream_loses_its_signature(mixed_order: str | None) -> None:
         signature = work / "signature"
         signature.mkdir()
         run(runtime, "tar", "-xzf", str(parts[0]), "-C", str(signature))
-        member = signature / ".SIGN.RSA256.haberdasher.rsa.pub"
+        member = signature / ".SIGN.RSA256.wimpysworld.rsa.pub"
         raw = bytearray(member.read_bytes())
         raw[0] ^= 1
         atomic_write(member, bytes(raw))
@@ -696,7 +696,7 @@ def test_unsigned_multiarch_without_release_suffix() -> None:
             out=runtime.root / "multi-generation1",
         )
         assert [output.ref.key for output in generation1.outputs] == [
-            "keys/haberdasher.rsa.pub",
+            "keys/wimpysworld.rsa.pub",
             "x86_64/hd-multi-1.0.apk",
             "aarch64/hd-multi-1.0.apk",
             "aarch64/APKINDEX.tar.gz",
@@ -732,7 +732,7 @@ def test_unsigned_multiarch_without_release_suffix() -> None:
                     runtime,
                     f"multi-{arch.replace('_', '-')}",
                     http.url(),
-                    public / "keys/haberdasher.rsa.pub",
+                    public / "keys/wimpysworld.rsa.pub",
                     arch,
                 )
                 client.run("verify", str(index))
@@ -782,7 +782,7 @@ def test_noarch_package_in_every_architecture_index() -> None:
             out=runtime.root / "noarch-generation1",
         )
         assert [output.ref.key for output in prepared.outputs] == [
-            "keys/haberdasher.rsa.pub",
+            "keys/wimpysworld.rsa.pub",
             "noarch/hd-noarch-1.0-r0.apk",
             "aarch64/APKINDEX.tar.gz",
             "x86_64/APKINDEX.tar.gz",
@@ -798,7 +798,7 @@ def test_noarch_package_in_every_architecture_index() -> None:
                     runtime,
                     f"noarch-{arch.replace('_', '-')}",
                     http.url(),
-                    public / "keys/haberdasher.rsa.pub",
+                    public / "keys/wimpysworld.rsa.pub",
                     arch,
                 )
                 client.run("verify", str(public / arch / "APKINDEX.tar.gz"))

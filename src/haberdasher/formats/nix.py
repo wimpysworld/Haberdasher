@@ -31,7 +31,7 @@ from haberdasher.core import (
 from haberdasher.runtime import Runtime, RuntimeFailure
 from haberdasher.signing import NIX_KEY_NAME, SigningSession
 
-PUBKEY_KEY = "keys/haberdasher-nix.pub"
+PUBKEY_KEY = "keys/wimpysworld-nix.pub"
 CACHE_INFO_KEY = "nix-cache-info"
 CACHE_INFO = b"StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 41\n"
 IMMUTABLE = "public, max-age=31536000, immutable"

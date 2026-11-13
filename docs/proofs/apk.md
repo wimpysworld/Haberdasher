@@ -16,7 +16,7 @@ This command runs `tests/native/test_apk.py`. `tests/native/test_pipeline.py` se
 
 `src/haberdasher/formats/apk.py` admits new packages by whole-file SHA256, then parses v2 input with `apk index --allow-untrusted`. It rejects native v3 `ADB` input and Android packages. Unsigned packages keep their bytes. A signed upstream package loses its `.SIGN.*` gzip stream, so the published bytes equal the unsigned package with the same control and payload streams. The `C:` control identity does not change.
 
-The inventory keeps the complete index stanza of each package. A run rebuilds the index of each changed architecture from those stanzas with `apk index --merge`, then signs only the index with `abuild-sign -t RSA256`. The native key basename is `haberdasher.rsa.pub`, and it matches the signature member and the client trust file. `noarch` packages appear in every architecture index.
+The inventory keeps the complete index stanza of each package. A run rebuilds the index of each changed architecture from those stanzas with `apk index --merge`, then signs only the index with `abuild-sign -t RSA256`. The native key basename is `wimpysworld.rsa.pub`, and it matches the signature member and the client trust file. `noarch` packages appear in every architecture index.
 
 ## Native client evidence
 

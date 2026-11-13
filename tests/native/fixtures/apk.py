@@ -197,7 +197,7 @@ class Client:
         self.keys = self.native.path("config/keys")
         self.keys.mkdir(mode=0o700)
         if key is not None:
-            shutil.copyfile(key, self.keys / "haberdasher.rsa.pub")
+            shutil.copyfile(key, self.keys / "wimpysworld.rsa.pub")
         self.repositories = self.native.path("config/repositories")
         atomic_write(self.repositories, b"")
         self.run("add", "--initdb", "--usermode", "--no-scripts", "--no-commit-hooks")

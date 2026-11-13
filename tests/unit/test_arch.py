@@ -175,7 +175,7 @@ class NativeArch:
             }
             records[directory] = desc
         for kind in ("db", "files"):
-            target = database.with_name(f"haberdasher.{kind}.tar.gz")
+            target = database.with_name(f"wimpysworld.{kind}.tar.gz")
             with tarfile.open(target, "w:gz") as archive:
                 for directory, desc in records.items():
                     members = [("desc", desc)]

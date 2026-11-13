@@ -116,9 +116,9 @@ def test_tree_nests_directories_and_folds_flatpak_objects() -> None:
         ref("flatpak", "objects/cd/two.dirtree", 500_000),
         ref("flatpak", "refs/heads/app/world.wimpys.tool/x86_64/stable", 65),
         ref("flatpak", "summary", 900),
-        ref("flatpak", "keys/haberdasher.asc", 3000),
-        ref("flatpak", "keys/haberdasher.gpg", 2000),
-        ref("flatpak", "keys/haberdasher.rsa.pub", 800),
+        ref("flatpak", "keys/wimpysworld.asc", 3000),
+        ref("flatpak", "keys/wimpysworld.gpg", 2000),
+        ref("flatpak", "keys/wimpysworld.rsa.pub", 800),
         ref("flatpak", "haberdasher.json", 1500),
         ref("flatpak", "index.html", 4000),
         ref("flatpak", "og.png", 40_000),
@@ -136,7 +136,7 @@ def test_tree_nests_directories_and_folds_flatpak_objects() -> None:
     assert state.INVENTORY_KEY not in site.files(objects) and site.PAGE_KEY not in tree
     assert site.IMAGE_KEY not in site.files(objects) and site.IMAGE_KEY not in tree
     assert "haberdasher.<wbr>json" not in tree
-    assert '<li class="aux"><a href="keys/haberdasher.asc">' in tree
+    assert '<li class="aux"><a href="keys/wimpysworld.asc">' in tree
     apt_tree = site.tree("apt", site.files((ref("apt", "objects/a", 1),)))
     assert "<details><summary>" in apt_tree and 'objects/<span class="meta">1 file' in apt_tree
     assert "content-addressed" not in apt_tree
@@ -227,7 +227,7 @@ def test_pages_show_the_shared_client_configuration() -> None:
     assert any(sources in command for command in apt_page)
     rpm_page = commands(render("rpm", published("rpm", apt("Text", name="rpm"))))
     repo = site.rpm_repo(
-        "https://rpm.wimpys.world", "https://rpm.wimpys.world/keys/haberdasher.asc"
+        "https://rpm.wimpys.world", "https://rpm.wimpys.world/keys/wimpysworld.asc"
     )
     assert any(repo in command for command in rpm_page)
     assert "sudo dnf install tool" in rpm_page and "sudo zypper install tool" in rpm_page
@@ -251,7 +251,7 @@ def test_long_tokens_break_only_before_slashes() -> None:
     page = render("apt", published("apt", apt("Text")))
     assert (
         '<span class="tok br"><span class="tok">https://apt.wimpys.world</span><wbr>'
-        '<span class="tok">/keys</span><wbr><span class="tok">/haberdasher.gpg</span></span>'
+        '<span class="tok">/keys</span><wbr><span class="tok">/wimpysworld.gpg</span></span>'
     ) in page
     assert '<span class="tok">--print-architecture)</span>' in page
 

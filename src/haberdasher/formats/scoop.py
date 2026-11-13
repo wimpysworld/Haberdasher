@@ -30,8 +30,8 @@ from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
 
 # Scoop accepts only a <host>/<user>/<repo> bucket URL.
-REPO = "wimpysworld/haberdasher.git"
-BUCKET = "haberdasher"
+REPO = "wimpysworld/bucket.git"
+BUCKET = "wimpysworld"
 _MACHINE = {0x8664: "64bit", 0xAA64: "arm64", 0x14C: "32bit"}
 IMAGE_FILE_EXECUTABLE = 0x0002
 IMAGE_FILE_DLL = 0x2000
@@ -212,9 +212,9 @@ def manifests(history: Sequence[AdmittedAsset]) -> dict[str, str]:
 def readme(names: Sequence[str]) -> str:
     installs = "\n".join(f"scoop install {BUCKET}/{name}" for name in names)
     return (
-        "# Haberdasher bucket\n\n"
+        "# Wimpy's World bucket\n\n"
         "Scoop manifests for the Windows builds of projects by Martin Wimpress.\n"
-        f"Haberdasher writes this bucket. See {PUBLIC['scoop'][1]}/ for details.\n\n"
+        f"See {PUBLIC['scoop'][1]}/ for details.\n\n"
         "```powershell\n"
         f"scoop bucket add {BUCKET} {PUBLIC['scoop'][1]}/{REPO}\n"
         f"{installs}\n"

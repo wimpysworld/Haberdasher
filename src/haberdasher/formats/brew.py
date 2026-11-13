@@ -28,7 +28,7 @@ from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
 
 TAP = "tap.git"
-TAP_NAME = "wimpysworld/haberdasher"
+TAP_NAME = "wimpysworld/tap"
 _CPU = {0x01000007: "intel", 0x0100000C: "arm"}
 MH_EXECUTE = 2
 MAX_PLIST = 1024 * 1024
@@ -198,9 +198,9 @@ def casks(history: Sequence[AdmittedAsset]) -> dict[str, str]:
 def readme(names: Sequence[str]) -> str:
     installs = "\n".join(f"brew install --cask {TAP_NAME}/{name}" for name in names)
     return (
-        "# Haberdasher tap\n\n"
+        "# Wimpy's World tap\n\n"
         "Homebrew casks for the macOS builds of projects by Martin Wimpress.\n"
-        f"Haberdasher writes this tap. See {PUBLIC['brew'][1]}/ for details.\n\n"
+        f"See {PUBLIC['brew'][1]}/ for details.\n\n"
         "```sh\n"
         f"brew tap {TAP_NAME} {PUBLIC['brew'][1]}/{TAP}\n"
         f"{installs}\n"

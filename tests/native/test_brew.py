@@ -127,7 +127,7 @@ def test_publish_serves_a_tap_that_git_clones_over_http(
         clone = tmp_path / "clone"
         with serve(root / "public") as http:
             git("clone", "--quiet", http.url("brew/tap.git"), str(clone), cwd=tmp_path)
-        assert git("log", "--format=%an <%ae>", cwd=clone) == "Haberdasher <code@wimpress.io>"
+        assert git("log", "--format=%an <%ae>", cwd=clone) == "Wimpy's World <code@wimpress.io>"
         assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=clone) == "main"
         casks = sorted(path.name for path in (clone / "Casks").iterdir())
         assert casks == ["sidra.rb", "tool.rb"]
@@ -136,7 +136,7 @@ def test_publish_serves_a_tap_that_git_clones_over_http(
         assert '  desc "A fixture tool"\n' in tool and "depends_on" not in tool
         sidra = (clone / "Casks/sidra.rb").read_text()
         assert '  app "Sidra.app"\n' in sidra and "  depends_on arch: :arm64\n" in sidra
-        assert "brew tap wimpysworld/haberdasher" in (clone / "README.md").read_text()
+        assert "brew tap wimpysworld/tap" in (clone / "README.md").read_text()
         ruby = shutil.which("ruby")
         assert ruby is not None
         for path in (clone / "Casks").iterdir():

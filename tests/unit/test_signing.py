@@ -271,7 +271,7 @@ def test_workspace_and_export_symlinks_still_reject() -> None:
             session.public_exports(link)
         with pytest.raises(ValueError, match="Symlink"):
             session.sign_file(source, link / "signature")
-        file_link = destination / "haberdasher.asc"
+        file_link = destination / "wimpysworld.asc"
         file_link.symlink_to(source)
         with pytest.raises(ValueError, match="Symlink"):
             session.public_exports(destination)
@@ -457,8 +457,8 @@ def test_nix_key_deterministic_hkdf_derivation_and_swapped_primes(
         seeds: list[bytes] = []
         with private_workspace() as runtime:
             session = SigningSession(runtime, runtime.root / "gnupg", FINGERPRINT)
-            priv_pem = runtime.root / "haberdasher.rsa"
-            pub_pem = runtime.root / "haberdasher.rsa.pub"
+            priv_pem = runtime.root / "wimpysworld.rsa"
+            pub_pem = runtime.root / "wimpysworld.rsa.pub"
             atomic_write(priv_pem, b"pem")
             atomic_write(pub_pem, b"pub")
             monkeypatch.setattr(session, "_validate", lambda: None)
@@ -534,8 +534,8 @@ def test_nix_key_validation_errors(monkeypatch: pytest.MonkeyPatch, fault: str, 
     )
     with private_workspace() as runtime:
         session = SigningSession(runtime, runtime.root / "gnupg", FINGERPRINT)
-        priv_pem = runtime.root / "haberdasher.rsa"
-        pub_pem = runtime.root / "haberdasher.rsa.pub"
+        priv_pem = runtime.root / "wimpysworld.rsa"
+        pub_pem = runtime.root / "wimpysworld.rsa.pub"
         atomic_write(priv_pem, b"pem")
         atomic_write(pub_pem, b"pub")
 

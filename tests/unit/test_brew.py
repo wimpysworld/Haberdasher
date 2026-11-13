@@ -242,7 +242,7 @@ def test_repository_first_run_later_commit_and_unchanged_run(runtime: Runtime) -
     assert (repo / "HEAD").read_text() == "ref: refs/heads/main\n"
     assert (repo / "info/refs").read_text() == f"{head}\trefs/heads/main\n"
     log = runtime.run(["git", f"--git-dir={repo}", "log", "--format=%an <%ae> %P", "main"])
-    assert log.stdout.decode() == "Haberdasher <code@wimpress.io> \n"
+    assert log.stdout.decode() == "Wimpy's World <code@wimpress.io> \n"
 
     same, again = repository(objects(repo), head, files, runtime, "b")
     assert same == head

@@ -240,6 +240,10 @@ def show_plan(
                     report=say,
                 )
             )
+    moving = [name for name in names if name in published and published[name].moved]
+    for name in moving:
+        count = len(published[name].moved)
+        step(say, name, f"would copy {plural(count, 'object')} to current keys")
     images, pages = pending_pages(
         {
             name: published[name]
@@ -276,10 +280,12 @@ def show_plan(
         summary += f" {plural(len(pages), 'index page')} to write."
     if images:
         summary += f" {plural(len(images), 'preview image')} to write."
+    if moving:
+        summary += f" {_repositories(len(moving))} to move to current keys."
     summary += " Nothing written."
     if missing:
         summary += f" Could not read {', '.join(missing)}, so the plan is incomplete."
-    elif total or pages or images:
+    elif total or pages or images or moving:
         summary += " Run `just publish` to publish them."
     say(summary)
 

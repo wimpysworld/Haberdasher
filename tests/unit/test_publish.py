@@ -272,7 +272,7 @@ class SignerDouble:
 
     def public_exports(self, out: Path) -> tuple[Path, Path, Path]:
         paths = tuple(
-            out / name for name in ("haberdasher.asc", "haberdasher.gpg", "haberdasher.rsa.pub")
+            out / name for name in ("wimpysworld.asc", "wimpysworld.gpg", "wimpysworld.rsa.pub")
         )
         for path in paths:
             core.atomic_write(path, EXPORT)
@@ -334,8 +334,8 @@ def test_unchanged_rerun_writes_only_its_locks(
     assert first.changed and first.published_objects == 7
     assert fixture.store.writes == [
         "arch/haberdasher.lock",
-        "arch/keys/haberdasher.asc",
-        "arch/keys/haberdasher.gpg",
+        "arch/keys/wimpysworld.asc",
+        "arch/keys/wimpysworld.gpg",
         "arch/x86_64/tool-1.pkg",
         "arch/x86_64/db",
         "arch/haberdasher.json",
@@ -609,6 +609,54 @@ def test_missing_published_entry_stops_preparation(
     assert not fixture.path("arch", "x86_64/tool-2.pkg").exists()
 
 
+def test_former_keys_move_to_current_keys_and_stay_in_the_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    for suffix in ("asc", "gpg"):
+        fixture.path("arch", f"keys/wimpysworld.{suffix}").rename(
+            fixture.path("arch", f"keys/haberdasher.{suffix}")
+        )
+    inventory = fixture.path("arch", state.INVENTORY_KEY)
+    inventory.write_bytes(
+        inventory.read_bytes().replace(b"keys/wimpysworld.", b"keys/haberdasher.")
+    )
+    lines: list[str] = []
+    result = fixture.run(lines.append)
+    assert result.changed and result.repositories == ("arch",)
+    assert "arch  copying 2 objects to current keys" in lines
+    assert fixture.store.writes[:4] == [
+        "arch/haberdasher.lock",
+        "arch/keys/wimpysworld.asc",
+        "arch/keys/wimpysworld.gpg",
+        "arch/haberdasher.json",
+    ]
+    assert fixture.path("arch", "keys/haberdasher.asc").read_bytes() == EXPORT
+    assert b"haberdasher." not in inventory.read_bytes().replace(b"haberdasher.lock", b"")
+    assert_published(fixture)
+    assert fixture.run() == publish.RunResult(False, 0, 0)
+
+
+def test_former_keys_map_to_current_keys() -> None:
+    cases = {
+        ("apt", "keys/haberdasher.asc"): "keys/wimpysworld.asc",
+        ("apk", "keys/haberdasher.rsa.pub"): "keys/wimpysworld.rsa.pub",
+        ("nix", "keys/haberdasher-nix.pub"): "keys/wimpysworld-nix.pub",
+        ("arch", "x86_64/haberdasher.db.tar.gz.sig"): "x86_64/wimpysworld.db.tar.gz.sig",
+        ("arch", "aarch64/haberdasher.files"): "aarch64/wimpysworld.files",
+        ("arch", "x86_64/haberdasher-1-1-x86_64.pkg.tar.zst"): (
+            "x86_64/haberdasher-1-1-x86_64.pkg.tar.zst"
+        ),
+        ("scoop", "wimpysworld/haberdasher.git/HEAD"): "wimpysworld/bucket.git/HEAD",
+        ("brew", "tap.git/HEAD"): "tap.git/HEAD",
+        ("apt", "haberdasher.json"): "haberdasher.json",
+    }
+    for (name, key), expected in cases.items():
+        assert state.current_key(name, key) == expected
+
+
 def test_publish_reports_each_step_and_an_unchanged_rerun(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -625,8 +673,8 @@ def test_publish_reports_each_step_and_an_unchanged_rerun(
         "arch  preparing 1 new package",
         "arch  signed metadata",
         f"arch  uploading 3 objects ({2 * len(EXPORT) + 18} B)",
-        f"arch    keys/haberdasher.asc ({len(EXPORT)} B)",
-        f"arch    keys/haberdasher.gpg ({len(EXPORT)} B)",
+        f"arch    keys/wimpysworld.asc ({len(EXPORT)} B)",
+        f"arch    keys/wimpysworld.gpg ({len(EXPORT)} B)",
         "arch    x86_64/tool-1.pkg (18 B)",
         "arch  uploaded 3 objects in 3m12s",
         "arch    x86_64/db (7 B)",

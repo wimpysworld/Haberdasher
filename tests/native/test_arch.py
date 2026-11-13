@@ -276,13 +276,13 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
                 runtime,
                 "bsdtar",
                 "-xOf",
-                str(runtime.root / f"generation1/x86_64/haberdasher.{kind}.tar.gz"),
+                str(runtime.root / f"generation1/x86_64/wimpysworld.{kind}.tar.gz"),
                 "keeper-1-1/desc",
             ) == run(
                 runtime,
                 "bsdtar",
                 "-xOf",
-                str(runtime.root / f"generation2/x86_64/haberdasher.{kind}.tar.gz"),
+                str(runtime.root / f"generation2/x86_64/wimpysworld.{kind}.tar.gz"),
                 "keeper-1-1/desc",
             )
         live = runtime.root / "live"
@@ -327,18 +327,18 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
                     negative = client(
                         runtime, f"split-{kind}-{data_generation}", http.url("x86_64"), key
                     )
-                    archive = live / f"x86_64/haberdasher.{kind}"
+                    archive = live / f"x86_64/wimpysworld.{kind}"
                     signature = archive.with_name(archive.name + ".sig")
                     archive.write_bytes(
                         (
                             runtime.root
-                            / f"generation{data_generation}/x86_64/haberdasher.{kind}.tar.gz"
+                            / f"generation{data_generation}/x86_64/wimpysworld.{kind}.tar.gz"
                         ).read_bytes()
                     )
                     signature.write_bytes(
                         (
                             runtime.root
-                            / f"generation{signature_generation}/x86_64/haberdasher.{kind}.tar.gz.sig"
+                            / f"generation{signature_generation}/x86_64/wimpysworld.{kind}.tar.gz.sig"
                         ).read_bytes()
                     )
                     http.set_generation_mtime([archive, signature], generation)
@@ -349,7 +349,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
                     generation += 1
                     negative.checked(operation)
                     assert (
-                        negative.client.path(f"db/sync/haberdasher.{kind}").read_bytes()
+                        negative.client.path(f"db/sync/wimpysworld.{kind}").read_bytes()
                         == archive.read_bytes()
                     )
             untrusted = client(runtime, "untrusted", http.url("x86_64"), key, trusted=False)
@@ -358,7 +358,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
                 publish(second, live)
                 extracted = runtime.root / f"bad-{fault}"
                 extracted.mkdir()
-                archive = runtime.root / "generation2/x86_64/haberdasher.db.tar.gz"
+                archive = runtime.root / "generation2/x86_64/wimpysworld.db.tar.gz"
                 run(runtime, "bsdtar", "-xf", str(archive), "-C", str(extracted))
                 record = extracted / "updateable-2-1/desc"
                 desc = record.read_text()
@@ -375,7 +375,7 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
                 else:
                     record.write_text(before + after)
                     package_signature.unlink()
-                bad = live / "x86_64/haberdasher.db"
+                bad = live / "x86_64/wimpysworld.db"
                 run(
                     runtime,
                     "bsdtar",
@@ -402,13 +402,13 @@ def test_arch_native(monkeypatch: pytest.MonkeyPatch) -> None:
                 for record in requests
             )
             assert any(
-                record.path.endswith("haberdasher.files") and record.status == 200
+                record.path.endswith("wimpysworld.files") and record.status == 200
                 for record in requests
             )
         for missing in (
-            "haberdasher.db.tar.gz.sig",
-            "haberdasher.files.tar.gz",
-            "haberdasher.files.tar.gz.sig",
+            "wimpysworld.db.tar.gz.sig",
+            "wimpysworld.files.tar.gz",
+            "wimpysworld.files.tar.gz.sig",
         ):
             path = runtime.root / "generation2/x86_64" / missing
             saved = path.read_bytes()
@@ -614,8 +614,8 @@ def test_arch_native_any_package_in_every_architecture() -> None:
             assert f"{directory}/shared-1-1-any.pkg.tar.xz.sig" in keys
         assert "aarch64/native-1-1-x86_64.pkg.tar.zst" not in keys
         assert [key for key in keys if key.endswith(".db.tar.gz")] == [
-            "aarch64/haberdasher.db.tar.gz",
-            "x86_64/haberdasher.db.tar.gz",
+            "aarch64/wimpysworld.db.tar.gz",
+            "x86_64/wimpysworld.db.tar.gz",
         ]
         arch.validate_retained(prepared.retained, policy=policy, runtime=runtime)
         live = runtime.root / "live"

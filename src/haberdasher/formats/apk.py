@@ -33,7 +33,7 @@ from haberdasher.runtime import Runtime
 from haberdasher.signing import ALPINE_SIGNATURE_MEMBER, SigningSession
 
 MAX_METADATA = 16 * 1024 * 1024
-PUBLIC_KEY = "haberdasher.rsa.pub"
+PUBLIC_KEY = "wimpysworld.rsa.pub"
 ARCHITECTURES = ("x86_64", "aarch64")
 
 
@@ -573,7 +573,7 @@ def prepare(
             content = work / arch
             content.mkdir(mode=0o700)
             atomic_write(content / "APKINDEX", "".join(records.values()).encode())
-            atomic_write(content / "DESCRIPTION", b"Haberdasher")
+            atomic_write(content / "DESCRIPTION", b"Wimpy's World")
             seed = work / f"{arch}-seed.tar.gz"
             _run(
                 runtime,
@@ -600,7 +600,7 @@ def prepare(
                     "--index",
                     str(seed),
                     "--description",
-                    "Haberdasher",
+                    "Wimpy's World",
                     "--output",
                     str(target),
                 ),

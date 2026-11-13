@@ -66,26 +66,33 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
 - Do not claim atomicity across multiple objects.
 - Keep older objects that published metadata still references.
   Ask the owner before you change deletion or retention behaviour.
+- Name everything that users see `wimpysworld`, or "Wimpy's World" in display text, never Haberdasher.
+  This covers key files, client configuration, repository and tap names, index descriptions, and Git authors.
+  Haberdasher is the tool name. It stays in bucket names, `haberdasher.json`, `haberdasher.lock`, the HKDF salt, the User-Agent, temporary names, and the page footer.
+- When an inventory names an object by a former key, a run copies the object to its current key and rebuilds the entry metadata that names the repository.
+  The objects at former keys stay in the bucket. Ask the owner before you delete them.
 - Distinguish repository metadata signing from package signing.
 - Never reject a package because the upstream signed it.
   Remove or ignore upstream package signatures, and sign with the Haberdasher key where the format needs it.
 - Keep native client signature checks enabled.
 - Use SHA256 OpenPGP signatures across APT, RPM, Arch, and Flatpak.
 - For APT (WW-371), sign `Release` as `InRelease` and `Release.gpg`, not `.deb` packages.
+  Set `Origin` and `Label` to `Wimpy's World`.
 - For RPM (WW-372), sign packages with `rpmsign` before `createrepo_c`, then create detached armoured `repomd.xml.asc`.
 - For Arch (WW-373), sign packages first. Sign database/files metadata with `repo-add --include-sigs --sign`.
+  The repository name is `wimpysworld`.
 - For Alpine v2 (WW-374), use explicit `abuild-sign -t RSA256`, not the SHA1 default.
-  Match the `.rsa.pub` filename to signature members and client trust files.
+  Match the `wimpysworld.rsa.pub` filename to signature members and client trust files.
   Preserve the bytes of unsigned upstream APKs.
 - For Flatpak (WW-375), sign and verify both commits and summaries with GPG.
 - For Homebrew, publish macOS bare binaries and `.zip` files that hold one `.app`, mirrored into the bucket.
   Write one cask per tool into a tap that the bucket serves as a Git repository over dumb HTTP at `tap.git`.
-  The tap name is `wimpysworld/haberdasher`. Homebrew verifies the cask `sha256`, not an OpenPGP signature.
+  The tap name is `wimpysworld/tap`. Homebrew verifies the cask `sha256`, not an OpenPGP signature.
   Bare binaries carry no package metadata, so the cask name comes from the asset name and the version from the release tag.
   Take each architecture from the Mach-O header, never from the file name.
   Remove the quarantine attribute in each cask's `postflight` until the projects sign and notarise with a Developer ID.
 - For Scoop, publish Windows bare `.exe` files and `.zip` files that hold one `.exe`, mirrored into the bucket.
-  Write one JSON manifest per tool into a bucket repository served over dumb HTTP at `wimpysworld/haberdasher.git`.
+  Write one JSON manifest per tool into a bucket repository served over dumb HTTP at `wimpysworld/bucket.git`, with the bucket name `wimpysworld`.
   Scoop requires a `<host>/<user>/<repo>` URL. Scoop verifies the manifest `hash`, not an OpenPGP signature.
   Name and version each tool the same way as Homebrew. Take each architecture from the PE header, never from the file name.
   Publish an app's portable zip, never its self-updating installer. Skip the installer that a release's `latest.yml` names, without downloading it.
