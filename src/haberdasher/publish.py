@@ -34,6 +34,7 @@ from haberdasher.core import (
     step,
     utc_now,
 )
+from haberdasher.formats import nix
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession, signing_session
 from haberdasher.state import Published, StateError, Store
@@ -95,10 +96,6 @@ def _adapter(name: str) -> Adapter:
             from haberdasher.formats import scoop
 
             return scoop
-        case "nix":
-            from haberdasher.formats import nix
-
-            return nix
         case _:
             raise ValueError("Unknown publication format")
 
@@ -113,23 +110,12 @@ class RunResult:
     pages: tuple[str, ...] = ()
 
 
-def _siblings(scan: discovery.CompleteScan) -> dict[tuple[str, int], set[str]]:
-    groups: dict[tuple[str, int], set[str]] = {}
-    for asset in scan.state.assets:
-        groups.setdefault((asset.repository, asset.release_id), set()).add(asset.filename)
-    return groups
-
-
 def provided(scan: discovery.CompleteScan) -> set[str]:
     """Formats that the scanned release assets contain."""
-    siblings = _siblings(scan)
     return {
         name
         for record in scan.state.records
-        for name in discovery.asset_formats(
-            record.source.filename,
-            siblings.get((record.source.repository, record.source.release_id), ()),
-        )
+        if (name := discovery.asset_format(record.source.filename)) is not None
     }
 
 
@@ -137,7 +123,6 @@ def new_assets(
     scan: discovery.CompleteScan, published: Mapping[str, Published]
 ) -> dict[str, list[discovery.DiscoveredAsset]]:
     """Group checksummed assets by format, without the bytes that each inventory already holds."""
-    siblings = _siblings(scan)
     known = {
         name: {asset.inspected.verified.sha256 for asset in item.retained.accepted_history}
         | state.rejected(item.retained.metadata)
@@ -147,10 +132,8 @@ def new_assets(
     for item in scan.checksummed:
         if item.checksum is None:
             continue
-        group = siblings.get((item.source.repository, item.source.release_id), ())
-        for name in discovery.asset_formats(item.source.filename, group):
-            if name not in result or item.checksum.sha256 in known[name]:
-                continue
+        name = discovery.asset_format(item.source.filename)
+        if name in result and item.checksum.sha256 not in known[name]:
             result[name].append(item)
     return result
 
@@ -233,7 +216,6 @@ def _listing(name: str, refs: Sequence[ObjectRef]) -> list[str]:
         "flatpak": "objects/",
         "brew": "tap.git/objects/",
         "scoop": "wimpysworld/haberdasher.git/objects/",
-        "nix": "packages.git/objects/",
     }.get(name)
     objects = [ref for ref in refs if folded and ref.key.startswith(folded)]
     for ref in refs:
@@ -345,6 +327,8 @@ def inspect_new(
     rejected: set[str] | None = None,
 ) -> list[InspectedAsset]:
     """Download, verify, and inspect new assets. Skip an unsupported asset with one line."""
+    if not changed:
+        return []
     adapter = _adapter(name)
     inspected: list[InspectedAsset] = []
     for index, item in enumerate(changed):
@@ -400,6 +384,16 @@ def _reconcile(
     if scan is None:
         scan = discovery.scan_releases(config, runtime=runtime, report=report)
     changed = new_assets(scan, published)
+    flakes = (
+        nix.pending(scan.releases, published["nix"].retained, runtime=runtime, report=report)
+        if "nix" in published
+        else []
+    )
+    references = (
+        nix.references(scan.releases, published["nix"].retained, flakes, runtime=runtime)
+        if "nix" in published
+        else {}
+    )
     missing_bootstrap: set[str] = (
         {name for name in names if name not in UNSIGNED and len(published[name].bootstrap) != 2}
         if fingerprint is not None
@@ -422,7 +416,7 @@ def _reconcile(
             )
             for name in names
         }
-        if not missing_bootstrap and not any(inspected.values()):
+        if not missing_bootstrap and not any(inspected.values()) and not flakes:
             count = 0
             repositories: list[str] = []
             updated = dict(published)
@@ -430,12 +424,15 @@ def _reconcile(
                 current = published[name]
                 prior_rejected = set(state.rejected(current.retained.metadata))
                 all_rejected = prior_rejected | rejected[name]
-                if all_rejected == prior_rejected:
+                retained = current.retained
+                if name == "nix":
+                    retained = nix.with_references(retained, references)
+                if all_rejected == prior_rejected and retained is current.retained:
                     step(report, name, "unchanged")
                     continue
                 item = PreparedFormat(
                     name,
-                    _with_rejected(current.retained, all_rejected),
+                    _with_rejected(retained, all_rejected),
                     (),
                     current.retained.objects,
                 )
@@ -479,6 +476,22 @@ def _reconcile(
             for name in names:
                 prior_rejected = set(state.rejected(published[name].retained.metadata))
                 all_rejected = prior_rejected | rejected[name]
+                if name == "nix" and flakes:
+                    step(report, name, f"building {plural(len(flakes), 'new package')}")
+                    retained = state.materialise(store, published[name], out=root / "nix-published")
+                    built = nix.prepare(
+                        flakes,
+                        retained,
+                        runtime=runtime,
+                        signer=signer,
+                        out=root / name,
+                        report=report,
+                    )
+                    if built.outputs:
+                        _check_writes(retained, built)
+                        prepared.append(built)
+                        step(report, name, "signed metadata")
+                        continue
                 if not inspected[name]:
                     if name in missing_bootstrap:
                         step(report, name, "adding public keys")
@@ -508,6 +521,12 @@ def _reconcile(
                 )
                 if prepared[-1].outputs and name not in UNSIGNED:
                     step(report, name, "signed metadata")
+            prepared = [
+                replace(item, retained=nix.with_references(item.retained, references))
+                if item.format == "nix"
+                else item
+                for item in prepared
+            ]
             bootstrap_outputs, bootstrap_objects = prepare_bootstrap(
                 prepared,
                 tuple(ref for item in published.values() for ref in item.bootstrap),
@@ -570,7 +589,7 @@ def _reconcile(
             step(report, item.format, f"wrote {state.INVENTORY_KEY}")
             count += 1
             repositories.append(item.format)
-            packages += len(item.retained.accepted_history) - len(current.retained.accepted_history)
+            packages += _added(item, current)
             if wrote := write_page(
                 store,
                 state.decode_published(item.format, data, None),
@@ -615,6 +634,13 @@ def _prepare(
     result = adapter.prepare(
         additions, retained, policy=policy, runtime=runtime, signer=signer, now=now, out=out
     )
+    _check_writes(retained, result)
+    adapter.validate_prepared(result, policy=policy, runtime=runtime)
+    return result
+
+
+def _check_writes(retained: RetainedFormat, result: PreparedFormat) -> None:
+    """Create each new object, and replace each prior object on its observed ETag."""
     etags = state.mapping(retained.metadata.get("etags", {}))
     prior = {ref.key for ref in retained.objects}
     for output in result.outputs:
@@ -623,5 +649,11 @@ def _prepare(
                 raise StateError("Adapter changed the observed prior write precondition")
         elif output.mode != "create":
             raise StateError("A new object requires conditional creation")
-    adapter.validate_prepared(result, policy=policy, runtime=runtime)
-    return result
+
+
+def _added(item: PreparedFormat, current: Published) -> int:
+    """The number of packages that a prepared format adds to its published inventory."""
+    if item.format == "nix":
+        new = set(item.retained.active_identities) - set(current.retained.active_identities)
+        return len(new)
+    return len(item.retained.accepted_history) - len(current.retained.accepted_history)

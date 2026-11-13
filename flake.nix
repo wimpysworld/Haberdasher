@@ -3,14 +3,15 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    nix-packages.url = "git+https://nix.wimpys.world/packages.git";
-    nix-packages.inputs.nixpkgs.follows = "nixpkgs";
+    tailor.url = "github:wimpysworld/tailor";
+    tailor.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
     {
+      self,
       nixpkgs,
-      nix-packages,
+      tailor,
       ...
     }:
     let
@@ -85,8 +86,14 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
+          package = import ./nix/package.nix { inherit pkgs self; };
         in
-        pkgs.lib.optionalAttrs (builtins.pathExists ./nix/lib/blender.nix) {
+        # Expose the project package under its pname and as the default package.
+        pkgs.lib.optionalAttrs (builtins.pathExists ./nix/package.nix) {
+          ${package.pname} = package;
+          default = package;
+        }
+        // pkgs.lib.optionalAttrs (builtins.pathExists ./nix/lib/blender.nix) {
           blender-agent-bridge-extension = (import ./nix/lib/blender.nix { inherit pkgs; }).extension;
         }
       );
@@ -95,7 +102,7 @@
         let
           pkgs = import nixpkgs { inherit system; };
           # Keep the development shell available when Tailor has no package for this system.
-          tailorPkgs = nix-packages.packages.${system} or { };
+          tailorPkgs = tailor.packages.${system} or { };
           projectTools = [
             pkgs.actionlint
             pkgs.gh

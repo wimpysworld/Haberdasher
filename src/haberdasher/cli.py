@@ -23,6 +23,7 @@ from haberdasher.config import (
     load_config,
 )
 from haberdasher.core import VerifiedAsset, plural, step, utc_now
+from haberdasher.formats import nix
 from haberdasher.runtime import Runtime, private_workspace
 from haberdasher.storage import LocalStore, R2Store, Store
 
@@ -229,6 +230,11 @@ def show_plan(
             )
             for name, items in changed.items()
         }
+        counts = {name: len(items) for name, items in new.items()}
+        if "nix" in published and "nix" in names:
+            counts["nix"] = len(
+                nix.pending(scan.releases, published["nix"].retained, runtime=runtime, report=say)
+            )
     images, pages = pending_pages(
         {
             name: published[name]
@@ -241,9 +247,13 @@ def show_plan(
     rows = [("Format", "Repository", "Published", "New")]
     for name in names:
         if name in published:
-            history = published[name].retained.accepted_history
-            count = str(len({asset.inspected.identity for asset in history}))
-            rows.append((name, hosts[name], count, str(len(new[name]))))
+            retained = published[name].retained
+            identities = (
+                set(retained.active_identities)
+                if name == "nix"
+                else {asset.inspected.identity for asset in retained.accepted_history}
+            )
+            rows.append((name, hosts[name], str(len(identities)), str(counts[name])))
         else:
             rows.append((name, hosts[name], "?", "?"))
     widths = [max(len(row[column]) for row in rows) for column in range(4)]
@@ -254,7 +264,7 @@ def show_plan(
             f"{row[2]:>{widths[2]}}  {row[3]:>{widths[3]}}"
         )
     say("")
-    total = sum(len(items) for items in new.values())
+    total = sum(counts.values())
     missing = [name for name in names if name not in published]
     summary = f"{plural(total, 'new package')}." if total else "No new packages."
     if pages:

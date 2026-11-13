@@ -1,6 +1,6 @@
 # Haberdasher
 
-Haberdasher is Martin Wimpress's personal publisher. It takes the prebuilt packages from the GitHub "Latest" release of each listed repository that Martin controls and publishes them as signed APT, RPM, Arch, Alpine, Flatpak, and Nix repositories, plus a Homebrew tap and a Scoop bucket, on Cloudflare R2. It is not a package builder.
+Haberdasher is Martin Wimpress's personal publisher. It takes the prebuilt packages from the GitHub "Latest" release of each listed repository that Martin controls and publishes them as signed APT, RPM, Arch, Alpine, and Flatpak repositories, plus a Homebrew tap and a Scoop bucket, on Cloudflare R2. It also builds the packages of each project's own Nix flake at the release tag into a signed Nix binary cache. Apart from that cache, it is not a package builder.
 
 ## Use
 

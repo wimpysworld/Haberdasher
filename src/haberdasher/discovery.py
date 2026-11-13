@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
 import re
 import tempfile
 import time
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,15 +58,6 @@ PACKAGE_SUFFIXES = (
 MACOS_BINARY = re.compile(r"(.+?)[-_](?:darwin|macos|mac|osx)(?:[-_].*)?", re.IGNORECASE)
 # A Windows zip file names its operating system.
 WINDOWS = re.compile(r"(?:^|[-_.])(?:windows|win(?:32|64)?)(?:[-_.]|$)", re.IGNORECASE)
-TARBALL = re.compile(
-    r".+[-_](?:linux|darwin|macos|mac|osx)[-_](?:x86_64|amd64|x64|aarch64|arm64)\.tar\.gz$",
-    re.IGNORECASE,
-)
-DMG = re.compile(r".+\.dmg$", re.IGNORECASE)
-MAX_NIX_BLOB_BYTES = 262_144
-RELEASE_NIX_FILES = frozenset(
-    {"nix/default.nix", "nix/linux.nix", "nix/darwin.nix", "nix/package.nix"}
-)
 # electron-builder publishes this Windows update feed for apps that update themselves.
 UPDATER = "latest.yml"
 PER_ASSET_SUFFIXES = (".sha256", ".sha256sum")
@@ -89,24 +79,6 @@ def asset_format(filename: str) -> str | None:
     if re.search(r"\.[A-Za-z][A-Za-z0-9]*$", filename) is None and MACOS_BINARY.fullmatch(filename):
         return "brew"
     return None
-
-
-def asset_formats(filename: str, siblings: Iterable[str] = ()) -> tuple[str, ...]:
-    """Every format that a release asset can feed within its release asset group."""
-    primary = asset_format(filename)
-    result = [primary] if primary is not None else []
-    sibling_set = set(siblings) or {filename}
-    lower = filename.lower()
-    if any(TARBALL.fullmatch(name) is not None for name in sibling_set):
-        if TARBALL.fullmatch(filename) is not None:
-            result.append("nix")
-    elif (
-        filename.endswith(".deb")
-        or DMG.fullmatch(filename) is not None
-        or (primary == "brew" and lower.endswith(".zip"))
-    ):
-        result.append("nix")
-    return tuple(dict.fromkeys(result))
 
 
 def _filename(value: object) -> str:
@@ -182,6 +154,8 @@ class CompleteScan(Record):
     state: DiscoveryState
     checksummed: tuple[DiscoveredAsset, ...]
     pending: tuple[DiscoveredAsset, ...]
+    # The repository and tag of each latest release, for the Nix flakes at those tags.
+    releases: tuple[tuple[str, str], ...] = ()
 
 
 def _asset_key(source: SourceAsset) -> tuple[str, int]:
@@ -456,6 +430,28 @@ def release_details(source: SourceAsset, runtime: Runtime) -> tuple[str, str, st
     )
 
 
+def tag_commit(repository: str, tag: str, runtime: Runtime) -> str | None:
+    """The commit that a tag names, through any annotated tags, or None when the tag is missing."""
+    value = _json_request(
+        f"repos/{repository}/git/ref/tags/{quote(tag, safe='')}", runtime, missing=_MISSING
+    )
+    if value is _MISSING:
+        return None
+    target = _mapping(_mapping(value).get("object"))
+    for _ in range(4):
+        sha = target.get("sha")
+        if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise DiscoveryFailure(f"{repository}: invalid object for tag {tag}")
+        if target.get("type") == "commit":
+            return sha
+        if target.get("type") != "tag":
+            return None
+        target = _mapping(
+            _mapping(_json_request(f"repos/{repository}/git/tags/{sha}", runtime)).get("object")
+        )
+    raise DiscoveryFailure(f"{repository}: tag {tag} nests too many annotated tags")
+
+
 def cosign_identity(repository: str, tag: str) -> str:
     """Pin a release workflow certificate to the source repository and the release tag."""
     owner, name = repository_name(repository).split("/")
@@ -503,62 +499,6 @@ def _release_label(release: dict[str, object], release_id: int) -> str:
 _MISSING = object()
 
 
-def tag_nix_files(repository: str, tag: str, runtime: Runtime) -> dict[str, str] | None:
-    """Read upstream release Nix package expressions from a tag tree, ignoring devShell helpers."""
-    repository_name(repository)
-    tag = text(tag, "release tag")
-    value = _json_request(
-        f"repos/{repository}/git/trees/{quote(tag, safe='')}?recursive=1",
-        runtime,
-        missing=_MISSING,
-    )
-    if value is _MISSING:
-        return None
-    tree_map = _mapping(value)
-    if tree_map.get("truncated", False) is not False:
-        raise DiscoveryFailure(f"{repository}@{tag}: GitHub git tree response is truncated")
-    tree_obj = tree_map.get("tree")
-    if not isinstance(tree_obj, list):
-        raise DiscoveryFailure("Expected a GitHub Git tree array")
-    blobs: dict[str, tuple[str, int]] = {}
-    for raw in cast(list[object], tree_obj):
-        entry = _mapping(raw)
-        path = entry.get("path")
-        if (
-            not isinstance(path, str)
-            or (path != "flake.nix" and path not in RELEASE_NIX_FILES)
-            or entry.get("type") != "blob"
-            or entry.get("mode") != "100644"
-        ):
-            continue
-        sha = text(entry.get("sha"), "Git blob SHA")
-        size = integer(entry.get("size"), "Git blob size")
-        if re.fullmatch(r"[0-9a-f]{40}", sha) is None or size > MAX_NIX_BLOB_BYTES:
-            raise DiscoveryFailure(f"Invalid or oversized Nix expression {path} in {repository}")
-        blobs[path] = (sha, size)
-    has_release_nix = "nix/default.nix" in blobs or (
-        "flake.nix" in blobs
-        and bool(blobs.keys() & {"nix/linux.nix", "nix/darwin.nix", "nix/package.nix"})
-    )
-    if not has_release_nix:
-        return None
-    files: dict[str, str] = {}
-    for path, (sha, size) in sorted(blobs.items()):
-        blob = _mapping(_json_request(f"repos/{repository}/git/blobs/{sha}", runtime))
-        if blob.get("encoding") != "base64" or not isinstance(blob.get("content"), str):
-            raise DiscoveryFailure(f"Unexpected Git blob encoding for {path}")
-        compact = "".join(cast(str, blob["content"]).split())
-        try:
-            raw_bytes = base64.b64decode(compact, validate=True)
-            decoded = raw_bytes.decode("utf-8")
-        except (ValueError, UnicodeError) as error:
-            raise DiscoveryFailure(f"Invalid UTF-8 Nix expression {path}") from error
-        if len(raw_bytes) != size or len(raw_bytes) > MAX_NIX_BLOB_BYTES:
-            raise DiscoveryFailure(f"Git blob size mismatch for {path}")
-        files[path] = decoded
-    return files
-
-
 def _installers(
     feed: SourceAsset, checksum: ChecksumEntry | None, runtime: Runtime
 ) -> set[str] | None:
@@ -585,7 +525,7 @@ def _installers(
 def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -> CompleteScan:
     """Scan the GitHub "Latest" release of each source. Any failed request raises."""
     assets: dict[tuple[str, int], SourceAsset] = {}
-    groups: dict[str, tuple[str, tuple[SourceAsset, ...]] | None] = {}
+    groups: dict[str, tuple[str, tuple[SourceAsset, ...], bool] | None] = {}
     for repository in config.sources:
         value = _json_request(f"repos/{repository}/releases/latest", runtime, missing=_MISSING)
         if value is _MISSING:
@@ -607,17 +547,22 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
             release_assets.append(source)
             if len(assets) > MAX_ITEMS:
                 raise DiscoveryFailure("Too many discovered assets")
-        groups[repository] = (_release_label(release, release_id), tuple(release_assets))
+        label = _release_label(release, release_id)
+        tagged = label == release.get("tag_name")
+        groups[repository] = (label, tuple(release_assets), tagged)
     records: list[DiscoveredAsset] = []
     checksummed: list[DiscoveredAsset] = []
     pending: list[DiscoveredAsset] = []
+    releases: list[tuple[str, str]] = []
     for repository in config.sources:
         latest = groups[repository]
         if latest is None:
             report(f"{repository}: no latest release")
             continue
-        label, group = latest
+        label, group, tagged = latest
         report(f"{repository}: latest release {label}")
+        if tagged:
+            releases.append((repository, label))
         checksums: dict[str, ChecksumEntry] = {}
         documents = signed = 0
         siblings = {source.filename: source for source in group}
@@ -649,7 +594,7 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
         digests = 0
         feed = siblings.get(UPDATER)
         installers: set[str] | None = set()
-        if feed is not None and any("scoop" in asset_formats(name, siblings) for name in siblings):
+        if feed is not None and any(asset_format(name) == "scoop" for name in siblings):
             installers = _installers(feed, checksums.get(UPDATER), runtime)
             if installers is None:
                 step(
@@ -659,10 +604,10 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
                     "has no checksum)",
                 )
         for source in sorted(group, key=lambda item: item.asset_id):
-            formats = asset_formats(source.filename, siblings)
-            if not formats:
+            name = asset_format(source.filename)
+            if name is None:
                 continue
-            if formats == ("scoop",) and (installers is None or source.filename in installers):
+            if name == "scoop" and (installers is None or source.filename in installers):
                 if installers is not None:
                     step(
                         report,
@@ -700,7 +645,7 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
             line += f", {missing} without a checksum (skipped)"
         report(line)
     state = DiscoveryState(tuple(records), tuple(assets.values()), config.sources)
-    return CompleteScan(state, tuple(checksummed), tuple(pending))
+    return CompleteScan(state, tuple(checksummed), tuple(pending), tuple(releases))
 
 
 def verify_asset(

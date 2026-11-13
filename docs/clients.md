@@ -182,19 +182,20 @@ extra-substituters = https://nix.wimpys.world
 extra-trusted-public-keys = nix.wimpys.world-1:<base64>
 ```
 
-Add the flake input to `flake.nix`:
-
-```nix
-inputs.haberdasher.url = "git+https://nix.wimpys.world/packages.git";
-```
-
-Or install a package directly into your profile:
+The packages come from each project's own flake on GitHub. Run the default package, or add a package to your profile:
 
 ```sh
-nix profile add 'git+https://nix.wimpys.world/packages.git#<package>'
+nix run github:<owner>/<repo>
+nix profile add github:<owner>/<repo>#<package>
 ```
 
-Haberdasher tags each commit in `packages.git` at `refs/tags/<rev>` and exports the archived flake source path to the signed binary cache. Locked `flake.lock` inputs substitute the flake tree and `x86_64-linux` store paths from the binary cache without shallow Git fetches. In tests, pass `--max-jobs 0` to verify that Nix substitutes from the signed binary cache instead of building locally.
+Or add the flake input to `flake.nix`, and use `inputs.<repo>.packages.${pkgs.stdenv.hostPlatform.system}.<package>`:
+
+```nix
+inputs.<repo>.url = "github:<owner>/<repo>";
+```
+
+The cache serves a package only when your evaluation gives the same store path that Haberdasher built at the release tag. The page shows `github:<owner>/<repo>/latest` when the project moves a `latest` tag to the release commit, so `nix flake update` locks the commit that Haberdasher built. Otherwise the page shows `github:<owner>/<repo>`, and the cache serves packages only while the default branch matches the release. Do not set `inputs.<repo>.inputs.nixpkgs.follows`, because a different nixpkgs gives a different store path, and Nix then builds locally. The cache holds `x86_64-linux` store paths only. In tests, pass `--max-jobs 0` to verify that Nix substitutes from the signed binary cache instead of building locally.
 
 To remove a package and the binary cache configuration:
 

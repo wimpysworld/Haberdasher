@@ -243,10 +243,7 @@ def test_local_root_uses_nearest_markers_or_packaged_cwd_fallback(
     else:
         assert result == 0
         run.assert_called_once()
-        assert run.call_args.args[1].storage.public == {
-            "apt": str(root / "public" / "apt"),
-            "nix": str(root / "public" / "nix"),
-        }
+        assert run.call_args.args[1].storage.public == {"apt": str(root / "public" / "apt")}
     assert set(tmp_path.rglob("*")) == before
 
 
@@ -254,13 +251,9 @@ def test_local_root_uses_nearest_markers_or_packaged_cwd_fallback(
 @pytest.mark.parametrize(
     "filenames,published,names",
     [
-        (("a.deb",), (), ("apt", "nix")),
-        (
-            ("a.rpm", "b.deb", "c.pkg.tar.xz", "d.tar.gz"),
-            (),
-            ("apt", "rpm", "arch", "nix"),
-        ),
-        (("tool_1.0_linux_amd64.tar.gz",), (), ("nix",)),
+        (("a.deb",), (), ("apt",)),
+        (("a.rpm", "b.deb", "c.pkg.tar.xz", "d.tar.gz"), (), ("apt", "rpm", "arch")),
+        (("tool_1.0_linux_amd64.tar.gz",), ("nix",), ("nix",)),
         (("a.apk",), ("rpm",), ("rpm", "apk")),
     ],
 )
@@ -468,7 +461,7 @@ def test_errors_print_one_line_without_a_traceback(
             publish.RunResult(True, 9, 0, 0, ("apk", "apt", "rpm")),
             "Refreshed apk, apt and rpm metadata.",
         ),
-        (publish.RunResult(False, 0), "Nothing changed in 2 repositories."),
+        (publish.RunResult(False, 0), "Nothing changed in 1 repository."),
     ],
 )
 def test_publish_summary_names_refreshed_metadata(

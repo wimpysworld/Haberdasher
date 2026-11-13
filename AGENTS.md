@@ -90,9 +90,14 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
   Name and version each tool the same way as Homebrew. Take each architecture from the PE header, never from the file name.
   Publish an app's portable zip, never its self-updating installer. Skip the installer that a release's `latest.yml` names, without downloading it.
   Give a GUI executable a Start Menu shortcut and a console executable a `bin` entry, from the PE subsystem field.
-- For Nix, publish a flake repository served over dumb HTTP at `packages.git` and a signed HTTP binary cache (`nix-cache-info` with `Priority: 41` and `WantMassQuery: 1`, `<hash>.narinfo`, and `nar/<hash>.nar.zst`).
-  Use the project's `nix/` expression from the release tag when present, and derive from `.deb` or release archives as a fallback.
-  Tag each `packages.git` commit at `refs/tags/<rev>` so that locked flake revisions resolve over dumb HTTP.
+- For Nix, publish only a signed HTTP binary cache (`nix-cache-info` with `Priority: 41` and `WantMassQuery: 1`, `<hash>.narinfo`, and `nar/<hash>.nar.zst`).
+  Build the `packages.<system>` outputs of each project's own flake at its latest release tag, `github:<owner>/<repo>/<tag>`, for the publisher's host system only.
+  Ignore a `default` package that duplicates a named package. Take the identity from the derivation `pname`, the release tag without a leading `v`, and the system.
+  A flake cannot see its tag, so keep the derivation `version` in the inventory as well.
+  Skip a project without a flake or host packages, a package whose `meta.platforms` excludes the host, and a package whose build fails, with one line each. Do not fail the run.
+  Upload only the store paths that `cache.nixos.org` does not sign. Record the tag and flake of each package in the inventory, so unchanged reruns build nothing.
+  Show `github:<owner>/<repo>/latest` on the page when the `latest` tag is at the release tag commit, and `github:<owner>/<repo>` otherwise. Resolve both tags on each run and record the reference in the inventory.
+  Do not generate flakes or recipes, and do not serve a flake repository. Nix fetches locked Git revisions with shallow fetches, which dumb HTTP cannot serve.
 
 ## Testing
 

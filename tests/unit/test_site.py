@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import re
 import struct
+from dataclasses import replace
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -19,6 +20,7 @@ from haberdasher.core import (
     SourceAsset,
     VerifiedAsset,
 )
+from haberdasher.formats import nix
 
 FINGERPRINT = "B39939A127C7A8D338F53A3AE132098A87DB88E0"
 NOW = datetime(2026, 11, 9, 12, tzinfo=UTC)
@@ -382,11 +384,33 @@ def test_package_ships_one_preview_image_per_format() -> None:
         )
 
 
-def test_nix_page_renders_binary_cache_flake_and_folded_tree() -> None:
-    nix_asset = asset("nix", "tailor", "x86_64-linux", "0.6.0", {"desc": "Nix tool"})
+def test_nix_page_trusts_the_cache_once_and_installs_from_each_flake() -> None:
+    store = "/nix/store/" + "0" * 32
+    packages = [
+        nix.Package(
+            "wimpysworld/tailor",
+            "v0.5.0",
+            "github:wimpysworld/tailor/v0.5.0",
+            "tailor",
+            "tailor",
+            "0.5.0",
+            "x86_64-linux",
+            f"{store}-tailor-0.5.0",
+            "Old tool",
+        ),
+        nix.Package(
+            "wimpysworld/tailor",
+            "v0.6.0",
+            "github:wimpysworld/tailor/v0.6.0",
+            "tailor",
+            "tailor",
+            "0.6.0",
+            "x86_64-linux",
+            f"{store}-tailor-0.6.0",
+            "Nix tool",
+        ),
+    ]
     objects = (
-        ref("nix", "packages.git/objects/aa/bb", 1200),
-        ref("nix", "packages.git/HEAD", 23),
         ref("nix", "nar/0000000000000000000000000000000000000000000000000000.nar.zst", 8000),
         ref("nix", "00000000000000000000000000000000.narinfo", 420),
         ref("nix", "keys/haberdasher-nix.pub", 64),
@@ -394,29 +418,53 @@ def test_nix_page_renders_binary_cache_flake_and_folded_tree() -> None:
     )
     retained = RetainedFormat(
         "nix",
-        (nix_asset,),
-        (nix_asset.inspected.identity,),
-        {"public_key": "nix.wimpys.world-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+        (),
+        tuple(item.identity for item in packages),
+        {
+            "public_key": "nix.wimpys.world-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "packages": [item.record() for item in packages],
+        },
         objects,
     )
     item = state.Published("nix", None, "d" * 64, objects, retained, None)
     page = render("nix", item)
     cmds = commands(page)
-    assert site.description(nix_asset) == "Nix tool"
+    assert '<p class="desc">Nix tool</p>' in page and "0.5.0" not in page
     assert any('extra-substituters = [ "https://nix.wimpys.world" ];' in c for c in cmds)
     assert any(
         'extra-trusted-public-keys = [ "nix.wimpys.world-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" ];'
         in c
         for c in cmds
     )
-    assert 'inputs.haberdasher.url = "git+https://nix.wimpys.world/packages.git";' in cmds
-    assert "nix profile add 'git+https://nix.wimpys.world/packages.git#tailor'" in cmds
+    assert any("extra-substituters = https://nix.wimpys.world\n" in c for c in cmds)
+    assert "nix run github:wimpysworld/tailor" in cmds
+    assert "nix profile add github:wimpysworld/tailor#tailor" in cmds
+    assert 'inputs.tailor.url = "github:wimpysworld/tailor";' in cmds
+    assert "inputs.tailor.packages.${pkgs.stdenv.hostPlatform.system}.tailor" in cmds
+    assert page.count("inputs.tailor.inputs.nixpkgs.follows") == 1
     assert "sudo sed -i '/nix\\.wimpys\\.world/d' /etc/nix/nix.conf" in cmds
-    assert (
-        '<span class="name">packages.git/<span class="meta">2 files, Git repository</span></span>'
-        in page
-    )
+    assert "packages.git" not in page
     assert (
         '<span class="name">nar/<span class="meta">1 NAR archive, content-addressed</span></span>'
         in page
     )
+    assert page.count("only while the default branch matches the release") == 1
+
+    latest = "github:wimpysworld/tailor/latest"
+    metadata = {**retained.metadata, "references": {"wimpysworld/tailor": latest}}
+    retained = replace(retained, metadata=metadata)
+    page = render("nix", state.Published("nix", None, "d" * 64, objects, retained, None))
+    cmds = commands(page)
+    assert f"nix run {latest}" in cmds
+    assert f"nix profile add {latest}#tailor" in cmds
+    assert f'inputs.tailor.url = "{latest}";' in cmds
+    assert page.count("inputs.tailor.inputs.nixpkgs.follows") == 1
+    assert "default branch" not in page
+
+
+def test_nix_page_of_the_generated_flake_inventory_has_no_packages() -> None:
+    nix_asset = asset("nix", "tailor", "x86_64-linux", "0.6.0", {"desc": "Nix tool"})
+    retained = RetainedFormat("nix", (nix_asset,), (nix_asset.inspected.identity,), {}, ())
+    page = render("nix", state.Published("nix", None, "d" * 64, (), retained, None))
+    assert "This repository has no packages yet." in page
+    assert site.nix_projects(retained, {}) == []

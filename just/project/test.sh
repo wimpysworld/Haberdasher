@@ -33,7 +33,7 @@ printf 'PASS: both Linux systems require repository tools.\n'
 
 for tool in apt-ftparchive apt-get apt-config dpkg dpkg-deb dpkg-query createrepo_c modifyrepo_c \
     rpm rpmsign rpmbuild rpmkeys dnf5 fakechroot fakeroot \
-    apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp flatpak ostree update-mime-database appstreamcli ruby nix haberdasher-nixpkgs; do
+    apk abuild abuild-sign abuild-tar abuild-gzsplit getopt pacman makepkg repo-add repo-remove vercmp flatpak ostree update-mime-database appstreamcli ruby nix; do
     ln -s "$fixture/tool" "$fixture/bin/$tool"
 done
 for system in x86_64-linux aarch64-linux; do
@@ -41,7 +41,7 @@ for system in x86_64-linux aarch64-linux; do
 done
 printf 'PASS: both Linux systems accept all tools without executing them.\n'
 
-for tool in bash openssl gpgsm gpgconf cosign getopt dnf5 fakechroot fakeroot python3 tailor-python uv ruff basedpyright aws miniserve appstreamcli apt-get rpmkeys vercmp update-mime-database nix haberdasher-nixpkgs; do
+for tool in bash openssl gpgsm gpgconf cosign getopt dnf5 fakechroot fakeroot python3 tailor-python uv ruff basedpyright aws miniserve appstreamcli apt-get rpmkeys vercmp update-mime-database nix; do
     rm "$fixture/bin/$tool"
     if check x86_64-linux; then
         printf 'FAIL: inherited PATH hid missing %s.\n' "$tool" >&2

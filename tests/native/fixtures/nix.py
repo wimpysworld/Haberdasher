@@ -1,16 +1,11 @@
-"""Disposable ELF tarballs, upstream Nix release fixtures, and unprivileged Nix store clients."""
+"""Disposable local flakes and unprivileged Nix store clients."""
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 import shutil
 import struct
 import subprocess
-import tarfile
-from collections.abc import Callable, Generator, Mapping, Sequence
-from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,14 +13,15 @@ from haberdasher.core import (
     JSONValue,
     PreparedFormat,
     RetainedFormat,
-    SourceAsset,
-    VerifiedAsset,
     atomic_write,
     safe_path,
     sha256_file,
 )
 from haberdasher.runtime import Runtime
 from tests.support.http import set_generation_mtime
+
+# The project lock pins the nixpkgs that the development shell already holds in the store.
+PROJECT_LOCK = Path(__file__).resolve().parents[3] / "flake.lock"
 
 
 def _x86_64_linux_static_elf(text: str) -> bytes:
@@ -87,233 +83,67 @@ def _x86_64_linux_static_elf(text: str) -> bytes:
     return ehdr + phdr + code + payload
 
 
-def tarball_asset(
-    runtime: Runtime,
-    name: str,
-    version: str,
-    payload: str,
-    *,
-    repository: str = "wimpysworld/fixture",
-    release_id: int = 1,
-    asset_id: int = 1,
-    os_label: str = "linux",
-    arch_label: str = "x86_64",
-    subdir: str = "",
-) -> VerifiedAsset:
-    """Create a `.tar.gz` VerifiedAsset holding a runnable x86_64 Linux static ELF executable."""
-    filename = f"{name}_{version}_{os_label}_{arch_label}.tar.gz"
-    build_dir = safe_path(runtime.root, f"nix-fixture-{asset_id}-{filename}")
-    build_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    archive_path = build_dir / filename
-    elf = _x86_64_linux_static_elf(payload + "\n")
-    member_name = f"{subdir.strip('/')}/{name}" if subdir else name
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        info = tarfile.TarInfo(name=member_name)
-        info.size = len(elf)
-        info.mode = 0o755
-        info.mtime = 1700000000
-        tar.addfile(info, io.BytesIO(elf))
-        readme = f"# {name} {version}\n".encode()
-        rinfo = tarfile.TarInfo(name="README.md")
-        rinfo.size = len(readme)
-        rinfo.mode = 0o644
-        rinfo.mtime = 1700000000
-        tar.addfile(rinfo, io.BytesIO(readme))
-    atomic_write(archive_path, buf.getvalue())
-    sha, size = sha256_file(archive_path)
-    source = SourceAsset(
-        repository=repository,
-        release_id=release_id,
-        asset_id=asset_id,
-        filename=filename,
-        size=size,
-        updated_at="2026-01-01T00:00:00Z",
-        public_url=f"https://github.com/{repository}/releases/download/v{version}/{filename}",
-        github_sha256=sha,
+def flake(root: Path, name: str, version: str, payload: str, *, broken: str = "") -> Path:
+    """Write a flake whose static executable prints `payload`, with an optional failing package.
+
+    The default package duplicates the named package. The lock reuses the project nixpkgs, so
+    evaluation and builds need no network.
+    """
+    root.mkdir(mode=0o700, parents=True)
+    atomic_write(root / name, _x86_64_linux_static_elf(payload + "\n"))
+    nixpkgs = json.loads(PROJECT_LOCK.read_text(encoding="utf-8"))["nodes"]["nixpkgs"]
+    lock = {
+        "nodes": {"nixpkgs": nixpkgs, "root": {"inputs": {"nixpkgs": "nixpkgs"}}},
+        "root": "root",
+        "version": 7,
+    }
+    atomic_write(root / "flake.lock", json.dumps(lock, indent=2).encode())
+    failing = (
+        f"""
+        {broken} = pkgs.stdenvNoCC.mkDerivation {{
+          pname = "{broken}";
+          version = "{version}";
+          dontUnpack = true;
+          buildPhase = "exit 1";
+        }};"""
+        if broken
+        else ""
     )
-    return VerifiedAsset(source, archive_path, sha, size, 999, "a" * 64)
-
-
-def deb_executable_asset(
-    runtime: Runtime,
-    name: str,
-    version: str,
-    payload: str,
-    *,
-    repository: str = "wimpysworld/sidra",
-    release_id: int = 1,
-    asset_id: int = 10,
-) -> VerifiedAsset:
-    """Create a `.deb` VerifiedAsset holding `/usr/bin/<name>` as an x86_64 static ELF binary."""
-    filename = f"{name}_{version}_linux_amd64.deb"
-    build_dir = safe_path(runtime.root, f"nix-deb-{asset_id}-{filename}")
-    root = build_dir / "root"
-    control = root / "DEBIAN/control"
-    control.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-    control.write_text(
-        f"Package: {name}\n"
-        f"Version: {version}\n"
-        "Architecture: amd64\n"
-        "Maintainer: Synthetic test <test@invalid>\n"
-        f"Description: {name} package for Nix upstream-nix proof\n"
+    atomic_write(
+        root / "flake.nix",
+        f"""{{
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
+  outputs =
+    {{ nixpkgs, ... }}:
+    let
+      pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      package = pkgs.stdenvNoCC.mkDerivation {{
+        pname = "{name}";
+        version = "{version}";
+        src = ./{name};
+        dontUnpack = true;
+        dontFixup = true;
+        installPhase = "install -Dm755 $src $out/bin/{name}";
+        meta.description = "Disposable Nix fixture";
+      }};
+    in
+    {{
+      packages.x86_64-linux = {{
+        default = package;
+        {name} = package;{failing}
+      }};
+    }};
+}}
+""".encode(),
     )
-    bin_path = root / "usr/bin" / name
-    bin_path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-    bin_path.write_bytes(_x86_64_linux_static_elf(payload + "\n"))
-    for path in (root, *root.rglob("*")):
-        if path.is_dir():
-            path.chmod(0o755)
-        elif path == bin_path:
-            path.chmod(0o755)
-        else:
-            path.chmod(0o644)
-    deb_path = build_dir / filename
-    result = runtime.run(["dpkg-deb", "--root-owner-group", "--build", str(root), str(deb_path)])
-    if result.returncode:
-        raise RuntimeError(result.stderr.decode(errors="replace"))
-    sha, size = sha256_file(deb_path)
-    source = SourceAsset(
-        repository=repository,
-        release_id=release_id,
-        asset_id=asset_id,
-        filename=filename,
-        size=size,
-        updated_at="2026-01-01T00:00:00Z",
-        public_url=f"https://github.com/{repository}/releases/download/v{version}/{filename}",
-        github_sha256=sha,
-    )
-    return VerifiedAsset(source, deb_path, sha, size, 999, "b" * 64)
+    return root
 
 
-def upstream_nix_files(
-    name: str,
-    *,
-    repository: str = "wimpysworld/sidra",
-    stale_hash: str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-) -> dict[str, str]:
-    """Return upstream `flake.nix` and `nix/linux.nix` with a deliberately stale `fetchurl` hash."""
-    flake_nix = '{\n  description = "Upstream fixture flake";\n  outputs = { self }: { };\n}\n'
-    linux_nix = (
-        "{\n"
-        "  lib,\n"
-        "  stdenvNoCC,\n"
-        "  fetchurl,\n"
-        "  dpkg,\n"
-        '  version ? "0.0.0",\n'
-        "}:\n"
-        "let\n"
-        "  inherit (stdenvNoCC.hostPlatform) system;\n"
-        "  sources = {\n"
-        "    x86_64-linux = {\n"
-        f'      url = "https://github.com/{repository}/releases/download/v${{version}}/{name}_${{version}}_linux_amd64.deb";\n'
-        f'      hash = "{stale_hash}";\n'
-        "    };\n"
-        "  };\n"
-        "in\n"
-        "stdenvNoCC.mkDerivation {\n"
-        f'  pname = "{name}";\n'
-        "  inherit version;\n"
-        "  src = fetchurl sources.${system};\n"
-        "  nativeBuildInputs = [ dpkg ];\n"
-        "  dontConfigure = true;\n"
-        "  dontBuild = true;\n"
-        "  dontFixup = true;\n"
-        "  unpackPhase = ''\n"
-        '    dpkg-deb -x "$src" .\n'
-        "  '';\n"
-        "  installPhase = ''\n"
-        "    runHook preInstall\n"
-        f'    install -Dm755 usr/bin/{name} "$out/bin/{name}"\n'
-        "    runHook postInstall\n"
-        "  '';\n"
-        "  meta = {\n"
-        f'    description = "Upstream {name} fixture";\n'
-        f'    homepage = "https://github.com/{repository}";\n'
-        "    license = lib.licenses.mit;\n"
-        '    platforms = [ "x86_64-linux" ];\n'
-        f'    mainProgram = "{name}";\n'
-        "  };\n"
-        "}\n"
-    )
-    return {"flake.nix": flake_nix, "nix/linux.nix": linux_nix}
-
-
-@contextmanager
-def bind_github_metadata(
-    runtime: Runtime,
-    *,
-    tag: str = "v1.0.0",
-    description: str = "Disposable Nix fixture",
-    licence: str = "MIT",
-    upstream_by_repo: Mapping[str, Mapping[str, str]] | None = None,
-) -> Generator[None]:
-    """Intercept `gh api` calls for `release_details` and `tag_nix_files` while running native tools."""
-    real_run: Callable[..., subprocess.CompletedProcess[bytes]] = runtime.run
-    blobs: dict[tuple[str, str], bytes] = {}
-    trees: dict[str, list[dict[str, object]]] = {}
-    for repo, files in (upstream_by_repo or {}).items():
-        entries: list[dict[str, object]] = []
-        for idx, (rel_path, content) in enumerate(sorted(files.items()), 1):
-            raw = content.encode("utf-8")
-            sha = f"{idx:040x}"
-            blobs[(repo, sha)] = raw
-            entries.append(
-                {
-                    "path": rel_path,
-                    "mode": "100644",
-                    "type": "blob",
-                    "sha": sha,
-                    "size": len(raw),
-                }
-            )
-        trees[repo] = entries
-
-    def fake_run(
-        argv: Sequence[str],
-        *,
-        cwd: Path | None = None,
-        input: bytes | None = None,
-        timeout: float = 120,
-        env_kind: str = "native",
-    ) -> subprocess.CompletedProcess[bytes]:
-        if argv[0] != "gh":
-            return real_run(argv, cwd=cwd, input=input, timeout=timeout, env_kind=env_kind)
-        endpoint = argv[-1]
-        if "/releases/" in endpoint:
-            rel_id = int(endpoint.rsplit("/", 1)[1])
-            doc: object = {
-                "id": rel_id,
-                "draft": False,
-                "prerelease": False,
-                "tag_name": tag,
-            }
-            return subprocess.CompletedProcess(argv, 0, json.dumps(doc).encode(), b"")
-        if "/git/trees/" in endpoint:
-            repo = endpoint.removeprefix("repos/").split("/git/trees/", 1)[0]
-            if repo not in trees:
-                return subprocess.CompletedProcess(argv, 1, b"", b"gh: Not Found (HTTP 404)\n")
-            return subprocess.CompletedProcess(
-                argv, 0, json.dumps({"tree": trees[repo]}).encode(), b""
-            )
-        if "/git/blobs/" in endpoint:
-            repo, sha = endpoint.removeprefix("repos/").split("/git/blobs/", 1)
-            raw = blobs[(repo, sha)]
-            doc = {"encoding": "base64", "content": base64.b64encode(raw).decode("ascii")}
-            return subprocess.CompletedProcess(argv, 0, json.dumps(doc).encode(), b"")
-        if endpoint.startswith("repos/"):
-            doc = {
-                "description": description,
-                "license": {"spdx_id": licence},
-            }
-            return subprocess.CompletedProcess(argv, 0, json.dumps(doc).encode(), b"")
-        raise AssertionError(f"Unexpected gh endpoint: {endpoint}")
-
-    runtime.run = fake_run  # pyright: ignore[reportAttributeAccessIssue]
-    try:
-        yield
-    finally:
-        runtime.run = real_run  # pyright: ignore[reportAttributeAccessIssue]
+def empty_flake(root: Path) -> Path:
+    """Write a flake with packages for another system only."""
+    root.mkdir(mode=0o700, parents=True)
+    atomic_write(root / "flake.nix", b"{ outputs = _: { packages.aarch64-linux = { }; }; }\n")
+    return root
 
 
 def publish(prepared: PreparedFormat, root: Path, generation: int = 1) -> RetainedFormat:

@@ -295,7 +295,6 @@ def _paths(
         "flatpak": ("files",),
         "brew": ("files",),
         "scoop": ("files",),
-        "nix": ("files",),
     }.get(name, ()):
         result[field] = {
             key: move(text(value, "metadata path"), key)
@@ -483,6 +482,10 @@ def inventory(
             metadata["rejected"] = list[JSONValue](digests)
         else:
             metadata.pop("rejected", None)
+        if "references" in prepared.retained.metadata:
+            metadata["references"] = prepared.retained.metadata["references"]
+        else:
+            metadata.pop("references", None)
         record["metadata"] = metadata
         value["state"] = record
     else:

@@ -3,6 +3,7 @@
     "nix-packages": {
       "inputs": {
         "nixpkgs": [
+          "tailor",
           "nixpkgs"
         ]
       },
@@ -38,8 +39,29 @@
     },
     "root": {
       "inputs": {
+        "nixpkgs": "nixpkgs",
+        "tailor": "tailor"
+      }
+    },
+    "tailor": {
+      "inputs": {
         "nix-packages": "nix-packages",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1794564659,
+        "narHash": "sha256-eKyS16TlKWoFHnWy+qZ/H3UTPb7MZgz6nb8+uJoWBW4=",
+        "owner": "wimpysworld",
+        "repo": "tailor",
+        "rev": "76609b2b3d5611921bfdcc677b595d46c7fa271b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "wimpysworld",
+        "repo": "tailor",
+        "type": "github"
       }
     }
   },

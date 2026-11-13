@@ -1,333 +1,209 @@
-# pyright: reportPrivateUsage=false
-
-"""Production Nix flake and signed HTTP binary cache acceptance with loopback clients."""
+"""Flake packages in a signed HTTP binary cache, with loopback clients that only substitute."""
 
 from __future__ import annotations
 
-import base64
+import html
+import json
 import re
 import shutil
+import subprocess
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from haberdasher.admission import AdmissionFailure, admit
-from haberdasher.config import ARCHITECTURES, FormatPolicy
-from haberdasher.core import (
-    AdmittedAsset,
-    RetainedFormat,
-    VerifiedAsset,
-    atomic_write,
-    canonical_json,
-)
+from haberdasher import discovery, publish, site, state
+from haberdasher.config import Config, Policy, StoragePolicy
+from haberdasher.core import atomic_write
 from haberdasher.formats import nix
-from haberdasher.runtime import Runtime, private_workspace
+from haberdasher.runtime import private_workspace
 from haberdasher.signing import NIX_KEY_NAME, signing_session
-from tests.native.fixtures.nix import (
-    NixClient,
-    bind_github_metadata,
-    deb_executable_asset,
-    publish,
-    tarball_asset,
-    upstream_nix_files,
-)
+from haberdasher.storage import LocalStore
+from tests.native.fixtures.nix import NixClient, empty_flake, flake
 from tests.support.http import serve
 from tests.support.keys import disposable_key, run
 
-NOW1 = datetime(2026, 11, 11, tzinfo=UTC)
-NOW2 = datetime(2026, 11, 12, tzinfo=UTC)
-POLICY = FormatPolicy("nix", ARCHITECTURES["nix"])
-EMPTY = RetainedFormat("nix", (), (), {}, ())
-STALE_HASH = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+NOW = datetime(2026, 11, 13, tzinfo=UTC)
+TOOL = "wimpysworld/hd-tool"
+SOURCES = (TOOL, "wimpysworld/bare", "wimpysworld/empty")
+UNTRUSTED = "not signed by any of the keys in 'trusted-public-keys'"
 
 
-def accept(
-    asset: VerifiedAsset,
-    runtime: Runtime,
-    history: Sequence[AdmittedAsset] = (),
-    policy: FormatPolicy = POLICY,
-) -> AdmittedAsset:
-    item = nix.inspect(asset, policy=policy, runtime=runtime, out=runtime.root / "inspection")
-    return admit(item, history, compare=nix.compare, policy=policy, runtime=runtime)
+def scan(tool_tag: str) -> discovery.CompleteScan:
+    releases = ((TOOL, tool_tag), ("wimpysworld/bare", "v1"), ("wimpysworld/empty", "v1"))
+    return discovery.CompleteScan(discovery.DiscoveryState(sources=SOURCES), (), (), releases)
 
 
-def parse_narinfo(path: Path) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if ":" in line:
-            key, val = line.split(":", 1)
-            fields[key.strip()] = val.strip()
-    return fields
+def narinfo(bucket: Path, path: str) -> Path:
+    return bucket / nix.Package(TOOL, "t", "f", "a", "n", "v", "s", path).narinfo
 
 
-def find_narinfo_for_pname(public_nix: Path, pname: str, version: str) -> tuple[Path, str]:
-    suffix = f"-{pname}-{version}"
-    for narinfo_path in sorted(public_nix.glob("*.narinfo")):
-        info = parse_narinfo(narinfo_path)
-        store_path = info.get("StorePath", "")
-        if store_path.endswith(suffix):
-            return narinfo_path, store_path
-    raise AssertionError(f"No .narinfo found for {pname}-{version}")
+def snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
+    return {
+        item.relative_to(root).as_posix(): (item.read_bytes(), item.stat().st_mtime_ns)
+        for item in sorted(root.rglob("*"))
+        if item.is_file()
+    }
 
 
-def find_flake_source_narinfo(public_nix: Path) -> tuple[Path, str]:
-    for narinfo_path in sorted(public_nix.glob("*.narinfo")):
-        info = parse_narinfo(narinfo_path)
-        store_path = info.get("StorePath", "")
-        if store_path.endswith("-source") and not info.get("References", ""):
-            return narinfo_path, store_path
-    raise AssertionError("No flake source .narinfo found")
-
-
-def test_two_generations_dumb_http_flake_cache_substitution_and_rejections() -> None:
-    with (
-        private_workspace() as runtime,
-        disposable_key() as key,
-        disposable_key() as wrong_key,
-        signing_session(
-            runtime,
-            expected_fingerprint=key.fingerprint,
-            key_file=key.key_file,
-        ) as signer,
-        signing_session(
-            runtime,
-            expected_fingerprint=wrong_key.fingerprint,
-            key_file=wrong_key.key_file,
-        ) as wrong_signer,
-    ):
-        print(run(runtime, "nix", "--version").decode().strip())
-        _, _, nix_pub = signer.nix_key()
-        _, _, wrong_nix_pub = wrong_signer.nix_key()
-        assert nix_pub != wrong_nix_pub
-
-        tool_v1 = tarball_asset(
-            runtime,
-            "hd-tool",
-            "1.0.0",
-            "hd-tool-v1",
-            repository="wimpysworld/hd-tool",
-            asset_id=1,
-        )
-        sidra_v1 = deb_executable_asset(
-            runtime,
-            "hd-sidra",
-            "1.0.0",
-            "hd-sidra-v1",
-            repository="wimpysworld/sidra",
-            asset_id=2,
-        )
-        tool_v2 = tarball_asset(
-            runtime,
-            "hd-tool",
-            "2.0.0",
-            "hd-tool-v2",
-            repository="wimpysworld/hd-tool",
-            asset_id=3,
-        )
-
-        upstream_map = {
-            "wimpysworld/sidra": upstream_nix_files(
-                "hd-sidra", repository="wimpysworld/sidra", stale_hash=STALE_HASH
-            )
+def test_flake_packages_substitute_from_the_signed_cache_and_reruns_do_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with private_workspace() as fixtures, disposable_key() as key, disposable_key() as wrong:
+        print(run(fixtures, "nix", "--version").decode().strip())
+        root = fixtures.root
+        bare = root / "bare"
+        bare.mkdir()
+        flakes = {
+            (TOOL, "v1.0.0"): flake(
+                root / "tool-v1", "hd-tool", "1.0.0", "hd-tool-v1", broken="hd-broken"
+            ),
+            (TOOL, "v2.0.0"): flake(root / "tool-v2", "hd-tool", "0.0.0-abc1234", "hd-tool-v2"),
+            ("wimpysworld/bare", "v1"): bare,
+            ("wimpysworld/empty", "v1"): empty_flake(root / "empty"),
         }
-        with bind_github_metadata(runtime, tag="v1.0.0", upstream_by_repo=upstream_map):
-            accepted_tool_v1 = accept(tool_v1, runtime)
-            accepted_sidra_v1 = accept(sidra_v1, runtime)
-            assert accepted_tool_v1.inspected.metadata["mode"] == "tarball"
-            assert accepted_sidra_v1.inspected.metadata["mode"] == "upstream-nix"
-            changed_bytes = tarball_asset(
-                runtime,
-                "hd-tool",
-                "1.0.0",
-                "hd-tool-tampered",
-                repository="wimpysworld/hd-tool",
-                asset_id=4,
-            )
-            with pytest.raises(AdmissionFailure, match="Changed bytes"):
-                accept(changed_bytes, runtime, (accepted_tool_v1,))
 
-        accepted1 = [accepted_tool_v1, accepted_sidra_v1]
-        generation1 = nix.prepare(
-            accepted1,
-            EMPTY,
-            policy=POLICY,
-            runtime=runtime,
-            signer=signer,
-            now=NOW1,
-            out=runtime.root / "generation1",
-        )
-        nix.validate_retained(generation1.retained, policy=POLICY, runtime=runtime)
-        assert (generation1.retained.metadata["public_key"]) == nix_pub
+        def local(repository: str, tag: str) -> str:
+            return f"path:{flakes[(repository, tag)]}"
 
-        http_root = runtime.root / "http"
-        public_nix = http_root / "nix"
-        public_nix.mkdir(parents=True)
+        monkeypatch.setattr(nix, "flake_ref", local)
+        moved = {"latest": True}
 
-        with serve(http_root) as http:
-            state1 = publish(generation1, public_nix, generation=1)
-            assert (public_nix / "nix-cache-info").read_bytes() == nix.CACHE_INFO
-            assert (public_nix / "keys/haberdasher-nix.pub").read_text().strip() == nix_pub
+        def flake_input(repository: str, tag: str, runtime: object) -> str:
+            return f"github:{repository}/latest" if moved["latest"] else f"github:{repository}"
 
-            head1 = str(state1.metadata["head"])
-            assert re.fullmatch(r"[0-9a-f]{40}", head1)
+        monkeypatch.setattr(nix, "flake_input", flake_input)
+        monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
+        storage = StoragePolicy("local", {"nix": str(root / "public/nix")})
+        bucket = Path(storage.public["nix"])
+        store = LocalStore(storage)
+        config = Config(SOURCES)
+        policy = Policy(storage, expected_signing_fingerprint=key.fingerprint)
 
-            # 1. Prove git clone over dumb HTTP and refs/tags/<head> resolution.
-            clone1 = runtime.root / "clone1"
-            run(runtime, "git", "clone", "--quiet", http.url("nix/packages.git"), str(clone1))
-            cloned_head1 = (
-                run(runtime, "git", "-C", str(clone1), "rev-parse", "HEAD").decode().strip()
-            )
-            tag_rev1 = (
-                run(runtime, "git", "-C", str(clone1), "rev-parse", f"refs/tags/{head1}")
-                .decode()
-                .strip()
-            )
-            assert cloned_head1 == head1 == tag_rev1
+        def reconcile(tag: str) -> tuple[publish.RunResult, list[str], list[list[str]]]:
+            lines: list[str] = []
+            calls: list[list[str]] = []
+            with private_workspace() as runtime:
+                real = runtime.run
 
-            # 2. Prove upstream-nix mode rewrote the stale fetchurl hash to the verified SRI hash.
-            expected_sidra_sri = "sha256-" + base64.b64encode(
-                bytes.fromhex(sidra_v1.sha256)
-            ).decode("ascii")
-            linux_nix_text = (clone1 / "pkgs/hd-sidra/linux.nix").read_text(encoding="utf-8")
-            assert STALE_HASH not in linux_nix_text
-            assert expected_sidra_sri in linux_nix_text
+                def recorded(
+                    argv: Sequence[str], **kwargs: object
+                ) -> subprocess.CompletedProcess[bytes]:
+                    calls.append(list(argv))
+                    return real(argv, **kwargs)  # type: ignore[arg-type]
 
-            # 3. Prove binary cache substitution (--max-jobs 0) for both locked flake source and packages.
-            flake_narinfo1, flake_source_store_path1 = find_flake_source_narinfo(public_nix)
-            assert parse_narinfo(flake_narinfo1)["Sig"].startswith(f"{NIX_KEY_NAME}:")
-            _, tool1_store_path = find_narinfo_for_pname(public_nix, "hd-tool", "1.0.0")
-            _, sidra1_store_path = find_narinfo_for_pname(public_nix, "hd-sidra", "1.0.0")
-
-            client1 = NixClient(runtime, "client-gen1", http.url("nix"), nix_pub)
-            client1.run_nix("build", "--no-link", flake_source_store_path1)
-            assert (client1.real_store_path(flake_source_store_path1) / "flake.nix").is_file()
-            client1.substitute_and_run(tool1_store_path, "hd-tool", "hd-tool-v1")
-            client1.substitute_and_run(sidra1_store_path, "hd-sidra", "hd-sidra-v1")
-
-            # 4. Incremental generation 2 (1.0.0 -> 2.0.0) without historical source payloads.
-            tool_v1.local_path.rename(tool_v1.local_path.with_suffix(".unavailable"))
-            sidra_v1.local_path.rename(sidra_v1.local_path.with_suffix(".unavailable"))
-            with bind_github_metadata(runtime, tag="v2.0.0", upstream_by_repo=upstream_map):
-                accepted_tool_v2 = accept(tool_v2, runtime, state1.accepted_history)
-
-            generation2 = nix.prepare(
-                [accepted_tool_v2],
-                state1,
-                policy=POLICY,
-                runtime=runtime,
-                signer=signer,
-                now=NOW2,
-                out=runtime.root / "generation2",
-            )
-            before_json = canonical_json(generation2)
-            with (
-                patch.object(nix, "prepare", side_effect=AssertionError("No retry preparation")),
-                patch.object(
-                    type(signer), "nix_key", side_effect=AssertionError("No retry signing")
-                ),
-            ):
-                nix.validate_prepared(generation2, policy=POLICY, runtime=runtime)
-                state2 = publish(generation2, public_nix, generation=2)
-                nix.validate_prepared(generation2, policy=POLICY, runtime=runtime)
-            assert canonical_json(generation2) == before_json
-
-            head2 = str(state2.metadata["head"])
-            assert head2 != head1 and re.fullmatch(r"[0-9a-f]{40}", head2)
-            run(runtime, "git", "-C", str(clone1), "fetch", "--quiet", "--tags", "origin", "main")
-            assert (
-                run(runtime, "git", "-C", str(clone1), "rev-parse", f"refs/tags/{head1}")
-                .decode()
-                .strip()
-                == head1
-            )
-            assert (
-                run(runtime, "git", "-C", str(clone1), "rev-parse", f"refs/tags/{head2}")
-                .decode()
-                .strip()
-                == head2
-            )
-
-            _, tool2_store_path = find_narinfo_for_pname(public_nix, "hd-tool", "2.0.0")
-            client2 = NixClient(runtime, "client-gen2", http.url("nix"), nix_pub)
-            client2.substitute_and_run(tool2_store_path, "hd-tool", "hd-tool-v2")
-            client2.substitute_and_run(sidra1_store_path, "hd-sidra", "hd-sidra-v1")
-
-            requests = http.requests()
-            assert any(
-                r.path == "/nix/nix-cache-info" and r.status == 200 and r.bytes_sent > 0
-                for r in requests
-            )
-            assert any(
-                r.path.endswith(".narinfo") and r.status == 200 and r.bytes_sent > 0
-                for r in requests
-            )
-            assert any(
-                r.path.endswith(".nar.zst") and r.status == 200 and r.bytes_sent > 0
-                for r in requests
-            )
-
-            # 5. Negative trust controls: missing key and wrong Ed25519 key fail closed.
-            missing_key_client = NixClient(runtime, "missing-key", http.url("nix"), "")
-            res_missing = missing_key_client.run_nix(
-                "build", "--no-link", tool2_store_path, check=False, trusted_keys=""
-            )
-            assert res_missing.returncode != 0
-            assert (
-                "not signed by any of the keys in 'trusted-public-keys'"
-                in res_missing.stderr.decode(errors="replace")
-            )
-            assert not missing_key_client.real_store_path(tool2_store_path).exists()
-
-            wrong_key_client = NixClient(runtime, "wrong-key", http.url("nix"), wrong_nix_pub)
-            res_wrong = wrong_key_client.run_nix(
-                "build", "--no-link", tool2_store_path, check=False
-            )
-            assert res_wrong.returncode != 0
-            assert (
-                "not signed by any of the keys in 'trusted-public-keys'"
-                in res_wrong.stderr.decode(errors="replace")
-            )
-            assert not wrong_key_client.real_store_path(tool2_store_path).exists()
-
-        # 6. Negative integrity controls: tampered .narinfo Sig, tampered NarSize, and tampered .nar.zst.
-        for tamper_kind in ("sig", "narsize", "nar"):
-            bad_root = runtime.root / f"bad-{tamper_kind}"
-            bad_nix = bad_root / "nix"
-            shutil.copytree(public_nix, bad_nix)
-            narinfo_path, target_store_path = find_narinfo_for_pname(bad_nix, "hd-tool", "2.0.0")
-            narinfo_text = narinfo_path.read_text(encoding="utf-8")
-            if tamper_kind == "sig":
-                tampered_sig = f"Sig: {NIX_KEY_NAME}:{'A' * 86}==\n"
-                narinfo_path.write_text(
-                    re.sub(r"^Sig: .*$", tampered_sig.strip(), narinfo_text, flags=re.M),
-                    encoding="utf-8",
+                runtime.run = recorded  # pyright: ignore[reportAttributeAccessIssue]
+                result = publish.reconcile(
+                    config,
+                    policy,
+                    store=store,
+                    runtime=runtime,
+                    now=NOW,
+                    report=lines.append,
+                    scan=scan(tag),
                 )
-            elif tamper_kind == "narsize":
-                info = parse_narinfo(narinfo_path)
-                bad_size = int(info["NarSize"]) + 1
-                narinfo_path.write_text(
-                    re.sub(r"^NarSize: \d+$", f"NarSize: {bad_size}", narinfo_text, flags=re.M),
+            return result, lines, calls
+
+        # 1. Publish the named package once, and skip a failed build and sources without packages.
+        first, lines, _ = reconcile("v1.0.0")
+        assert first.changed and first.packages == 1
+        for line in (
+            "nix   skipped wimpysworld/bare v1: no flake",
+            "nix   skipped wimpysworld/empty v1: no packages for x86_64-linux",
+            "nix   skipped wimpysworld/hd-tool v1.0.0 hd-broken: the build failed",
+        ):
+            assert line in lines
+        published = state.read(store, "nix")
+        [tool_v1] = nix.published(published.retained)
+        assert (tool_v1.attribute, tool_v1.name, tool_v1.version) == ("hd-tool", "hd-tool", "1.0.0")
+        assert tool_v1.tag == "v1.0.0" and tool_v1.flake == f"path:{flakes[(TOOL, 'v1.0.0')]}"
+        assert (bucket / nix.CACHE_INFO_KEY).read_bytes() == nix.CACHE_INFO
+        nix_pub = (bucket / nix.PUBKEY_KEY).read_text(encoding="ascii").strip()
+        assert nix_pub.startswith(f"{NIX_KEY_NAME}:")
+        assert re.search(rf"^Sig: {NIX_KEY_NAME}:", narinfo(bucket, tool_v1.path).read_text(), re.M)
+        inventory = (bucket / state.INVENTORY_KEY).read_text()
+        assert "packages.git" not in inventory and json.loads(inventory)["assets"] == []
+        page = html.unescape(re.sub(r"<[^>]+>", "", (bucket / site.PAGE_KEY).read_text()))
+        assert f"nix profile add github:{TOOL}/latest#hd-tool" in page
+
+        # 2. An unchanged rerun evaluates no published tag, builds nothing, and writes nothing.
+        before = snapshot(bucket)
+        rerun, _, calls = reconcile("v1.0.0")
+        assert not rerun.changed and rerun.published_objects == 0
+        assert snapshot(bucket) == before
+        assert not any(str(flakes[(TOOL, "v1.0.0")]) in " ".join(call) for call in calls)
+        assert not any("build" in call for call in calls)
+
+        # 3. A moved latest tag rewrites only the inventory and the page.
+        moved["latest"] = False
+        retag, _, calls = reconcile("v1.0.0")
+        assert retag.changed and retag.packages == 0
+        assert not any("build" in call for call in calls)
+        changed = {key for key, value in snapshot(bucket).items() if before.get(key) != value}
+        assert changed == {state.INVENTORY_KEY, site.PAGE_KEY}
+        page = html.unescape(re.sub(r"<[^>]+>", "", (bucket / site.PAGE_KEY).read_text()))
+        assert f"nix profile add github:{TOOL}#hd-tool" in page
+        assert "the default branch matches the release" in page
+
+        # 4. A new release tag adds its package and keeps the earlier one.
+        second, _, _ = reconcile("v2.0.0")
+        assert second.changed and second.packages == 1
+        tool_v2 = nix.published(state.read(store, "nix").retained)[-1]
+        assert (tool_v2.version, tool_v2.tag) == ("2.0.0", "v2.0.0")
+        assert tool_v2.derivation_version == "0.0.0-abc1234"
+
+        with serve(root / "public") as http:
+            client = NixClient(fixtures, "trusted", http.url("nix"), nix_pub)
+            client.substitute_and_run(tool_v1.path, "hd-tool", "hd-tool-v1")
+            client.substitute_and_run(tool_v2.path, "hd-tool", "hd-tool-v2")
+            requests = http.requests()
+            for suffix in ("/nix/nix-cache-info", ".narinfo", ".nar.zst"):
+                assert any(
+                    item.path.endswith(suffix) and item.status == 200 and item.bytes_sent > 0
+                    for item in requests
+                )
+
+            # 5. A client without the key, or with another key, rejects every narinfo.
+            with signing_session(
+                fixtures, expected_fingerprint=wrong.fingerprint, key_file=wrong.key_file
+            ) as other:
+                wrong_pub = other.nix_key()[2]
+            for name, trusted in (("missing-key", ""), ("wrong-key", wrong_pub)):
+                denied = NixClient(fixtures, name, http.url("nix"), trusted)
+                result = denied.run_nix("build", "--no-link", tool_v2.path, check=False)
+                assert result.returncode != 0 and UNTRUSTED in result.stderr.decode()
+                assert not denied.real_store_path(tool_v2.path).exists()
+
+        # 6. Unsigned, re-signed, resized, and corrupted cache objects fail closed.
+        for kind in ("unsigned", "sig", "narsize", "nar"):
+            bad = root / f"bad-{kind}"
+            shutil.copytree(bucket, bad / "nix")
+            info = narinfo(bad / "nix", tool_v2.path)
+            body = info.read_text(encoding="utf-8")
+            if kind == "unsigned":
+                info.write_text(re.sub(r"^Sig: .*\n", "", body, flags=re.M), encoding="utf-8")
+            elif kind == "sig":
+                forged = f"Sig: {NIX_KEY_NAME}:{'A' * 86}=="
+                info.write_text(re.sub(r"^Sig: .*$", forged, body, flags=re.M), encoding="utf-8")
+            elif kind == "narsize":
+                size = int(re.findall(r"^NarSize: (\d+)$", body, re.M)[0]) + 1
+                info.write_text(
+                    re.sub(r"^NarSize: \d+$", f"NarSize: {size}", body, flags=re.M),
                     encoding="utf-8",
                 )
             else:
-                info = parse_narinfo(narinfo_path)
-                nar_file = bad_nix / info["URL"]
-                raw = bytearray(nar_file.read_bytes())
-                raw[-1] ^= 0xFF
-                atomic_write(nar_file, bytes(raw))
-            with serve(bad_root) as bad_http:
-                bad_client = NixClient(
-                    runtime, f"client-bad-{tamper_kind}", bad_http.url("nix"), nix_pub
-                )
-                res_bad = bad_client.run_nix("build", "--no-link", target_store_path, check=False)
-                assert res_bad.returncode != 0
-                bad_stderr = res_bad.stderr.decode(errors="replace")
-                if tamper_kind in ("sig", "narsize"):
-                    assert "not signed by any of the keys in 'trusted-public-keys'" in bad_stderr
+                nar = bad / "nix" / re.findall(r"^URL: (.+)$", body, re.M)[0]
+                data = bytearray(nar.read_bytes())
+                data[-1] ^= 0xFF
+                atomic_write(nar, bytes(data))
+            with serve(bad) as bad_http:
+                client = NixClient(fixtures, f"bad-{kind}", bad_http.url("nix"), nix_pub)
+                result = client.run_nix("build", "--no-link", tool_v2.path, check=False)
+                assert result.returncode != 0
+                stderr = result.stderr.decode(errors="replace")
+                if kind == "nar":
+                    assert "Failed to open archive" in stderr
                 else:
-                    assert f"copying path '{target_store_path}'" in bad_stderr
-                    assert "Failed to open archive" in bad_stderr
-                assert not bad_client.real_store_path(target_store_path).exists()
+                    assert UNTRUSTED in stderr
+                assert not client.real_store_path(tool_v2.path).exists()

@@ -39,10 +39,11 @@ The first command builds the current system's checks. The second evaluates all d
 | Hosted workflow | `tests/unit/test_publish_workflow.py` | Workflow gates, step inputs, and the exact publish command, with a synthetic `nix` |
 | Storage clients | `tests/native/test_storage_clients.py` | Native transport against local protocol fixtures, not real R2 permissions |
 | Native adapters | `tests/native/test_{apt,rpm,arch,apk,flatpak,brew,scoop,nix}.py` | Retained state, install/update, rejection cases, signed upstream packages, local HTTP acquisition |
+| Nix cache | `tests/unit/test_nix.py`, `tests/native/test_nix.py` | Local fixture flakes published through the locked run, signed substitution with `--max-jobs 0`, rejected unsigned or tampered `narinfo` and NAR files, skipped projects without packages, skipped failed builds, and unchanged reruns that build and write nothing |
 | Served trust | `tests/native/test_pipeline.py` | Fetched public keys, full independent fixture fingerprint, fresh and existing strict clients |
 | Repository pages | `tests/unit/test_site.py`, `test_publish.py`, `tests/native/test_pipeline.py` | Escaping, the file tree with the Flatpak `objects/` line, install sections, the content hash, the plan line, an `index.html` with pinned theme assets in each bucket, and no page write on an unchanged rerun |
 
-The pipeline runs the real CLI with recorded GitHub responses, real native adapters, durable local storage, and loopback HTTP clients. It checks unchanged runs, which write only their locks, and assets added to the latest release. For each format, interruptions before the first entry write and after each entry write, and interruptions during bootstrap key writes, each converge with a full rerun to signed metadata that native clients install with signature checks on. A further rerun writes only its locks.
+The pipeline covers every asset format except Nix, which takes no release assets. It runs the real CLI with recorded GitHub responses, real native adapters, durable local storage, and loopback HTTP clients. It checks unchanged runs, which write only their locks, and assets added to the latest release. For each format, interruptions before the first entry write and after each entry write, and interruptions during bootstrap key writes, each converge with a full rerun to signed metadata that native clients install with signature checks on. A further rerun writes only its locks.
 
 See [the proof index](proofs/README.md) for the native tests of each format.
 

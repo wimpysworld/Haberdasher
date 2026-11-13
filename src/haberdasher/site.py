@@ -15,11 +15,11 @@ from urllib.parse import quote, urlsplit
 
 from haberdasher import state
 from haberdasher.config import PUBLIC
-from haberdasher.core import AdmittedAsset, ObjectRef, plural, size_text
+from haberdasher.core import AdmittedAsset, ObjectRef, RetainedFormat, plural, size_text
+from haberdasher.formats import nix
 from haberdasher.formats.apt import COMPONENT, SUITE
 from haberdasher.formats.brew import TAP, TAP_NAME
 from haberdasher.formats.flatpak import FLATHUB, FLATPAKREPO, REMOTE, TITLE
-from haberdasher.formats.nix import REPO as NIX_REPO
 from haberdasher.formats.scoop import BUCKET, REPO
 from haberdasher.site_style import (
     BASE_CSS,
@@ -84,6 +84,67 @@ def nix_settings(url: str, public_key: str) -> str:
     )
 
 
+def nix_steps(
+    url: str,
+    repository: str,
+    packages: Sequence[str],
+    fingerprint: str,
+    public_key: str | None,
+    flake: str = "",
+) -> list[Step]:
+    """Trust the binary cache once, then run, install, or add the flake of one project."""
+    conf_key = public_key or f"$(curl -fsSL {url}/{nix.PUBKEY_KEY})"
+    conf = _heredoc(
+        "sudo tee -a",
+        "/etc/nix/nix.conf",
+        f"extra-substituters = {url}\nextra-trusted-public-keys = {conf_key}\n",
+        expand=public_key is None,
+    )
+    cache = ((None, nix_settings(url, public_key)), (None, conf)) if public_key else ((None, conf),)
+    flake = flake or f"github:{repository}"
+    source = repository.split("/")[-1].lower()
+    branch = (
+        ""
+        if flake.endswith("/latest")
+        else " The cache serves them only while the default branch matches the release."
+    )
+    system = "${pkgs.stdenv.hostPlatform.system}"
+    return [
+        Step(
+            "Trust the binary cache",
+            f'Haberdasher derives <a href="{nix.PUBKEY_KEY}"><code class="nw">'
+            f"{nix.PUBKEY_KEY}</code></a> from OpenPGP primary "
+            f'<code style="overflow-wrap:anywhere">{_e(fingerprint)}</code> to sign '
+            "store paths. Add the cache in NixOS, or append it to "
+            '<code class="nw">/etc/nix/nix.conf</code>.',
+            cache,
+        ),
+        Step(
+            f"Install {' '.join(packages)}",
+            "Run the default package, or add each package to your Nix profile.",
+            (
+                (None, f"nix run {flake}"),
+                (None, "\n".join(f"nix profile add {flake}#{package}" for package in packages)),
+            ),
+        ),
+        Step(
+            "Or add the flake input",
+            'Add the input in <code class="nw">flake.nix</code> for NixOS or Home Manager, then '
+            "use each package. The cache serves these builds only when the input does not set "
+            f'<code class="nw">inputs.{_e(source)}.inputs.nixpkgs.follows</code>.{branch}',
+            (
+                (None, f'inputs.{source}.url = "{flake}";'),
+                (
+                    None,
+                    "\n".join(
+                        f"inputs.{source}.packages.{system}.{package}" for package in packages
+                    ),
+                ),
+            ),
+        ),
+    ]
+
+
 def _heredoc(command: str, path: str, body: str, *, expand: bool = False) -> str:
     marker = "EOF" if expand else "'EOF'"
     return f"{command} {path} > /dev/null <<{marker}\n{body}EOF"
@@ -143,9 +204,6 @@ def install(name: str, packages: Sequence[str]) -> list[Command]:
             return [(None, "\n".join(f"brew install --cask {TAP_NAME}/{p}" for p in packages))]
         case "scoop":
             return [(None, "\n".join(f"scoop install {BUCKET}/{p}" for p in packages))]
-        case "nix":
-            repo = f"git+{_url('nix')}/{NIX_REPO}"
-            return [(None, "\n".join(f"nix profile add '{repo}#{p}'" for p in packages))]
         case _:
             return [(None, f"flatpak --user install {REMOTE} {app}") for app in packages]
 
@@ -166,12 +224,16 @@ def steps(
     fingerprint: str,
     *,
     public_key: str | None = None,
+    repository: str = "",
+    flake: str = "",
 ) -> list[Step]:
     """Trust the key, add the repository, and install the packages of one project."""
     url = _url(name)
     key = f"{url}/keys/haberdasher.asc"
     trust = "Trust the signing key"
     add = "Add the repository"
+    if name == "nix":
+        return nix_steps(url, repository, packages, fingerprint, public_key, flake)
     last = Step(f"Install {' '.join(packages)}", "", tuple(install(name, packages)))
     match name:
         case "scoop":
@@ -189,37 +251,6 @@ def steps(
                     "flag after install.",
                     last.commands,
                 ),
-            ]
-        case "nix":
-            conf_key = public_key or f"$(curl -fsSL {url}/keys/haberdasher-nix.pub)"
-            conf = _heredoc(
-                "sudo tee -a",
-                "/etc/nix/nix.conf",
-                f"extra-substituters = {url}\nextra-trusted-public-keys = {conf_key}\n",
-                expand=public_key is None,
-            )
-            cache_commands = (
-                ((None, nix_settings(url, public_key)), (None, conf))
-                if public_key
-                else ((None, conf),)
-            )
-            return [
-                Step(
-                    "Trust the binary cache",
-                    'Haberdasher derives <a href="keys/haberdasher-nix.pub">'
-                    '<code class="nw">keys/haberdasher-nix.pub</code></a> from OpenPGP primary '
-                    f'<code style="overflow-wrap:anywhere">{_e(fingerprint)}</code> to sign '
-                    "store paths. Add the cache in NixOS, or append it to "
-                    '<code class="nw">/etc/nix/nix.conf</code>.',
-                    cache_commands,
-                ),
-                Step(
-                    "Add the flake input",
-                    'Add this input in <code class="nw">flake.nix</code> for NixOS or Home '
-                    "Manager, or skip to step 3.",
-                    ((None, f'inputs.haberdasher.url = "git+{url}/{NIX_REPO}";'),),
-                ),
-                last,
             ]
         case "apt":
             sources = _heredoc(
@@ -427,7 +458,7 @@ def description(asset: AdmittedAsset) -> str:
             return _field(r"^%DESC%\n(.*)$", metadata.get("desc"))
         case "apk":
             return _field(r"^T:(.*)$", metadata.get("stanza"))
-        case "brew" | "scoop" | "nix":
+        case "brew" | "scoop":
             return _field(r"(.+)", metadata.get("desc"))
         case _:
             return _field(r"(.+)", metadata.get("summary"))
@@ -449,6 +480,7 @@ class Project:
     repository: str
     description: str
     packages: tuple[tuple[str, str, tuple[str, ...]], ...]
+    flake: str = ""
 
 
 def _package(asset: AdmittedAsset) -> tuple[str, str]:
@@ -483,6 +515,34 @@ def projects(history: Sequence[AdmittedAsset], fallback: Mapping[str, str]) -> l
                     (name, version, tuple(sorted(architectures)))
                     for (name, version), architectures in sorted(packages.items())
                 ),
+            )
+        )
+    return result
+
+
+def nix_projects(retained: RetainedFormat, fallback: Mapping[str, str]) -> list[Project]:
+    """One entry per source repository, with the flake packages of its newest published tag."""
+    items = nix.published(retained)
+    tags = {item.repository: item.tag for item in items}
+    flakes = nix.flake_references(retained)
+    result: list[Project] = []
+    for repository in sorted(tags, key=str.lower):
+        chosen = [
+            item for item in items if (item.repository, item.tag) == (repository, tags[repository])
+        ]
+        systems: dict[tuple[str, str], set[str]] = {}
+        for item in chosen:
+            systems.setdefault((item.attribute, item.version), set()).add(item.system)
+        own = next((item.description for item in reversed(chosen) if item.description), "")
+        result.append(
+            Project(
+                repository,
+                own or fallback.get(repository, ""),
+                tuple(
+                    (attribute, version, tuple(sorted(found)))
+                    for (attribute, version), found in sorted(systems.items())
+                ),
+                flakes.get(repository, f"github:{repository}"),
             )
         )
     return result
@@ -566,10 +626,7 @@ FOLDS: dict[str, dict[str, tuple[str, str]]] = {
     "flatpak": {"objects": ("OSTree object", "content-addressed")},
     "brew": {TAP: ("file", "Git repository")},
     "scoop": {REPO.split("/")[0]: ("file", "Git repository")},
-    "nix": {
-        NIX_REPO: ("file", "Git repository"),
-        "nar": ("NAR archive", "content-addressed"),
-    },
+    "nix": {"nar": ("NAR archive", "content-addressed")},
 }
 
 
@@ -675,7 +732,15 @@ def _panel(
             '<h4 class="alt">Or add the repository by hand</h4>'
         )
     items: list[str] = []
-    for step in steps(name, history, names, fingerprint, public_key=public_key):
+    for step in steps(
+        name,
+        history,
+        names,
+        fingerprint,
+        public_key=public_key,
+        repository=project.repository,
+        flake=project.flake,
+    ):
         blocks = "".join(_code(command, variant) for variant, command in step.commands)
         check = ""
         if step.check:
@@ -804,7 +869,9 @@ def _document(
         for slug, label in theme.works
     )
     history = published.retained.accepted_history
-    entries = projects(history, fallback)
+    entries = (
+        nix_projects(published.retained, fallback) if name == "nix" else projects(history, fallback)
+    )
     refs = {ref.key for ref in published.objects}
     sizes = files(published.objects)
     tabs = (

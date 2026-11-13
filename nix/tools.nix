@@ -46,6 +46,3 @@ with pkgs;
 ++ lib.optionals (stdenv.hostPlatform.isLinux && builtins.pathExists ./flatpak-metadata.nix) (
   import ./flatpak-metadata.nix { inherit pkgs; }
 )
-++ lib.optionals (stdenv.hostPlatform.isLinux && builtins.pathExists ./nixpkgs-lock.nix) (
-  import ./nixpkgs-lock.nix { inherit pkgs; }
-)
