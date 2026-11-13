@@ -49,7 +49,10 @@ SCOOP_MARK = "M7.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0zM2.5 8.5a4 4 0 1 0 8 0a
 
 @dataclass(frozen=True)
 class Theme:
-    """A brand theme: the µCSS colour build, the fonts, the "Works with" logos, and the CSS."""
+    """A brand theme: the µCSS colour build, the fonts, the "Works with" logos, and the CSS.
+
+    `logo` holds the fill of `logo.svg` on a light and on a dark background.
+    """
 
     label: str
     short: str
@@ -58,6 +61,7 @@ class Theme:
     fonts: tuple[str, ...]
     works: tuple[tuple[str | None, str], ...]
     favicon: str
+    logo: tuple[str, str]
     css: str
 
     @property
@@ -88,6 +92,7 @@ THEMES: dict[str, Theme] = {
             ("debian", "Debian"),
         ),
         favicon="#E95420",
+        logo=("#E95420", "#E95420"),
         css="""
 body{--hd-font-body:"Ubuntu Sans Variable",Ubuntu,system-ui,sans-serif;--hd-font-display:var(--hd-font-body);--hd-font-mono:"Ubuntu Sans Mono Variable","Ubuntu Mono",ui-monospace,monospace;
 --hd-h-weight:300;--hd-h1-weight:200;--hd-h2-weight:400;--hd-h3-weight:500;--hd-h4-weight:500;--hd-radius:.125rem;--hd-btn-radius:.125rem;--hd-pill:.125rem;--hd-step-radius:50%;
@@ -130,6 +135,7 @@ h2{color:var(--hd-h2-color)}
             ("suse", "SUSE"),
         ),
         favicon="#EE0000",
+        logo=("#EE0000", "#EE0000"),
         css="""
 body{--hd-font-body:"Red Hat Text",system-ui,sans-serif;--hd-font-display:"Red Hat Display",var(--hd-font-body);--hd-font-mono:"Red Hat Mono",ui-monospace,monospace;
 --hd-h-weight:700;--hd-radius:0;--hd-btn-radius:0;--hd-pill:0;--hd-step-radius:0;
@@ -167,6 +173,7 @@ body{--hd-font-body:"Red Hat Text",system-ui,sans-serif;--hd-font-display:"Red H
             ("endeavouros", "EndeavourOS"),
         ),
         favicon="#1793D1",
+        logo=("#1793D1", "#1793D1"),
         css="""
 body{--hd-font-body:"Liberation Sans",Arial,Helvetica,sans-serif;--hd-font-display:"DejaVu Sans",Verdana,sans-serif;--hd-font-mono:"DejaVu Sans Mono",ui-monospace,monospace;
 --hd-h-weight:700;--hd-radius:.2rem;--hd-btn-radius:.2rem;--hd-pill:.2rem;--hd-step-radius:.2rem;
@@ -214,6 +221,7 @@ SEL .tree li:hover>a,SEL .tree li>details>summary:hover{background:#181C20}SEL .
             (None, "postmarketOS"),
         ),
         favicon="#0D597F",
+        logo=("#0D597F", "#7FC0E3"),
         css="""
 body{--hd-font-body:Arimo,Arial,Helvetica,sans-serif;--hd-font-display:Comfortaa,Arimo,Arial,sans-serif;--hd-font-mono:Cousine,"Courier New",monospace;
 --hd-h-weight:700;--hd-radius:.25rem;--hd-btn-radius:.25rem;--hd-pill:999px;--hd-step-radius:50%;
@@ -258,6 +266,7 @@ SEL .code{border-left-color:#7fc0e3}"""),
             ("kde", "KDE"),
         ),
         favicon="#4A90D9",
+        logo=("#4A90D9", "#4A90D9"),
         css="""
 body{--hd-font-body:"Inter Variable",Inter,system-ui,sans-serif;--hd-font-display:var(--hd-font-body);--hd-font-mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
 --hd-h-weight:800;--hd-h-tracking:-.02em;--hd-radius:.75rem;--hd-btn-radius:999px;--hd-pill:999px;--hd-step-radius:50%;
@@ -298,6 +307,7 @@ SEL .panel a{color:#99c1f1}SEL .pkg div,SEL .fp,SEL .lead-install{background:#1a
             ("apple", "macOS"),
         ),
         favicon="#2E2A24",
+        logo=("#A8700F", "#E2A843"),
         css="""
 body{--hd-font-body:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Helvetica Neue",Roboto,sans-serif;--hd-font-display:var(--hd-font-body);--hd-font-mono:ui-monospace,"SF Mono",Monaco,Menlo,Consolas,monospace;
 --hd-h-weight:800;--hd-h1-weight:900;--hd-h3-weight:700;--hd-h4-weight:700;--hd-radius:.4em;--hd-btn-radius:.4em;--hd-pill:.4em;--hd-step-radius:50%;
@@ -331,6 +341,7 @@ a{font-weight:600}
             (None, "Windows"),
         ),
         favicon="#4D4A52",
+        logo=("#D9488F", "#F77FB5"),
         css="""
 body{--hd-font-body:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;--hd-font-display:var(--hd-font-body);--hd-font-mono:SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
 --hd-h-weight:500;--hd-h1-weight:700;--hd-h3-weight:600;--hd-h4-weight:600;--hd-radius:.375rem;--hd-btn-radius:.375rem;--hd-pill:.375rem;--hd-step-radius:50%;
@@ -367,6 +378,7 @@ a:not([class]){text-decoration:none}a:not([class]):hover{text-decoration:underli
             ("apple", "macOS"),
         ),
         favicon="#5277C3",
+        logo=("#5277C3", "#7EBAE4"),
         css="""
 body{--hd-font-body:"Inter Variable",Inter,system-ui,sans-serif;--hd-font-display:var(--hd-font-body);--hd-font-mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
 --hd-brand:#5277c3;--hd-brand-light:#7ebae4;

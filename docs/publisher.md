@@ -191,6 +191,8 @@ The description comes from package metadata: DEB `Description`, RPM `Summary`, A
 
 Each page loads one µCSS theme and its fonts from pinned jsDelivr URLs with SRI hashes, and distribution logos from pinned `simple-icons` URLs. Browsers do not check SRI for images or for font files that a stylesheet loads. A few lines of inline JavaScript show a copy button beside each command. Without JavaScript, the commands stay selectable.
 
+Each bucket also serves one `logo.svg` with `Content-Type: image/svg+xml` and `Cache-Control: public, max-age=86400`. `site.logo` builds it from the theme's mark, with one fill for light and one for dark backgrounds, and a run writes it when it is missing or differs. Show it with, for example, `[![APT](https://apt.wimpys.world/logo.svg)](https://apt.wimpys.world)`.
+
 The page embeds a content hash of everything except the date, in `<meta name="haberdasher-content">`. A run writes the page only when it is missing or that hash differs, so an unchanged rerun writes no page. The setup commands share their repository definitions with the native client tests through `apt_sources`, `rpm_repo`, and `pacman_repo` in `src/haberdasher/site.py`.
 
 ## Locks

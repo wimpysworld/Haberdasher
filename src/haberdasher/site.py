@@ -39,6 +39,7 @@ PAGE_KEY = "index.html"
 MAX_PAGE_BYTES = 4 * 1024 * 1024
 IMAGE_KEY = "og.png"
 MAX_IMAGE_BYTES = 1024 * 1024
+LOGO_KEY = "logo.svg"
 OWNER = "Martin Wimpress"
 OWNER_URL = "https://github.com/flexiondotorg"
 SOURCE = "https://github.com/wimpysworld/Haberdasher"
@@ -616,8 +617,8 @@ def _breakable(name: str) -> str:
 
 
 def files(objects: Sequence[ObjectRef]) -> dict[str, int]:
-    """The size of every published package repository file, without the inventory, page, or image."""
-    hidden = (state.INVENTORY_KEY, PAGE_KEY, IMAGE_KEY)
+    """The size of every published package repository file, without the inventory, page, image, or logo."""
+    hidden = (state.INVENTORY_KEY, PAGE_KEY, IMAGE_KEY, LOGO_KEY)
     return {ref.key: ref.size for ref in objects if ref.key not in hidden}
 
 
@@ -1004,13 +1005,38 @@ def image(name: str) -> bytes:
     return (resources("haberdasher") / "og" / f"{name}.png").read_bytes()
 
 
-def image_ref(name: str, data: bytes) -> ObjectRef:
-    return ObjectRef(
-        name,
-        IMAGE_KEY,
-        "page",
-        len(data),
-        hashlib.sha256(data).hexdigest(),
-        "image/png",
-        "public, max-age=86400",
+def logo(name: str) -> bytes:
+    """The platform mark of one format, which other pages show as an image that links to the repository.
+
+    The fill follows the colour scheme of the viewer, because an image cannot take the page colour.
+    """
+    theme = THEMES[name]
+    light, dark = theme.logo
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img">'
+        f"<title>{_e(theme.label)}</title>"
+        f"<style>path{{fill:{light}}}@media (prefers-color-scheme:dark){{path{{fill:{dark}}}}}</style>"
+        f'<path d="{theme.icon}"/></svg>\n'
+    ).encode()
+
+
+def images(name: str) -> tuple[tuple[ObjectRef, bytes], ...]:
+    """The preview image and the logo that publish writes beside the page of one format."""
+    return tuple(
+        (
+            ObjectRef(
+                name,
+                key,
+                "page",
+                len(data),
+                hashlib.sha256(data).hexdigest(),
+                content_type,
+                "public, max-age=86400",
+            ),
+            data,
+        )
+        for key, content_type, data in (
+            (IMAGE_KEY, "image/png", image(name)),
+            (LOGO_KEY, "image/svg+xml", logo(name)),
+        )
     )

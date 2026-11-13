@@ -149,20 +149,21 @@ def read_page(url: str, key: str = site.PAGE_KEY, limit: int = site.MAX_PAGE_BYT
 
 def pending_pages(
     published: Mapping[str, state.Published], urls: Mapping[str, str], fingerprint: str
-) -> tuple[list[str], list[str]]:
-    """Formats whose og.png, then whose index.html, is missing or differs from what publish writes."""
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Formats whose og.png or logo.svg, then whose index.html, is missing or differs from what publish writes."""
     fallback = site.descriptions(item.retained.accepted_history for item in published.values())
-    images: list[str] = []
+    images: dict[str, list[str]] = {site.IMAGE_KEY: [], site.LOGO_KEY: []}
     pending: list[str] = []
     for name, item in published.items():
-        try:
-            image = read_page(urls[name], site.IMAGE_KEY, site.MAX_IMAGE_BYTES)
-        except (OSError, ValueError) as error:
-            step(say, name, f"cannot read {site.IMAGE_KEY}: {error}")
-        else:
-            if image != site.image(name):
-                step(say, name, f"would write {site.IMAGE_KEY}")
-                images.append(name)
+        for ref, data in site.images(name):
+            try:
+                image = read_page(urls[name], ref.key, site.MAX_IMAGE_BYTES)
+            except (OSError, ValueError) as error:
+                step(say, name, f"cannot read {ref.key}: {error}")
+            else:
+                if image != data:
+                    step(say, name, f"would write {ref.key}")
+                    images[ref.key].append(name)
         _, digest = site.page(name, item, fingerprint=fingerprint, fallback=fallback, now=utc_now())
         try:
             current = read_page(urls[name])
@@ -278,14 +279,16 @@ def show_plan(
     summary = f"{plural(total, 'new package')}." if total else "No new packages."
     if pages:
         summary += f" {plural(len(pages), 'index page')} to write."
-    if images:
-        summary += f" {plural(len(images), 'preview image')} to write."
+    if images[site.IMAGE_KEY]:
+        summary += f" {plural(len(images[site.IMAGE_KEY]), 'preview image')} to write."
+    if images[site.LOGO_KEY]:
+        summary += f" {plural(len(images[site.LOGO_KEY]), 'logo')} to write."
     if moving:
         summary += f" {_repositories(len(moving))} to move to current keys."
     summary += " Nothing written."
     if missing:
         summary += f" Could not read {', '.join(missing)}, so the plan is incomplete."
-    elif total or pages or images or moving:
+    elif total or pages or any(images.values()) or moving:
         summary += " Run `just publish` to publish them."
     say(summary)
 

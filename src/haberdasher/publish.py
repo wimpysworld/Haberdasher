@@ -286,8 +286,8 @@ def write_page(
     now: datetime,
     report: Report = quiet,
 ) -> int:
-    """Write a format's og.png and index.html when each is missing or differs. Count the writes."""
-    count = write_image(store, published.format, report=report)
+    """Write a format's images and index.html when each is missing or differs. Count the writes."""
+    count = write_images(store, published.format, report=report)
     data, digest = site.page(
         published.format, published, fingerprint=fingerprint, fallback=fallback, now=now
     )
@@ -300,16 +300,18 @@ def write_page(
     return count + 1
 
 
-def write_image(store: Store, name: str, *, report: Report = quiet) -> int:
-    """Write a format's og.png when it is missing or its bytes differ."""
-    data = site.image(name)
-    current = store.read(name, site.IMAGE_KEY, max_bytes=site.MAX_IMAGE_BYTES)
-    if current is not None and current[0] == data:
-        return 0
-    expected = None if current is None else current[1].etag
-    state.write_object(store, site.image_ref(name, data), data, expected)
-    step(report, name, f"wrote {site.IMAGE_KEY}")
-    return 1
+def write_images(store: Store, name: str, *, report: Report = quiet) -> int:
+    """Write a format's og.png and logo.svg when each is missing or its bytes differ."""
+    count = 0
+    for ref, data in site.images(name):
+        current = store.read(name, ref.key, max_bytes=site.MAX_IMAGE_BYTES)
+        if current is not None and current[0] == data:
+            continue
+        expected = None if current is None else current[1].etag
+        state.write_object(store, ref, data, expected)
+        step(report, name, f"wrote {ref.key}")
+        count += 1
+    return count
 
 
 def _unchanged(published: Published) -> PreparedFormat:

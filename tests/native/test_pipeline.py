@@ -67,7 +67,10 @@ def printed_result(output: str) -> publish.RunResult:
             uploading = False
             objects += int(words[2])
         elif line.endswith(
-            tuple(f"wrote {key}" for key in (state.INVENTORY_KEY, site.PAGE_KEY, site.IMAGE_KEY))
+            tuple(
+                f"wrote {key}"
+                for key in (state.INVENTORY_KEY, site.PAGE_KEY, site.IMAGE_KEY, site.LOGO_KEY)
+            )
         ):
             uploading = False
             objects += 1
@@ -555,8 +558,11 @@ def check_page(bucket: Path, name: str, fingerprint: str) -> str:
     assert (bucket / site.IMAGE_KEY).read_bytes() == site.image(name)
     assert f'content="{PUBLIC[name][1]}/{site.IMAGE_KEY}"' in page
     assert f'href="{site.IMAGE_KEY}"' not in page
+    assert (bucket / site.LOGO_KEY).read_bytes() == site.logo(name)
     inventory = json.loads((bucket / state.INVENTORY_KEY).read_bytes())
-    assert {site.PAGE_KEY, site.IMAGE_KEY}.isdisjoint(item["key"] for item in inventory["objects"])
+    assert {site.PAGE_KEY, site.IMAGE_KEY, site.LOGO_KEY}.isdisjoint(
+        item["key"] for item in inventory["objects"]
+    )
     digest = site.content_hash(data)
     assert digest is not None
     return digest

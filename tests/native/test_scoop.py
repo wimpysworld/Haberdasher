@@ -50,7 +50,9 @@ def test_publish_serves_a_bucket_that_git_clones_over_http(
         assert (bucket / "tool/1.0.0/tool-windows-amd64.exe").read_bytes() == pe(AMD64)
         assert (bucket / "viewer/1.0.0/viewer-1.0.0-windows-x64.zip").read_bytes() == packed
         assert not (bucket / "setup").exists() and not (bucket / "keys").exists()
-        assert {"index.html", "og.png", state.INVENTORY_KEY} <= {p.name for p in bucket.iterdir()}
+        assert {"index.html", "og.png", "logo.svg", state.INVENTORY_KEY} <= {
+            p.name for p in bucket.iterdir()
+        }
 
         before = {path: path.read_bytes() for path in bucket.rglob("*") if path.is_file()}
         unchanged = reconcile(datetime(2026, 11, 12, tzinfo=UTC))

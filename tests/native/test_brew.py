@@ -117,7 +117,9 @@ def test_publish_serves_a_tap_that_git_clones_over_http(
         assert (bucket / "tool/1.0.0/tool-darwin-arm64").read_bytes() == thin(ARM)
         assert (bucket / "sidra/1.0.0/Sidra-1.0.0-mac-arm64.zip").read_bytes() == app
         assert not (bucket / "keys").exists()
-        assert {"index.html", "og.png", state.INVENTORY_KEY} <= {p.name for p in bucket.iterdir()}
+        assert {"index.html", "og.png", "logo.svg", state.INVENTORY_KEY} <= {
+            p.name for p in bucket.iterdir()
+        }
 
         before = {path: path.read_bytes() for path in bucket.rglob("*") if path.is_file()}
         unchanged = reconcile(datetime(2026, 11, 12, tzinfo=UTC))

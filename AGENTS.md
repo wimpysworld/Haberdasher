@@ -156,6 +156,8 @@ Treat the eight package buckets as public:
   Do not add per-project settings for the page.
 - Permit one public `og.png` preview image per bucket, which the page names in its OpenGraph and Twitter tags.
   Generate it from the hero design of the page with the sources in `og/`, and ship it in the Python package.
+- Permit one public `logo.svg` per bucket, which READMEs and project websites show as an image that links to the repository.
+  Generate it in code from the theme's mark and colours, with a fill for light and for dark backgrounds.
 - Keep secrets and credentials out of these buckets.
 - Read publisher credentials only from the runtime environment:
   `HD_CLOUDFLARE_S3_API_ENDPOINT`, `HD_CLOUDFLARE_ACCESS_KEY_ID`, and `HD_CLOUDFLARE_SECRET_ACCESS_KEY`.

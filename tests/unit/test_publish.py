@@ -331,7 +331,7 @@ def test_unchanged_rerun_writes_only_its_locks(
     fixture = Fixture(tmp_path, monkeypatch, ("arch",))
     fixture.releases.add("tool", "1")
     first = fixture.run()
-    assert first.changed and first.published_objects == 7
+    assert first.changed and first.published_objects == 8
     assert fixture.store.writes == [
         "arch/haberdasher.lock",
         "arch/keys/wimpysworld.asc",
@@ -340,6 +340,7 @@ def test_unchanged_rerun_writes_only_its_locks(
         "arch/x86_64/db",
         "arch/haberdasher.json",
         "arch/og.png",
+        "arch/logo.svg",
         "arch/index.html",
     ]
     assert fixture.store.deletes == ["arch/haberdasher.lock"] and not fixture.locks()
@@ -667,7 +668,7 @@ def test_publish_reports_each_step_and_an_unchanged_rerun(
     lines: list[str] = []
     result = fixture.run(lines.append)
     assert (result.packages, result.repositories) == (1, ("arch",))
-    assert result.published_objects == 7
+    assert result.published_objects == 8
     assert lines == [
         "arch  locked",
         "arch  preparing 1 new package",
@@ -680,6 +681,7 @@ def test_publish_reports_each_step_and_an_unchanged_rerun(
         "arch    x86_64/db (7 B)",
         "arch  wrote haberdasher.json",
         "arch  wrote og.png",
+        "arch  wrote logo.svg",
         "arch  wrote index.html",
         "arch  unlocked",
     ]
@@ -742,6 +744,7 @@ def test_plan_counts_published_and_new_packages_from_the_public_inventory(
 
     page = fixture.path("arch", site.PAGE_KEY).read_bytes()
     image = fixture.path("arch", site.IMAGE_KEY).read_bytes()
+    logo = fixture.path("arch", site.LOGO_KEY).read_bytes()
 
     def answer(request: urllib.request.Request, timeout: float) -> io.BytesIO:
         requested.append(request.full_url)
@@ -749,6 +752,8 @@ def test_plan_counts_published_and_new_packages_from_the_public_inventory(
             raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
         if request.full_url.endswith(site.IMAGE_KEY):
             return io.BytesIO(image)
+        if request.full_url.endswith(site.LOGO_KEY):
+            return io.BytesIO(logo)
         return io.BytesIO(page if request.full_url.endswith(site.PAGE_KEY) else inventory)
 
     scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
@@ -758,6 +763,7 @@ def test_plan_counts_published_and_new_packages_from_the_public_inventory(
         "https://pkg.example.invalid/haberdasher.json",
         "https://apt.example.invalid/haberdasher.json",
         "https://pkg.example.invalid/og.png",
+        "https://pkg.example.invalid/logo.svg",
         "https://pkg.example.invalid/index.html",
     ]
     assert capsys.readouterr().out.splitlines() == [
@@ -796,9 +802,10 @@ def test_unsupported_asset_is_skipped_with_one_line(
     scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
     fixture.path("arch", site.PAGE_KEY).unlink()
     fixture.path("arch", site.IMAGE_KEY).unlink()
+    fixture.path("arch", site.LOGO_KEY).unlink()
 
     def answer(request: urllib.request.Request, timeout: float) -> io.BytesIO:
-        if request.full_url.endswith((site.PAGE_KEY, site.IMAGE_KEY)):
+        if request.full_url.endswith((site.PAGE_KEY, site.IMAGE_KEY, site.LOGO_KEY)):
             raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
         return io.BytesIO(inventory)
 
@@ -807,13 +814,14 @@ def test_unsupported_asset_is_skipped_with_one_line(
     output = capsys.readouterr().out.splitlines()
     assert output[1:] == [
         "arch  would write og.png",
+        "arch  would write logo.svg",
         "arch  would write index.html",
         "",
         "Format  Repository   Published  New",
         "arch    pkg.example          1    0",
         "",
-        "No new packages. 1 index page to write. 1 preview image to write. Nothing written. "
-        "Run `just publish` to publish them.",
+        "No new packages. 1 index page to write. 1 preview image to write. 1 logo to write. "
+        "Nothing written. Run `just publish` to publish them.",
     ]
     assert fixture.adapter.inspections == 2
     lines.clear()
@@ -821,13 +829,14 @@ def test_unsupported_asset_is_skipped_with_one_line(
     assert (result.changed, result.pages, result.published_objects, fixture.store.writes) == (
         True,
         ("arch",),
-        2,
-        ["arch/haberdasher.lock", "arch/og.png", "arch/index.html"],
+        3,
+        ["arch/haberdasher.lock", "arch/og.png", "arch/logo.svg", "arch/index.html"],
     )
     assert lines == [
         "arch  locked",
         "arch  unchanged",
         "arch  wrote og.png",
+        "arch  wrote logo.svg",
         "arch  wrote index.html",
         "arch  unlocked",
     ]
@@ -876,19 +885,26 @@ def test_rejected_only_format_persists_digests_across_reruns_and_later_packages(
         state.decode_published("arch", core.canonical_json(tampered), None)
 
 
-def test_preview_image_is_written_only_when_missing_or_changed(
+def test_preview_image_and_logo_are_written_only_when_missing_or_changed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = Fixture(tmp_path, monkeypatch, ("arch",))
     store = fixture.store
     lines: list[str] = []
-    assert publish.write_image(store, "arch", report=lines.append) == 1
-    assert store.writes == ["arch/og.png"] and lines == ["arch  wrote og.png"]
+    assert publish.write_images(store, "arch", report=lines.append) == 2
+    assert store.writes == ["arch/og.png", "arch/logo.svg"]
+    assert lines == ["arch  wrote og.png", "arch  wrote logo.svg"]
     assert fixture.path("arch", site.IMAGE_KEY).read_bytes() == site.image("arch")
+    assert fixture.path("arch", site.LOGO_KEY).read_bytes() == site.logo("arch")
     store.writes.clear()
-    assert publish.write_image(store, "arch", report=lines.append) == 0
-    assert store.writes == [] and len(lines) == 1
+    assert publish.write_images(store, "arch", report=lines.append) == 0
+    assert store.writes == [] and len(lines) == 2
     fixture.path("arch", site.IMAGE_KEY).write_bytes(b"older image")
-    assert publish.write_image(store, "arch") == 1
+    assert publish.write_images(store, "arch") == 1
     assert store.writes == ["arch/og.png"]
     assert fixture.path("arch", site.IMAGE_KEY).read_bytes() == site.image("arch")
+    store.writes.clear()
+    fixture.path("arch", site.LOGO_KEY).write_bytes(b"<svg/>")
+    assert publish.write_images(store, "arch") == 1
+    assert store.writes == ["arch/logo.svg"]
+    assert fixture.path("arch", site.LOGO_KEY).read_bytes() == site.logo("arch")

@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
+from xml.etree import ElementTree
 
 from haberdasher import site, state
 from haberdasher.config import PUBLIC
@@ -21,6 +22,7 @@ from haberdasher.core import (
     VerifiedAsset,
 )
 from haberdasher.formats import nix
+from haberdasher.site_style import THEMES
 
 FINGERPRINT = "B39939A127C7A8D338F53A3AE132098A87DB88E0"
 NOW = datetime(2026, 11, 9, 12, tzinfo=UTC)
@@ -193,6 +195,7 @@ def test_hero_card_counts_the_published_package_files() -> None:
         ref("apt", "haberdasher.json", 9_000),
         ref("apt", "index.html", 9_000),
         ref("apt", "og.png", 40_000),
+        ref("apt", "logo.svg", 1_000),
     )
     page = render("apt", published("apt", history, objects))
     card = page[page.index('<aside class="hero-card"') : page.index("</aside>")]
@@ -205,6 +208,7 @@ def test_hero_card_counts_the_published_package_files() -> None:
     assert "<strong>2 KB</strong> total" in page
     assert "haberdasher.json" not in page and 'href="index.html"' not in page
     assert 'href="og.png"' not in page
+    assert 'href="logo.svg"' not in page
 
 
 def test_every_hero_links_the_maintainer() -> None:
@@ -376,11 +380,54 @@ def test_package_ships_one_preview_image_per_format() -> None:
         data = site.image(name)
         assert data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) < site.MAX_IMAGE_BYTES
         assert struct.unpack(">II", data[16:24]) == (1200, 630)
-        ref = site.image_ref(name, data)
+        ref, stored = site.images(name)[0]
+        assert stored == data
         assert (ref.key, ref.content_type, ref.cache_control) == (
             "og.png",
             "image/png",
             "public, max-age=86400",
+        )
+
+
+def _luminance(colour: str) -> float:
+    channels = [int(colour[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+    red, green, blue = (
+        value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+        for value in channels
+    )
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _contrast(first: str, second: str) -> float:
+    high, low = sorted((_luminance(first), _luminance(second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_each_format_has_one_logo_that_reads_on_light_and_dark_backgrounds() -> None:
+    namespace = "{http://www.w3.org/2000/svg}"
+    for name in PUBLIC:
+        ref, data = site.images(name)[1]
+        assert data == site.logo(name) and 300 < len(data) < 4096
+        assert (ref.key, ref.object_class, ref.content_type, ref.cache_control) == (
+            "logo.svg",
+            "page",
+            "image/svg+xml",
+            "public, max-age=86400",
+        )
+        root = ElementTree.fromstring(data)
+        assert root.tag == f"{namespace}svg" and root.get("viewBox") == "0 0 24 24"
+        assert [child.tag.removeprefix(namespace) for child in root] == ["title", "style", "path"]
+        title, style, path = root
+        theme = THEMES[name]
+        assert title.text == theme.label and path.get("d") == theme.icon
+        light, dark = theme.logo
+        assert style.text == (
+            f"path{{fill:{light}}}@media (prefers-color-scheme:dark){{path{{fill:{dark}}}}}"
+        )
+        assert _contrast(light, "#ffffff") >= 3 and _contrast(dark, "#0d1117") >= 3
+        text = data.decode()
+        assert not re.search(
+            r"href|url\(|<script|<text|<image|@import|https?://(?!www\.w3\.org/2000/svg\")", text
         )
 
 
