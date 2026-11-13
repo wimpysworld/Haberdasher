@@ -3,8 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    tailor.url = "github:wimpysworld/tailor";
-    tailor.inputs.nixpkgs.follows = "nixpkgs";
+    tailor.url = "github:wimpysworld/tailor/latest";
   };
 
   outputs =

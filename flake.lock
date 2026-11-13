@@ -1,26 +1,5 @@
 {
   "nodes": {
-    "nix-packages": {
-      "inputs": {
-        "nixpkgs": [
-          "tailor",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1794492603,
-        "narHash": "sha256-AsmD7X6cFOTCmGcLX+Rx0hd5LQD8jF+lV2p7s2YnMr4=",
-        "ref": "refs/heads/main",
-        "rev": "6d4d99737fd14936e82155f3d6fe5e3cf0666f71",
-        "revCount": 1,
-        "type": "git",
-        "url": "https://nix.wimpys.world/packages.git"
-      },
-      "original": {
-        "type": "git",
-        "url": "https://nix.wimpys.world/packages.git"
-      }
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1793826729,
@@ -28,6 +7,22 @@
         "owner": "nixos",
         "repo": "nixpkgs",
         "rev": "6dadaf4375be35033e1c84395adbd53ff5fded96",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1793977579,
+        "narHash": "sha256-WrSODdZFVIs/Hh2NzC0bY+ROByi0bATg8WfePX8dPj8=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "4fe25e12eb9f4c744966dd3de5a05246cf098601",
         "type": "github"
       },
       "original": {
@@ -45,21 +40,19 @@
     },
     "tailor": {
       "inputs": {
-        "nix-packages": "nix-packages",
-        "nixpkgs": [
-          "nixpkgs"
-        ]
+        "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1794564659,
-        "narHash": "sha256-eKyS16TlKWoFHnWy+qZ/H3UTPb7MZgz6nb8+uJoWBW4=",
+        "lastModified": 1794570706,
+        "narHash": "sha256-qIf8OhMSIUHo8d3h6eJGDiifGPJT/Y12CrdRjWsGXzE=",
         "owner": "wimpysworld",
         "repo": "tailor",
-        "rev": "76609b2b3d5611921bfdcc677b595d46c7fa271b",
+        "rev": "bfb52955cf20af69db1b7774518b72e7df010191",
         "type": "github"
       },
       "original": {
         "owner": "wimpysworld",
+        "ref": "latest",
         "repo": "tailor",
         "type": "github"
       }
