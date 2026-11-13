@@ -233,7 +233,12 @@ def show_plan(
         counts = {name: len(items) for name, items in new.items()}
         if "nix" in published and "nix" in names:
             counts["nix"] = len(
-                nix.pending(scan.releases, published["nix"].retained, runtime=runtime, report=say)
+                nix.pending(
+                    nix.targets(scan.releases, runtime=runtime),
+                    published["nix"].retained,
+                    runtime=runtime,
+                    report=say,
+                )
             )
     images, pages = pending_pages(
         {

@@ -384,15 +384,11 @@ def _reconcile(
     if scan is None:
         scan = discovery.scan_releases(config, runtime=runtime, report=report)
     changed = new_assets(scan, published)
+    targets = nix.targets(scan.releases, runtime=runtime) if "nix" in published else []
     flakes = (
-        nix.pending(scan.releases, published["nix"].retained, runtime=runtime, report=report)
+        nix.pending(targets, published["nix"].retained, runtime=runtime, report=report)
         if "nix" in published
         else []
-    )
-    references = (
-        nix.references(scan.releases, published["nix"].retained, flakes, runtime=runtime)
-        if "nix" in published
-        else {}
     )
     missing_bootstrap: set[str] = (
         {name for name in names if name not in UNSIGNED and len(published[name].bootstrap) != 2}
@@ -426,7 +422,7 @@ def _reconcile(
                 all_rejected = prior_rejected | rejected[name]
                 retained = current.retained
                 if name == "nix":
-                    retained = nix.with_references(retained, references)
+                    retained = nix.with_references(retained, targets)
                 if all_rejected == prior_rejected and retained is current.retained:
                     step(report, name, "unchanged")
                     continue
@@ -487,10 +483,11 @@ def _reconcile(
                         out=root / name,
                         report=report,
                     )
-                    if built.outputs:
+                    if built.retained is not retained:
                         _check_writes(retained, built)
                         prepared.append(built)
-                        step(report, name, "signed metadata")
+                        if built.outputs:
+                            step(report, name, "signed metadata")
                         continue
                 if not inspected[name]:
                     if name in missing_bootstrap:
@@ -522,7 +519,7 @@ def _reconcile(
                 if prepared[-1].outputs and name not in UNSIGNED:
                     step(report, name, "signed metadata")
             prepared = [
-                replace(item, retained=nix.with_references(item.retained, references))
+                replace(item, retained=nix.with_references(item.retained, targets))
                 if item.format == "nix"
                 else item
                 for item in prepared

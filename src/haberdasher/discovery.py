@@ -452,6 +452,18 @@ def tag_commit(repository: str, tag: str, runtime: Runtime) -> str | None:
     raise DiscoveryFailure(f"{repository}: tag {tag} nests too many annotated tags")
 
 
+def compare_status(repository: str, base: str, head: str, runtime: Runtime) -> str:
+    """How head relates to base: identical, ahead, behind, or diverged."""
+    value = _json_request(
+        f"repos/{repository}/compare/{quote(base, safe='')}...{quote(head, safe='')}?per_page=1",
+        runtime,
+    )
+    status = _mapping(value).get("status")
+    if status not in ("identical", "ahead", "behind", "diverged"):
+        raise DiscoveryFailure(f"{repository}: invalid comparison of {base} and {head}")
+    return cast(str, status)
+
+
 def cosign_identity(repository: str, tag: str) -> str:
     """Pin a release workflow certificate to the source repository and the release tag."""
     owner, name = repository_name(repository).split("/")

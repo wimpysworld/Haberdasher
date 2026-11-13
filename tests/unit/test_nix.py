@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 
+from haberdasher import site
 from haberdasher.core import JSONValue, ObjectRef, RetainedFormat, atomic_write
 from haberdasher.formats import nix
 from haberdasher.runtime import Runtime, private_workspace
@@ -108,6 +109,10 @@ def retained(*items: nix.Package, extra: tuple[ObjectRef, ...] = ()) -> Retained
     return RetainedFormat("nix", (), tuple(item.identity for item in items), metadata, objects)
 
 
+def releases(*items: tuple[str, str]) -> list[nix.Target]:
+    return [nix.Target(repo, tag, f"github:{repo}/{tag}", False) for repo, tag in items]
+
+
 def test_pending_evaluates_new_tags_and_skips_sources_without_packages(tmp_path: Path) -> None:
     published = package(tag="v0.9.0")
     answers = {
@@ -137,7 +142,7 @@ def test_pending_evaluates_new_tags_and_skips_sources_without_packages(tmp_path:
     with private_workspace(tmp_path) as runtime:
         calls = fake(runtime, lambda argv: answers.get(argv[2]))
         found = nix.pending(
-            (
+            releases(
                 ("wimpysworld/tool", "v0.9.0"),
                 ("wimpysworld/tool", "v1.0.0"),
                 ("wimpysworld/new", "v2.0.0"),
@@ -168,7 +173,7 @@ def test_pending_does_nothing_when_every_tag_is_published(tmp_path: Path) -> Non
     with private_workspace(tmp_path) as runtime:
         calls = fake(runtime, lambda argv: None)
         state = retained(package())
-        assert nix.pending((("wimpysworld/tool", "v1.0.0"),), state, runtime=runtime) == []
+        assert nix.pending(releases(("wimpysworld/tool", "v1.0.0")), state, runtime=runtime) == []
     assert calls == []
 
 
@@ -229,31 +234,99 @@ def test_validate_retained_rejects_incomplete_or_foreign_state() -> None:
         package(path="/nix/store/short-tool")
 
 
+RELEASE = "a" * 40
+CHILD = "b" * 40
+
+
 @pytest.mark.parametrize(
-    ("commits", "expected"),
+    ("latest", "status", "flake", "reference"),
     [
-        ({"v1.0.0": "a" * 40, "latest": "a" * 40}, "github:wimpysworld/tool/latest"),
-        ({"v1.0.0": "a" * 40, "latest": "b" * 40}, "github:wimpysworld/tool"),
-        ({"v1.0.0": "a" * 40}, "github:wimpysworld/tool"),
+        (RELEASE, "identical", "github:wimpysworld/tool/v1.0.0", "github:wimpysworld/tool/latest"),
+        (CHILD, "ahead", f"github:wimpysworld/tool/{CHILD}", "github:wimpysworld/tool/latest"),
+        (CHILD, "behind", "github:wimpysworld/tool/v1.0.0", "github:wimpysworld/tool"),
+        (CHILD, "diverged", "github:wimpysworld/tool/v1.0.0", "github:wimpysworld/tool"),
+        (None, None, "github:wimpysworld/tool/v1.0.0", "github:wimpysworld/tool"),
     ],
-    ids=["latest-at-release", "latest-elsewhere", "latest-missing"],
+    ids=["latest-identical", "latest-ahead", "latest-behind", "latest-diverged", "latest-missing"],
 )
-def test_flake_reference_follows_latest_only_at_the_release_commit(
-    monkeypatch: pytest.MonkeyPatch, commits: dict[str, str], expected: str
+def test_target_builds_latest_at_or_after_the_release_and_the_page_follows_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    latest: str | None,
+    status: str | None,
+    flake: str,
+    reference: str,
 ) -> None:
+    compared: list[tuple[str, str]] = []
+
     def tag_commit(repository: str, tag: str, runtime: object) -> str | None:
-        assert repository == "wimpysworld/tool"
-        return commits.get(tag)
+        assert (repository, tag) == ("wimpysworld/tool", "latest")
+        return latest
+
+    def compare_status(repository: str, base: str, head: str, runtime: object) -> str:
+        compared.append((base, head))
+        assert status is not None
+        return status
 
     monkeypatch.setattr(nix.discovery, "tag_commit", tag_commit)
-    releases = [("wimpysworld/tool", "v1.0.0"), ("wimpysworld/bare", "v1")]
-    found = nix.references(releases, retained(package()), [], runtime=cast(Runtime, None))
-    assert found == {"wimpysworld/tool": expected}
-    recorded = nix.with_references(retained(package()), found)
+    monkeypatch.setattr(nix.discovery, "compare_status", compare_status)
+    found = nix.targets([("wimpysworld/tool", "v1.0.0")], runtime=cast(Runtime, None))
+    assert found == [nix.Target("wimpysworld/tool", "v1.0.0", flake, reference.endswith("/latest"))]
+    assert compared == ([] if latest is None else [("v1.0.0", latest)])
+
+    with private_workspace(tmp_path) as runtime:
+        calls = fake(
+            runtime,
+            lambda argv: (
+                done(argv, evaluation(tool=("tool", "1.0.0", TOOL)))
+                if argv[2] == f"{flake}#packages.x86_64-linux"
+                else None
+            ),
+        )
+        [built] = nix.pending(found, retained(), runtime=runtime)
+        assert (built.flake, built.version, built.tag) == (flake, "1.0.0", "v1.0.0")
+        assert nix.pending(found, retained(built), runtime=runtime) == []
+    assert len(calls) == 2
+
+    recorded = nix.with_references(retained(built), found)
     nix.validate_retained(recorded)
-    assert nix.flake_references(recorded) == found
+    assert nix.flake_references(recorded) == {"wimpysworld/tool": reference}
+    assert site.nix_projects(recorded, {})[0].flake == reference
     assert nix.with_references(recorded, found) is recorded
     assert nix.with_references(retained(), found) == retained()
+
+
+def test_page_follows_latest_only_when_the_release_is_built_from_its_commit() -> None:
+    ahead = nix.Target("wimpysworld/tool", "v1.0.0", f"github:wimpysworld/tool/{CHILD}", True)
+    older = package()
+    references = nix.flake_references(nix.with_references(retained(older), [ahead]))
+    assert references == {"wimpysworld/tool": "github:wimpysworld/tool"}
+
+
+def test_a_moved_latest_tag_replaces_the_package_of_the_same_release(tmp_path: Path) -> None:
+    old = replace(package(), flake=f"github:wimpysworld/tool/{RELEASE}")
+    moved = [nix.Target("wimpysworld/tool", "v1.0.0", f"github:wimpysworld/tool/{CHILD}", True)]
+    lines: list[str] = []
+    with private_workspace(tmp_path) as runtime:
+        for path in (OTHER, TOOL):
+            fake(
+                runtime, lambda argv, path=path: done(argv, evaluation(tool=("tool", "1.0", path)))
+            )
+            [found] = nix.pending(moved, retained(old), runtime=runtime)
+            assert (found.flake, found.path) == (moved[0].flake, path)
+        calls = fake(runtime, lambda argv: None)
+        state = retained(old)
+        prepared = nix.prepare(
+            [found],
+            state,
+            runtime=runtime,
+            signer=cast(SigningSession, Signer(runtime.root)),
+            out=runtime.root / "out",
+            report=lines.append,
+        )
+    assert calls == [] and lines == [] and not prepared.outputs
+    assert prepared.retained.metadata["packages"] == [found.record()]
+    assert set(prepared.retained.objects) == set(state.objects)
 
 
 def test_validate_retained_rejects_a_foreign_flake_reference() -> None:

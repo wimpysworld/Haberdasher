@@ -195,7 +195,7 @@ Or add the flake input to `flake.nix`, and use `inputs.<repo>.packages.${pkgs.st
 inputs.<repo>.url = "github:<owner>/<repo>";
 ```
 
-The cache serves a package only when your evaluation gives the same store path that Haberdasher built at the release tag. The page shows `github:<owner>/<repo>/latest` when the project moves a `latest` tag to the release commit, so `nix flake update` locks the commit that Haberdasher built. Otherwise the page shows `github:<owner>/<repo>`, and the cache serves packages only while the default branch matches the release. Do not set `inputs.<repo>.inputs.nixpkgs.follows`, because a different nixpkgs gives a different store path, and Nix then builds locally. The cache holds `x86_64-linux` store paths only. In tests, pass `--max-jobs 0` to verify that Nix substitutes from the signed binary cache instead of building locally.
+The cache serves a package only when your evaluation gives the same store path that Haberdasher built. Haberdasher builds the release tag, or the commit of the `latest` tag when that tag is at or ahead of the release tag. The page shows `github:<owner>/<repo>/latest` when Haberdasher built the commit that `latest` names, so `nix flake update` locks the commit that Haberdasher built. Otherwise the page shows `github:<owner>/<repo>`, and the cache serves packages only while the default branch matches the release. Do not set `inputs.<repo>.inputs.nixpkgs.follows`, because a different nixpkgs gives a different store path, and Nix then builds locally. The cache holds `x86_64-linux` store paths only. In tests, pass `--max-jobs 0` to verify that Nix substitutes from the signed binary cache instead of building locally.
 
 To remove a package and the binary cache configuration:
 

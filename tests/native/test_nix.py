@@ -64,16 +64,21 @@ def test_flake_packages_substitute_from_the_signed_cache_and_reruns_do_nothing(
             ("wimpysworld/empty", "v1"): empty_flake(root / "empty"),
         }
 
-        def local(repository: str, tag: str) -> str:
-            return f"path:{flakes[(repository, tag)]}"
+        child = flake(root / "tool-v1-child", "hd-tool", "1.0.0", "hd-tool-v1-child")
+        moved = {"latest": True, "ahead": False}
 
-        monkeypatch.setattr(nix, "flake_ref", local)
-        moved = {"latest": True}
+        def targets(releases: Sequence[tuple[str, str]], *, runtime: object) -> list[nix.Target]:
+            return [
+                nix.Target(
+                    repository,
+                    tag,
+                    f"path:{child if moved['ahead'] and repository == TOOL else flakes[(repository, tag)]}",
+                    moved["latest"],
+                )
+                for repository, tag in releases
+            ]
 
-        def flake_input(repository: str, tag: str, runtime: object) -> str:
-            return f"github:{repository}/latest" if moved["latest"] else f"github:{repository}"
-
-        monkeypatch.setattr(nix, "flake_input", flake_input)
+        monkeypatch.setattr(nix, "targets", targets)
         monkeypatch.setenv("HD_SIGNING_KEY_FILE", str(key.key_file))
         storage = StoragePolicy("local", {"nix": str(root / "public/nix")})
         bucket = Path(storage.public["nix"])
@@ -146,7 +151,21 @@ def test_flake_packages_substitute_from_the_signed_cache_and_reruns_do_nothing(
         assert f"nix profile add github:{TOOL}#hd-tool" in page
         assert "the default branch matches the release" in page
 
-        # 4. A new release tag adds its package and keeps the earlier one.
+        # 4. A latest tag ahead of the release rebuilds the same release from its commit, and
+        # replaces the package record. The earlier store path stays in the cache.
+        moved.update(latest=True, ahead=True)
+        ahead, _, _ = reconcile("v1.0.0")
+        assert ahead.changed and ahead.packages == 0
+        [tool_child] = nix.published(state.read(store, "nix").retained)
+        assert tool_child.flake == f"path:{child}" and tool_child.path != tool_v1.path
+        assert narinfo(bucket, tool_v1.path).is_file()
+        page = html.unescape(re.sub(r"<[^>]+>", "", (bucket / site.PAGE_KEY).read_text()))
+        assert f"nix profile add github:{TOOL}/latest#hd-tool" in page
+        rerun, _, calls = reconcile("v1.0.0")
+        assert not rerun.changed and not any("build" in call for call in calls)
+
+        # 5. A new release tag adds its package and keeps the earlier one.
+        moved["ahead"] = False
         second, _, _ = reconcile("v2.0.0")
         assert second.changed and second.packages == 1
         tool_v2 = nix.published(state.read(store, "nix").retained)[-1]
@@ -156,6 +175,7 @@ def test_flake_packages_substitute_from_the_signed_cache_and_reruns_do_nothing(
         with serve(root / "public") as http:
             client = NixClient(fixtures, "trusted", http.url("nix"), nix_pub)
             client.substitute_and_run(tool_v1.path, "hd-tool", "hd-tool-v1")
+            client.substitute_and_run(tool_child.path, "hd-tool", "hd-tool-v1-child")
             client.substitute_and_run(tool_v2.path, "hd-tool", "hd-tool-v2")
             requests = http.requests()
             for suffix in ("/nix/nix-cache-info", ".narinfo", ".nar.zst"):
@@ -164,7 +184,7 @@ def test_flake_packages_substitute_from_the_signed_cache_and_reruns_do_nothing(
                     for item in requests
                 )
 
-            # 5. A client without the key, or with another key, rejects every narinfo.
+            # 6. A client without the key, or with another key, rejects every narinfo.
             with signing_session(
                 fixtures, expected_fingerprint=wrong.fingerprint, key_file=wrong.key_file
             ) as other:
@@ -175,7 +195,7 @@ def test_flake_packages_substitute_from_the_signed_cache_and_reruns_do_nothing(
                 assert result.returncode != 0 and UNTRUSTED in result.stderr.decode()
                 assert not denied.real_store_path(tool_v2.path).exists()
 
-        # 6. Unsigned, re-signed, resized, and corrupted cache objects fail closed.
+        # 7. Unsigned, re-signed, resized, and corrupted cache objects fail closed.
         for kind in ("unsigned", "sig", "narsize", "nar"):
             bad = root / f"bad-{kind}"
             shutil.copytree(bucket, bad / "nix")

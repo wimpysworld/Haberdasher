@@ -942,3 +942,17 @@ def test_tag_commit_follows_annotated_tags_and_reports_missing_tags(tmp_path: Pa
     assert discovery.tag_commit("example/tool", "missing", runtime) is None
     with pytest.raises(DiscoveryFailure, match="invalid object"):
         discovery.tag_commit("example/tool", "bad", runtime)
+
+
+def test_compare_status_reports_how_latest_relates_to_the_release_tag(tmp_path: Path) -> None:
+    head = "c" * 40
+    runtime = TagRefs(
+        tmp_path,
+        {
+            f"repos/example/tool/compare/v1.0.0...{head}?per_page=1": {"status": "ahead"},
+            f"repos/example/tool/compare/v2.0.0...{head}?per_page=1": {"status": "odd"},
+        },
+    )
+    assert discovery.compare_status("example/tool", "v1.0.0", head, runtime) == "ahead"
+    with pytest.raises(DiscoveryFailure, match="invalid comparison"):
+        discovery.compare_status("example/tool", "v2.0.0", head, runtime)

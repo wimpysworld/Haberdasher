@@ -92,11 +92,13 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
   Give a GUI executable a Start Menu shortcut and a console executable a `bin` entry, from the PE subsystem field.
 - For Nix, publish only a signed HTTP binary cache (`nix-cache-info` with `Priority: 41` and `WantMassQuery: 1`, `<hash>.narinfo`, and `nar/<hash>.nar.zst`).
   Build the `packages.<system>` outputs of each project's own flake at its latest release tag, `github:<owner>/<repo>/<tag>`, for the publisher's host system only.
+  When the GitHub compare API shows the `latest` tag ahead of the release tag, build at the commit that `latest` names, `github:<owner>/<repo>/<commit>`, instead.
+  When `latest` moves ahead again within the same release, rebuild and replace the package record of that identity. Keep the earlier cache objects.
   Ignore a `default` package that duplicates a named package. Take the identity from the derivation `pname`, the release tag without a leading `v`, and the system.
   A flake cannot see its tag, so keep the derivation `version` in the inventory as well.
   Skip a project without a flake or host packages, a package whose `meta.platforms` excludes the host, and a package whose build fails, with one line each. Do not fail the run.
   Upload only the store paths that `cache.nixos.org` does not sign. Record the tag and flake of each package in the inventory, so unchanged reruns build nothing.
-  Show `github:<owner>/<repo>/latest` on the page when the `latest` tag is at the release tag commit, and `github:<owner>/<repo>` otherwise. Resolve both tags on each run and record the reference in the inventory.
+  Show `github:<owner>/<repo>/latest` on the page when the packages of the release are built from the commit that `latest` names, and `github:<owner>/<repo>` otherwise. Resolve `latest` on each run and record the reference in the inventory.
   Do not generate flakes or recipes, and do not serve a flake repository. Nix fetches locked Git revisions with shallow fetches, which dumb HTTP cannot serve.
 
 ## Testing

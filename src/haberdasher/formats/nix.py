@@ -128,45 +128,59 @@ def _mapping(value: JSONValue, label: str = "metadata mapping") -> dict[str, JSO
     return value
 
 
-def flake_ref(repository: str, tag: str) -> str:
-    """The flake of a source at its release tag."""
-    return f"github:{repository}/{tag}"
+@dataclass(frozen=True)
+class Target:
+    """The flake to build for the latest release of one source."""
+
+    repository: str
+    tag: str
+    flake: str
+    # True when the flake is at the commit that the `latest` tag names.
+    latest: bool
 
 
-def flake_input(repository: str, tag: str, runtime: Runtime) -> str:
-    """The flake reference that the page shows.
+def target(repository: str, tag: str, runtime: Runtime) -> Target:
+    """The release tag, or the commit of the `latest` tag when it is at or after the release.
 
-    It follows the `latest` tag when that tag is at the release commit, so a lock file holds
-    the commit that the cache serves. Otherwise it follows the default branch.
+    Consumers follow `latest` without `follows`, so the cache serves them only when it
+    holds a build of that commit. Pin the commit, not the moving tag.
     """
-    commit = discovery.tag_commit(repository, tag, runtime)
-    if commit is not None and discovery.tag_commit(repository, "latest", runtime) == commit:
-        return f"github:{repository}/latest"
-    return f"github:{repository}"
+    flake = f"github:{repository}/{tag}"
+    commit = discovery.tag_commit(repository, "latest", runtime)
+    if commit is None:
+        return Target(repository, tag, flake, False)
+    match discovery.compare_status(repository, tag, commit, runtime):
+        case "identical":
+            return Target(repository, tag, flake, True)
+        case "ahead":
+            return Target(repository, tag, f"github:{repository}/{commit}", True)
+        case _:
+            return Target(repository, tag, flake, False)
 
 
-def references(
-    releases: Sequence[tuple[str, str]],
-    retained: RetainedFormat,
-    new: Sequence[Package],
-    *,
-    runtime: Runtime,
-) -> dict[str, str]:
-    """The flake reference of each source with published or new packages, at its release tag."""
-    sources = {item.repository for item in (*published(current(retained)), *new)}
-    return {
-        repository: flake_input(repository, tag, runtime)
-        for repository, tag in releases
-        if repository in sources
-    }
+def targets(releases: Sequence[tuple[str, str]], *, runtime: Runtime) -> list[Target]:
+    return [target(repository, tag, runtime) for repository, tag in releases]
 
 
-def with_references(retained: RetainedFormat, found: dict[str, str]) -> RetainedFormat:
-    """Record the flake reference of each source that has published packages."""
-    sources = {item.repository for item in published(retained)}
-    chosen: dict[str, JSONValue] = {
-        repository: found[repository] for repository in sorted(found) if repository in sources
-    }
+def with_references(retained: RetainedFormat, found: Sequence[Target]) -> RetainedFormat:
+    """Record the flake reference that the page shows for each source with published packages.
+
+    It is the `latest` tag when every package of the release is built from the commit that
+    `latest` names, so a lock file holds the commit that the cache serves. Otherwise it is the
+    default branch.
+    """
+    items = published(retained)
+    chosen: dict[str, JSONValue] = {}
+    for item in sorted(found, key=lambda value: value.repository):
+        if not any(package.repository == item.repository for package in items):
+            continue
+        flakes = {
+            package.flake
+            for package in items
+            if (package.repository, package.tag) == (item.repository, item.tag)
+        }
+        follows = item.latest and flakes == {item.flake}
+        chosen[item.repository] = f"github:{item.repository}" + ("/latest" if follows else "")
     metadata = {key: value for key, value in retained.metadata.items() if key != "references"}
     if chosen:
         metadata["references"] = chosen
@@ -257,23 +271,27 @@ def _evaluate(flake: str, system: str, runtime: Runtime) -> dict[str, JSONValue]
 
 
 def pending(
-    releases: Sequence[tuple[str, str]],
+    found_targets: Sequence[Target],
     retained: RetainedFormat,
     *,
     runtime: Runtime,
     report: Report = quiet,
 ) -> list[Package]:
-    """Evaluate the flake of each new release tag. Skip a source without packages with one line."""
+    """Evaluate each target flake that no published package was built from.
+
+    Skip a source without packages with one line. A package of the same release from another
+    commit replaces the published one.
+    """
     known = published(retained)
-    tags = {(item.repository, item.tag) for item in known}
-    paths = {item.identity: item.path for item in known}
-    todo = [(repository, tag) for repository, tag in releases if (repository, tag) not in tags]
+    built = {(item.repository, item.tag, item.flake) for item in known}
+    prior = {item.identity: item for item in known}
+    todo = [item for item in found_targets if (item.repository, item.tag, item.flake) not in built]
     if not todo:
         return []
     system = host_system(runtime)
     result: list[Package] = []
-    for repository, tag in todo:
-        flake = flake_ref(repository, tag)
+    for chosen in todo:
+        repository, tag, flake = chosen.repository, chosen.tag, chosen.flake
         found = _evaluate(flake, system, runtime)
         if isinstance(found, str):
             step(report, "nix", f"skipped {repository} {tag}: {found}")
@@ -313,10 +331,10 @@ def pending(
                     f"skipped {repository} {tag} {item.attribute}: meta.platforms excludes {system}",
                 )
                 continue
-            prior = paths.get(item.identity)
-            if prior == item.path:
+            old = prior.get(item.identity)
+            if old is not None and (old.path, old.flake) == (item.path, item.flake):
                 continue
-            if prior is not None:
+            if old is not None and (old.tag != item.tag or old.flake == item.flake):
                 step(
                     report,
                     "nix",
@@ -464,17 +482,19 @@ def prepare(
     stubs: dict[str, dict[str, JSONValue]] = {}
     built: list[Package] = []
     for item in new:
-        target = f"{item.flake}#packages.{item.system}.{item.attribute}"
+        # The cache already serves this store path, so only the package record changes.
+        if item.narinfo in old_refs:
+            built.append(item)
+            continue
+        installable = f"{item.flake}#packages.{item.system}.{item.attribute}"
         result = runtime.run(
-            _command("build", "--no-link", "--print-out-paths", target), timeout=BUILD_TIMEOUT
+            _command("build", "--no-link", "--print-out-paths", installable), timeout=BUILD_TIMEOUT
         )
         if result.returncode or item.path not in result.stdout.decode(errors="replace").split():
             label = f"{item.repository} {item.tag} {item.attribute}"
             step(report, "nix", f"skipped {label}: the build failed")
             continue
         built.append(item)
-        if item.narinfo in old_refs:
-            continue
         paths, entries = _closure(runtime, item.path, set(old_refs))
         exports |= paths
         stubs.update(entries)
@@ -520,7 +540,10 @@ def prepare(
         outputs.append(
             OutputObject(ref, staged[key], "replace" if prior else "create", etag, len(outputs))
         )
-    items = [*published(state), *built]
+    # A rebuild of a release from another commit replaces its package record. The objects of
+    # the earlier store path stay in the bucket.
+    replaced = {item.identity for item in built}
+    items = [*(item for item in published(state) if item.identity not in replaced), *built]
     metadata: dict[str, JSONValue] = {
         "public_key": public_value,
         "fingerprint": signer.fingerprint,
