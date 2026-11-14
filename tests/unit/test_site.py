@@ -491,10 +491,8 @@ def test_nix_page_trusts_the_cache_once_and_installs_from_each_flake() -> None:
     assert page.count("inputs.tailor.inputs.nixpkgs.follows") == 1
     assert "sudo sed -i '/nix\\.wimpys\\.world/d' /etc/nix/nix.conf" in cmds
     assert "packages.git" not in page
-    assert (
-        '<span class="name">nar/<span class="meta">1 NAR archive, content-addressed</span></span>'
-        in page
-    )
+    card = page[page.index('<aside class="hero-card"') : page.index("</aside>")]
+    assert "<dt>Files</dt>" not in card and 'id="files-h"' not in page and "nar/" not in page
     assert page.count("only while the default branch matches the release") == 1
 
     latest = "github:wimpysworld/tailor/latest"
@@ -515,3 +513,17 @@ def test_nix_page_of_the_generated_flake_inventory_has_no_packages() -> None:
     page = render("nix", state.Published("nix", None, "d" * 64, (), retained, None))
     assert "This repository has no packages yet." in page
     assert site.nix_projects(retained, {}) == []
+
+
+def test_brew_pages_name_mac_processors_and_other_pages_keep_architectures() -> None:
+    assert site.architecture_labels("brew", ("arm", "intel")) == "Apple Silicon, Intel"
+    assert site.architecture_labels("brew", ("universal",)) == "Apple Silicon, Intel"
+    assert site.architecture_labels("brew", ("intel",)) == "Intel"
+    assert site.architecture_labels("scoop", ("arm64", "x64")) == "arm64, x64"
+    history = (
+        asset("brew", "tailor", "arm", "1", {"desc": "Tool"}, repository="o/tailor"),
+        asset("brew", "tailor", "intel", "1", {"desc": "Tool"}, repository="o/tailor"),
+    )
+    page = render("brew", published("brew", history, (ref("brew", "Casks/tailor.rb", 900),)))
+    assert "<dt>Architectures</dt><dd>Apple Silicon, Intel</dd>" in page
+    assert "<small>Apple Silicon, Intel</small>" in page and 'id="files-h"' in page

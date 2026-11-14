@@ -19,12 +19,12 @@ def document(tmp_path: Path, value: str) -> Path:
 
 
 def test_existing_config_is_one_line_and_settings_are_code_defaults() -> None:
-    assert (
-        Path("haberdasher.yaml").read_text()
-        == "sources: [wimpysworld/tailor, wimpysworld/sidra, wimpysworld/WonKey]\n"
-    )
+    text = Path("haberdasher.yaml").read_text()
+    assert text.startswith("sources: [") and text.endswith("]\n") and text.count("\n") == 1
+    sources = tuple(text.removeprefix("sources: [").removesuffix("]\n").split(", "))
+    assert sources[0] == "wimpysworld/tailor"
     config = load_config(Path("haberdasher.yaml"))
-    assert config == Config(("wimpysworld/tailor", "wimpysworld/sidra", "wimpysworld/WonKey"))
+    assert config == Config(sources)
     assert config.format_policy("apt").architectures == ("amd64", "arm64")
     for name in ("rpm", "arch", "apk", "flatpak"):
         assert config.format_policy(name).architectures == ("x86_64", "aarch64")

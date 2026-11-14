@@ -627,7 +627,6 @@ FOLDS: dict[str, dict[str, tuple[str, str]]] = {
     "flatpak": {"objects": ("OSTree object", "content-addressed")},
     "brew": {TAP: ("file", "Git repository")},
     "scoop": {REPO.split("/")[0]: ("file", "Git repository")},
-    "nix": {"nar": ("NAR archive", "content-addressed")},
 }
 
 
@@ -702,6 +701,22 @@ def _names(project: Project) -> list[str]:
     return list(dict.fromkeys(package for package, _, _ in project.packages))
 
 
+# Homebrew names Mac processors arm and intel, and a fat binary universal.
+_MAC_PROCESSORS = {
+    "arm": ("Apple Silicon",),
+    "intel": ("Intel",),
+    "universal": ("Apple Silicon", "Intel"),
+}
+
+
+def architecture_labels(name: str, architectures: Iterable[str]) -> str:
+    """The architectures as the page shows them: Homebrew's by processor, the others as named."""
+    items = sorted(architectures)
+    if name == "brew":
+        items = sorted({label for a in items for label in _MAC_PROCESSORS.get(a, (a,))})
+    return ", ".join(items)
+
+
 def _panel(
     name: str,
     project: Project,
@@ -717,7 +732,7 @@ def _panel(
     tiles = "".join(
         f"<div><dt>Package</dt><dd>{_e(package)}</dd></div>"
         f"<div><dt>Version</dt><dd>{_e(version)}</dd></div>"
-        f"<div><dt>Architectures</dt><dd>{_e(', '.join(architectures))}</dd></div>"
+        f"<div><dt>Architectures</dt><dd>{_e(architecture_labels(name, architectures))}</dd></div>"
         for package, version, architectures in project.packages
     )
     quick = ""
@@ -793,8 +808,12 @@ def _tab(project: Project, *, selected: bool) -> str:
     )
 
 
-def _hero_card(entries: Sequence[Project], sizes: Mapping[str, int], now: datetime | None) -> str:
-    architectures = sorted({a for p in entries for _, _, items in p.packages for a in items})
+def _hero_card(
+    name: str, entries: Sequence[Project], sizes: Mapping[str, int], now: datetime | None
+) -> str:
+    architectures = architecture_labels(
+        name, {a for p in entries for _, _, items in p.packages for a in items}
+    )
     packages = sum(len(project.packages) for project in entries)
     date = (
         ""
@@ -806,11 +825,14 @@ def _hero_card(entries: Sequence[Project], sizes: Mapping[str, int], now: dateti
         '<aside class="hero-card" aria-labelledby="hero-card-h">'
         '<h2 id="hero-card-h">In this repository</h2>'
         f"<dl><div><dt>Projects</dt><dd>{len(entries)}</dd></div>"
-        f"<div><dt>Packages</dt><dd>{packages} <small>{_e(', '.join(architectures))}</small>"
-        "</dd></div>"
-        f"<div><dt>Files</dt><dd>{len(sizes)} <small>{size_text(sum(sizes.values()))}</small>"
-        "</dd></div>"
-        f"<div><dt>Published</dt><dd>{date}</dd></div></dl></aside>"
+        f"<div><dt>Packages</dt><dd>{packages} <small>{_e(architectures)}</small></dd></div>"
+        + (
+            ""
+            if name == "nix"
+            else f"<div><dt>Files</dt><dd>{len(sizes)} "
+            f"<small>{size_text(sum(sizes.values()))}</small></dd></div>"
+        )
+        + f"<div><dt>Published</dt><dd>{date}</dd></div></dl></aside>"
     )
 
 
@@ -897,7 +919,22 @@ def _document(
         if now is None
         else f'<time datetime="{now.date().isoformat()}">{now.day} {now:%B %Y}</time>'
     )
-    total = sum(sizes.values())
+    # The Nix cache holds hash-named objects that nobody browses, so its page lists no files.
+    listing = (
+        ""
+        if name == "nix"
+        else f"""<section class="section" aria-labelledby="files-h">
+<div class="wrap">
+<h2 id="files-h">Published files</h2>
+<div class="tree-wrap">
+<div class="tree-sum"><span><strong>{plural(len(sizes), "file")}</strong> in this repository\
+</span><span><strong>{size_text(sum(sizes.values()))}</strong> total</span></div>
+{tree(name, sizes)}
+</div>
+</div>
+</section>
+"""
+    )
     return f"""<!doctype html>
 <html lang="en" class="no-js">
 <head>
@@ -927,7 +964,7 @@ def _document(
 <p class="lead">{lead_html}</p>
 <ul class="works" aria-label="Works with"><li class="label">Works with</li>{works}</ul>
 </div>
-{_hero_card(entries, sizes, now)}
+{_hero_card(name, entries, sizes, now)}
 </div></div>
 </header>
 <main id="main">
@@ -941,17 +978,7 @@ def _document(
 <div class="body">{removal}</div></details>
 </div>
 </section>
-<section class="section" aria-labelledby="files-h">
-<div class="wrap">
-<h2 id="files-h">Published files</h2>
-<div class="tree-wrap">
-<div class="tree-sum"><span><strong>{plural(len(sizes), "file")}</strong> in this repository\
-</span><span><strong>{size_text(total)}</strong> total</span></div>
-{tree(name, sizes)}
-</div>
-</div>
-</section>
-</main>
+{listing}</main>
 <footer class="foot"><div class="wrap">
 <p>Last published {published_on}.</p>
 <p>Published with <a href="{SOURCE}">Haberdasher</a>.</p>

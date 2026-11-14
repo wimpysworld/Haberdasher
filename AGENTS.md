@@ -152,6 +152,8 @@ Treat the eight package buckets as public:
 - Reject any object that holds a private key header, an OpenPGP secret-key packet, or a Nix Ed25519 secret key before it is uploaded.
 - Permit one public `index.html` per bucket, generated from the published inventory and package metadata.
   It holds the setup steps, one install section per project, and a fold-down tree of the published files.
+  The Nix page has no file tree, because nobody browses hash-named cache objects.
+  The Homebrew page names the architectures Apple Silicon and Intel.
   Theme it with µCSS and each distribution's colours, fonts, and logos, loaded from pinned jsDelivr URLs with SRI hashes.
   Do not add per-project settings for the page.
 - Permit one public `og.png` preview image per bucket, which the page names in its OpenGraph and Twitter tags.
