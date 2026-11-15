@@ -691,10 +691,18 @@ def _mark(path: str, classes: str = "") -> str:
     )
 
 
+def project_title(repository: str) -> tuple[str, str]:
+    """The display name and the fragment id of a project, from its repository name.
+
+    Each hyphenated word starts with a capital, so jive-vocals shows as Jive Vocals.
+    """
+    short = repository.split("/")[1]
+    words = (word[:1].upper() + word[1:] for word in short.split("-"))
+    return " ".join(words), short.lower()
+
+
 def _title(project: Project) -> tuple[str, str]:
-    """The display name and the fragment id of a project, from its repository name."""
-    short = project.repository.split("/")[1]
-    return short[:1].upper() + short[1:], short.lower()
+    return project_title(project.repository)
 
 
 def _names(project: Project) -> list[str]:

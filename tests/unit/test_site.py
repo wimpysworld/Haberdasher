@@ -515,6 +515,12 @@ def test_nix_page_of_the_generated_flake_inventory_has_no_packages() -> None:
     assert site.nix_projects(retained, {}) == []
 
 
+def test_project_titles_capitalise_each_hyphenated_word_and_keep_the_anchor() -> None:
+    assert site.project_title("linuxmatters/jive-vocals") == ("Jive Vocals", "jive-vocals")
+    assert site.project_title("wimpysworld/WonKey") == ("WonKey", "wonkey")
+    assert site.project_title("wimpysworld/tailor") == ("Tailor", "tailor")
+
+
 def test_brew_pages_name_mac_processors_and_other_pages_keep_architectures() -> None:
     assert site.architecture_labels("brew", ("arm", "intel")) == "Apple Silicon, Intel"
     assert site.architecture_labels("brew", ("universal",)) == "Apple Silicon, Intel"
