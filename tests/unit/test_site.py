@@ -519,6 +519,7 @@ def test_project_titles_capitalise_each_hyphenated_word_and_keep_the_anchor() ->
     assert site.project_title("linuxmatters/jive-vocals") == ("Jive Vocals", "jive-vocals")
     assert site.project_title("wimpysworld/WonKey") == ("WonKey", "wonkey")
     assert site.project_title("wimpysworld/tailor") == ("Tailor", "tailor")
+    assert site.project_title("wimpysworld/ia-get") == ("ia-get", "ia-get")
 
 
 def test_brew_pages_name_mac_processors_and_other_pages_keep_architectures() -> None:

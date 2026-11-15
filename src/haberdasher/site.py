@@ -695,10 +695,13 @@ def project_title(repository: str) -> tuple[str, str]:
     """The display name and the fragment id of a project, from its repository name.
 
     Each hyphenated word starts with a capital, so jive-vocals shows as Jive Vocals.
+    A word of two letters or fewer is an abbreviation, so ia-get keeps its own form.
     """
     short = repository.split("/")[1]
-    words = (word[:1].upper() + word[1:] for word in short.split("-"))
-    return " ".join(words), short.lower()
+    words = short.split("-")
+    if any(len(word) <= 2 for word in words):
+        return short, short.lower()
+    return " ".join(word[:1].upper() + word[1:] for word in words), short.lower()
 
 
 def _title(project: Project) -> tuple[str, str]:
