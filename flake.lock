@@ -43,11 +43,11 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1794570706,
-        "narHash": "sha256-qIf8OhMSIUHo8d3h6eJGDiifGPJT/Y12CrdRjWsGXzE=",
+        "lastModified": 1794576134,
+        "narHash": "sha256-9RGsptfrxqYAnDA7lVTtM27yT+ZnpapIbuMCAIsYEVg=",
         "owner": "wimpysworld",
         "repo": "tailor",
-        "rev": "bfb52955cf20af69db1b7774518b72e7df010191",
+        "rev": "0e736036b28b7ec3e7437e66499098d329b7f737",
         "type": "github"
       },
       "original": {
