@@ -46,7 +46,9 @@ NAMESPACES = {
 }
 MAX_XML = 32 * 1024 * 1024
 IDENTITY_QUERY = "%{NAME}|%{EPOCHNUM}|%{VERSION}|%{RELEASE}|%{ARCH}"
-SIGNATURE_QUERY = "%{SIGPGP:pgpsig}|%{SIGGPG:pgpsig}|%{RSAHEADER:pgpsig}|%{DSAHEADER:pgpsig}"
+SIGNATURE_QUERY = (
+    "%{SIGPGP:pgpsig}|%{SIGGPG:pgpsig}|%{RSAHEADER:pgpsig}|%{DSAHEADER:pgpsig}|[%{OPENPGP:pgpsig}]"
+)
 ENTRIES = ("repodata/repomd.xml", "repodata/repomd.xml.asc")
 
 
@@ -85,7 +87,7 @@ def _identity(path: Path, runtime: Runtime) -> NativeIdentity:
 
 def _signed(path: Path, runtime: Runtime) -> bool:
     signatures = _run(runtime, ["rpm", "-qp", "--qf", SIGNATURE_QUERY, str(path)])
-    return signatures != b"(none)|(none)|(none)|(none)"
+    return any(part not in (b"", b"(none)") for part in signatures.split(b"|"))
 
 
 def _unsign(source: Path, target: Path, runtime: Runtime) -> str:
@@ -96,7 +98,13 @@ def _unsign(source: Path, target: Path, runtime: Runtime) -> str:
         _run(runtime, ["rpmsign", "--delsign", str(target)])
         if _signed(target, runtime):
             raise RpmFailure("RPM upstream signature removal failed")
-    _run(runtime, ["rpmkeys", "--checksig", str(target)])
+    with tempfile.TemporaryDirectory(prefix="rpmdb-", dir=runtime.root) as directory:
+        args = ["--dbpath", directory]
+        _run(runtime, ["rpm", *args, "--initdb"])
+        _run(
+            runtime,
+            ["rpmkeys", *args, "--define", "_pkgverify_level digest", "--checksig", str(target)],
+        )
     return status
 
 
@@ -418,7 +426,7 @@ def _verify_package(path: Path, keyring: Path, runtime: Runtime) -> None:
                 str(path),
             ],
         )
-        if not re.search(rb"RSA/SHA256 Signature.*: OK", status):
+        if not re.search(rb"RSA/SHA256 [Ss]ignature.*: OK", status):
             raise RpmFailure("RPM needs a valid RSA/SHA256 package signature")
 
 

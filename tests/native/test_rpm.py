@@ -380,7 +380,7 @@ def test_signed_upstream_rpm_installs_with_haberdasher_trust() -> None:
         app = build(runtime, "hd-proof-app", "1", "application-v1", number=2)
         app = upstream_sign(runtime, app, upstream_signer)
         assert upstream_key.fingerprint[-16:].lower().encode() in checked(
-            runtime, "rpm", "-qp", "--qf", "%{RSAHEADER:pgpsig}", str(app.local_path)
+            runtime, "rpm", "-qp", "--qf", rpm.SIGNATURE_QUERY, str(app.local_path)
         )
         inspected = [
             rpm.inspect(asset, policy=POLICY, runtime=runtime, out=runtime.root / "inspect")
@@ -413,7 +413,7 @@ def test_signed_upstream_rpm_installs_with_haberdasher_trust() -> None:
             if output.ref.object_class == "package" and output.ref.sha256 == signed.published_sha256
         )
         signature = checked(
-            runtime, "rpm", "-qp", "--qf", "%{RSAHEADER:pgpsig}", str(package.local_path)
+            runtime, "rpm", "-qp", "--qf", rpm.SIGNATURE_QUERY, str(package.local_path)
         )
         assert key.fingerprint[-16:].lower().encode() in signature
         assert upstream_key.fingerprint[-16:].lower().encode() not in signature
