@@ -202,6 +202,7 @@ class Releases:
         self.release_id = 1
         self.next_id = 1
         self.fail = False
+        self.homepages: dict[str, str | None] = {}
 
     def new_release(self) -> None:
         """Mark a new release as the latest, so that discovery no longer reads the old one."""
@@ -252,7 +253,9 @@ class Releases:
         scanned = discovery.DiscoveryState(
             records, (*(source for source, _ in self.assets), sums), config.sources
         )
-        return discovery.CompleteScan(scanned, records, ())
+        return discovery.CompleteScan(
+            scanned, records, (), (), tuple(sorted(self.homepages.items()))
+        )
 
     def verify(
         self,
@@ -908,3 +911,62 @@ def test_preview_image_and_logo_are_written_only_when_missing_or_changed(
     assert publish.write_images(store, "arch") == 1
     assert store.writes == ["arch/logo.svg"]
     assert fixture.path("arch", site.LOGO_KEY).read_bytes() == site.logo("arch")
+
+
+def test_homepages_update_inventory_and_page_without_rebuilding_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    assert "homepages" not in fixture.inventory()
+    assert 'class="home"' not in fixture.path("arch", site.PAGE_KEY).read_text()
+    counts = (fixture.adapter.inspections, fixture.adapter.prepares)
+
+    fixture.releases.homepages = {
+        "test/project": "https://project.example/",
+        "other/unused": "https://unused.example/",
+    }
+    raw_inventory = fixture.path("arch", state.INVENTORY_KEY).read_bytes()
+    raw_page = fixture.path("arch", site.PAGE_KEY).read_bytes()
+    raw_image = fixture.path("arch", site.IMAGE_KEY).read_bytes()
+    raw_logo = fixture.path("arch", site.LOGO_KEY).read_bytes()
+
+    def answer(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        if request.full_url.endswith(site.IMAGE_KEY):
+            return io.BytesIO(raw_image)
+        if request.full_url.endswith(site.LOGO_KEY):
+            return io.BytesIO(raw_logo)
+        return io.BytesIO(raw_page if request.full_url.endswith(site.PAGE_KEY) else raw_inventory)
+
+    scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
+    with patch.object(urllib.request, "urlopen", side_effect=answer):
+        cli.show_plan(
+            scan, fixture.config, fixture.runtime, {"arch": "https://pkg.example"}, FINGERPRINT
+        )
+    assert "arch  would write index.html" in capsys.readouterr().out
+
+    result = fixture.run()
+    assert result.changed and result.repositories == ("arch",) and result.pages == ("arch",)
+    assert fixture.store.writes == [
+        "arch/haberdasher.lock",
+        "arch/haberdasher.json",
+        "arch/index.html",
+    ]
+    assert (fixture.adapter.inspections, fixture.adapter.prepares) == counts
+    assert fixture.inventory()["homepages"] == {"test/project": "https://project.example/"}
+    page = fixture.path("arch", site.PAGE_KEY).read_text()
+    assert '<a class="home" href="https://project.example/">project.example' in page
+    assert 'aria-label="test/project on GitHub"' in page
+    assert fixture.run() == publish.RunResult(False, 0, 0)
+
+    fixture.releases.homepages = {"test/project": None}
+    cleared = fixture.run()
+    assert cleared.changed and cleared.repositories == ("arch",) and cleared.pages == ("arch",)
+    assert "homepages" not in fixture.inventory()
+    assert 'class="home"' not in fixture.path("arch", site.PAGE_KEY).read_text()
+
+    tampered = fixture.inventory()
+    tampered["homepages"] = {"test/project": "javascript:alert(1)"}
+    with pytest.raises(state.StateError, match="inventory is invalid"):
+        state.decode_published("arch", core.canonical_json(tampered), None)

@@ -21,11 +21,13 @@ from haberdasher.core import (
     WriteReceipt,
     atomic_write,
     canonical_json,
+    homepage_url,
     public_inventory,
     safe_key,
     safe_path,
     sha256_file,
     utc_now,
+    validate_homepages,
 )
 
 HASH = "a" * 64
@@ -198,3 +200,32 @@ def test_invalid_records(tmp_path: Path) -> None:
         OutputObject(ref(), tmp_path, "create", "unexpected", 0)
     with pytest.raises(ValueError):
         NativeIdentity("apt", "name", "amd64", "1", epoch=True)
+
+
+def test_homepage_validation_and_public_inventory_allow_list(tmp_path: Path) -> None:
+    assert (
+        homepage_url("  HTTPS://tool.example/docs/ ", "owner/repo") == "https://tool.example/docs/"
+    )
+    assert homepage_url("https://github.com/OWNER/REPO/", "owner/repo") is None
+    assert homepage_url("https://user:pass@tool.example/", "owner/repo") is None
+    assert homepage_url("https://tool.example:bad/", "owner/repo") is None
+    assert homepage_url("https://tool.example/a b", "owner/repo") is None
+    assert validate_homepages({"owner/repo": "https://tool.example/"}) == {
+        "owner/repo": "https://tool.example/"
+    }
+    for bad in (
+        ["not-a-mapping"],
+        {"bad repo": "https://tool.example/"},
+        {"owner/repo": "javascript:alert(1)"},
+        {"owner/repo": "https://github.com/owner/repo"},
+        {"owner/repo": " https://tool.example/ "},
+    ):
+        with pytest.raises(ValueError):
+            validate_homepages(bad)
+    asset = admitted(tmp_path / "pkg.deb")
+    without = public_inventory([asset], [ref()])
+    assert "homepages" not in without
+    with_home = public_inventory([asset], [ref()], {"owner/repo": "https://tool.example/"})
+    assert with_home["homepages"] == {"owner/repo": "https://tool.example/"}
+    with pytest.raises(ValueError):
+        public_inventory([asset], [ref()], {"owner/repo": "ftp://tool.example/"})

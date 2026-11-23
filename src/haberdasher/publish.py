@@ -318,6 +318,32 @@ def _unchanged(published: Published) -> PreparedFormat:
     return PreparedFormat(published.format, published.retained, (), published.retained.objects)
 
 
+def _bucket_repositories(name: str, retained: RetainedFormat) -> set[str]:
+    if name == "nix":
+        return {item.repository for item in nix.published(retained)}
+    return {asset.inspected.verified.source.repository for asset in retained.accepted_history}
+
+
+def merged_homepages(
+    name: str,
+    retained: RetainedFormat,
+    prior: Mapping[str, str],
+    scan: discovery.CompleteScan,
+) -> dict[str, str]:
+    """The current repository homepages for the projects published in one bucket."""
+    repositories = _bucket_repositories(name, retained)
+    scanned = dict(scan.homepages)
+    result: dict[str, str] = {}
+    for repository in sorted(repositories):
+        if repository in scanned:
+            url = scanned[repository]
+            if url is not None:
+                result[repository] = url
+        elif repository in prior:
+            result[repository] = prior[repository]
+    return result
+
+
 def _with_rejected(retained: RetainedFormat, digests: set[str]) -> RetainedFormat:
     accepted = {asset.inspected.verified.sha256 for asset in retained.accepted_history}
     merged = sorted((state.rejected(retained.metadata) | digests) - accepted)
@@ -477,9 +503,11 @@ def _reconcile(
                 retained = current.retained
                 if name == "nix":
                     retained = nix.with_references(retained, targets)
+                homepages = merged_homepages(name, retained, current.homepages, scan)
                 if (
                     all_rejected == prior_rejected
                     and retained is current.retained
+                    and homepages == dict(current.homepages)
                     and not current.moved
                 ):
                     step(report, name, "unchanged")
@@ -490,7 +518,7 @@ def _reconcile(
                     (),
                     current.retained.objects,
                 )
-                data = state.inventory(item, current.bootstrap, current)
+                data = state.inventory(item, current.bootstrap, current, homepages=homepages)
                 state.write_inventory(store, current, data)
                 step(report, name, f"wrote {state.INVENTORY_KEY}")
                 count += 1
@@ -604,7 +632,8 @@ def _reconcile(
         for item in prepared:
             current = published[item.format]
             bootstrap = tuple(ref for ref in bootstrap_objects if ref.bucket_role == item.format)
-            data = state.inventory(item, bootstrap, current)
+            homepages = merged_homepages(item.format, item.retained, current.homepages, scan)
+            data = state.inventory(item, bootstrap, current, homepages=homepages)
             outputs = (
                 *(output for output in bootstrap_outputs if output.ref.bucket_role == item.format),
                 *item.outputs,

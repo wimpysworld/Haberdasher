@@ -3,6 +3,8 @@ from __future__ import annotations
 import html
 import re
 import struct
+import types
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from html.parser import HTMLParser
@@ -59,10 +61,21 @@ def ref(name: str, key: str, size: int) -> ObjectRef:
 
 
 def published(
-    name: str, history: tuple[AdmittedAsset, ...], objects: tuple[ObjectRef, ...] = ()
+    name: str,
+    history: tuple[AdmittedAsset, ...],
+    objects: tuple[ObjectRef, ...] = (),
+    homepages: Mapping[str, str] | None = None,
 ) -> state.Published:
     retained = RetainedFormat(name, history, (), {}, objects)
-    return state.Published(name, None, "d" * 64, objects, retained, None)
+    return state.Published(
+        name,
+        None,
+        "d" * 64,
+        objects,
+        retained,
+        None,
+        homepages=types.MappingProxyType(dict(homepages or {})),
+    )
 
 
 def apt(
@@ -163,6 +176,8 @@ def test_projects_show_the_newest_release_with_its_architectures_and_command() -
 def test_one_project_renders_one_panel_without_tabs() -> None:
     page = render("apt", published("apt", apt("Text")))
     assert 'class="tablist"' not in page
+    assert 'class="install-grid"' not in page
+    assert "<select" not in page
     assert '<section class="panel" id="tool" aria-labelledby="tool-title">' in page
     assert '<h3 id="tool-title">Tool</h3>' in page
 
@@ -173,15 +188,20 @@ def test_several_projects_render_tabs_with_the_first_selected() -> None:
         *apt("Alpha text", "1.5", 1, package="alpha", repository="other/alpha", name="rpm"),
     )
     page = render("rpm", published("rpm", history))
+    assert '<div class="install-grid">' in page
+    assert '<select id="project-select" class="project-select" aria-label="Project">' in page
+    assert '<option value="alpha" selected>Alpha (1.5)</option>' in page
+    assert '<option value="zed">Zed (2.0)</option>' in page
     assert '<ul class="tablist" aria-label="Projects">' in page
     assert (
         '<a id="alpha-tab" href="#alpha" class="is-selected" data-panel="alpha">'
         '<span class="t-name">Alpha</span><span class="t-ver">1.5</span></a>'
     ) in page
     assert '<a id="zed-tab" href="#zed" class="" data-panel="zed">' in page
-    assert '<section class="panel" id="alpha"' in page
+    assert '<div class="panels"><section class="panel" id="alpha"' in page
     assert '<section class="panel is-hidden" id="zed"' in page
     assert 'name="pm-alpha"' in page and 'name="pm-zed"' in page
+    assert "aria-orientation','vertical'" in page and "scrollIntoView" in page
 
 
 def test_hero_card_counts_the_published_package_files() -> None:
@@ -534,3 +554,38 @@ def test_brew_pages_name_mac_processors_and_other_pages_keep_architectures() -> 
     page = render("brew", published("brew", history, (ref("brew", "Casks/tailor.rb", 900),)))
     assert "<dt>Architectures</dt><dd>Apple Silicon, Intel</dd>" in page
     assert "<small>Apple Silicon, Intel</small>" in page and 'id="files-h"' in page
+
+
+def test_project_links_prioritise_homepage_and_fall_back_to_github() -> None:
+    history = (
+        *apt("Vocals", "1.0", 1, package="jive-vocals", repository="linuxmatters/jive-vocals"),
+        *apt("Other", "1.0", 1, package="other", repository="example/other"),
+    )
+    item = published(
+        "apt",
+        history,
+        homepages={
+            "linuxmatters/jive-vocals": "https://linuxmatters.sh/jive/vocals/",
+            "example/other": "https://github.com/example/other/",
+        },
+    )
+    page = render("apt", item)
+    assert (
+        '<div class="project-links">'
+        '<a class="home" href="https://linuxmatters.sh/jive/vocals/">'
+        'linuxmatters.sh/jive/vocals<svg class="ext"'
+    ) in page
+    assert (
+        '<a class="gh" href="https://github.com/linuxmatters/jive-vocals" '
+        'aria-label="linuxmatters/jive-vocals on GitHub">'
+    ) in page
+    assert "GitHub</a></div>" in page
+    assert (
+        '<div class="project-links"><a class="gh" href="https://github.com/example/other">'
+    ) in page
+    assert "example/other on GitHub</a></div>" in page
+    plain_digest = site.page(
+        "apt", published("apt", history), fingerprint=FINGERPRINT, fallback={}, now=NOW
+    )[1]
+    with_home_digest = site.page("apt", item, fingerprint=FINGERPRINT, fallback={}, now=NOW)[1]
+    assert plain_digest != with_home_digest

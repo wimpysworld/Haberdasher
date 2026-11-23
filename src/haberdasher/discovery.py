@@ -23,6 +23,7 @@ from haberdasher.core import (
     VerifiedAsset,
     canonical_json,
     digest,
+    homepage_url,
     integer,
     plural,
     quiet,
@@ -156,6 +157,8 @@ class CompleteScan(Record):
     pending: tuple[DiscoveredAsset, ...]
     # The repository and tag of each latest release, for the Nix flakes at those tags.
     releases: tuple[tuple[str, str], ...] = ()
+    # The normalised HTTP(S) homepage URL of each scanned repository, or None when absent.
+    homepages: tuple[tuple[str, str | None], ...] = ()
 
 
 def _asset_key(source: SourceAsset) -> tuple[str, int]:
@@ -538,6 +541,7 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
     """Scan the GitHub "Latest" release of each source. Any failed request raises."""
     assets: dict[tuple[str, int], SourceAsset] = {}
     groups: dict[str, tuple[str, tuple[SourceAsset, ...], bool] | None] = {}
+    homepages: list[tuple[str, str | None]] = []
     for repository in config.sources:
         value = _json_request(f"repos/{repository}/releases/latest", runtime, missing=_MISSING)
         if value is _MISSING:
@@ -546,6 +550,8 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
         release = _mapping(value)
         if not _eligible(release):
             raise DiscoveryFailure(f"{repository}: the latest release is a draft or pre-release")
+        repo_meta = _mapping(_json_request(f"repos/{repository}", runtime))
+        homepages.append((repository, homepage_url(repo_meta.get("homepage"), repository)))
         release_id = integer(release.get("id"), "release ID", 1)
         names: set[str] = set()
         release_assets: list[SourceAsset] = []
@@ -657,7 +663,9 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
             line += f", {missing} without a checksum (skipped)"
         report(line)
     state = DiscoveryState(tuple(records), tuple(assets.values()), config.sources)
-    return CompleteScan(state, tuple(checksummed), tuple(pending), tuple(releases))
+    return CompleteScan(
+        state, tuple(checksummed), tuple(pending), tuple(releases), tuple(homepages)
+    )
 
 
 def verify_asset(

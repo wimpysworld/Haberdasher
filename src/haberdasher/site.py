@@ -15,7 +15,14 @@ from urllib.parse import quote, urlsplit
 
 from haberdasher import state
 from haberdasher.config import PUBLIC
-from haberdasher.core import AdmittedAsset, ObjectRef, RetainedFormat, plural, size_text
+from haberdasher.core import (
+    AdmittedAsset,
+    ObjectRef,
+    RetainedFormat,
+    homepage_url,
+    plural,
+    size_text,
+)
 from haberdasher.formats import nix
 from haberdasher.formats.apt import COMPONENT, SUITE
 from haberdasher.formats.brew import TAP, TAP_NAME
@@ -26,6 +33,7 @@ from haberdasher.site_style import (
     BRAND_MARK,
     CHEVRON,
     COPY_ICON,
+    EXTERNAL_ICON,
     FILE_ICON,
     FOLDER_CLOSED,
     FOLDER_OPEN,
@@ -482,6 +490,7 @@ class Project:
     description: str
     packages: tuple[tuple[str, str, tuple[str, ...]], ...]
     flake: str = ""
+    homepage: str | None = None
 
 
 def _package(asset: AdmittedAsset) -> tuple[str, str]:
@@ -492,13 +501,18 @@ def _package(asset: AdmittedAsset) -> tuple[str, str]:
     return identity.name, (f"{identity.epoch}:{version}" if identity.epoch else version)
 
 
-def projects(history: Sequence[AdmittedAsset], fallback: Mapping[str, str]) -> list[Project]:
+def projects(
+    history: Sequence[AdmittedAsset],
+    fallback: Mapping[str, str],
+    homepages: Mapping[str, str] | None = None,
+) -> list[Project]:
     """One entry per source repository, with the packages of its newest published release."""
     own = descriptions([history])
     releases: dict[str, int] = {}
     for asset in history:
         source = asset.inspected.verified.source
         releases[source.repository] = max(releases.get(source.repository, 0), source.release_id)
+    links = homepages or {}
     result: list[Project] = []
     for repository in sorted(releases, key=str.lower):
         packages: dict[tuple[str, str], set[str]] = {}
@@ -516,16 +530,22 @@ def projects(history: Sequence[AdmittedAsset], fallback: Mapping[str, str]) -> l
                     (name, version, tuple(sorted(architectures)))
                     for (name, version), architectures in sorted(packages.items())
                 ),
+                homepage=homepage_url(links.get(repository), repository),
             )
         )
     return result
 
 
-def nix_projects(retained: RetainedFormat, fallback: Mapping[str, str]) -> list[Project]:
+def nix_projects(
+    retained: RetainedFormat,
+    fallback: Mapping[str, str],
+    homepages: Mapping[str, str] | None = None,
+) -> list[Project]:
     """One entry per source repository, with the flake packages of its newest published tag."""
     items = nix.published(retained)
     tags = {item.repository: item.tag for item in items}
     flakes = nix.flake_references(retained)
+    links = homepages or {}
     result: list[Project] = []
     for repository in sorted(tags, key=str.lower):
         chosen = [
@@ -544,6 +564,7 @@ def nix_projects(retained: RetainedFormat, fallback: Mapping[str, str]) -> list[
                     for (attribute, version), found in sorted(systems.items())
                 ),
                 flakes.get(repository, f"github:{repository}"),
+                homepage=homepage_url(links.get(repository), repository),
             )
         )
     return result
@@ -728,6 +749,27 @@ def architecture_labels(name: str, architectures: Iterable[str]) -> str:
     return ", ".join(items)
 
 
+def _homepage_label(url: str) -> str:
+    return re.sub(r"^https?://", "", url, flags=re.IGNORECASE).rstrip("/")
+
+
+def _project_links(project: Project) -> str:
+    home = homepage_url(project.homepage, project.repository)
+    github_url = f"https://github.com/{_e(project.repository)}"
+    if home is not None:
+        return (
+            '<div class="project-links">'
+            f'<a class="home" href="{_e(home)}">{_e(_homepage_label(home))}{EXTERNAL_ICON}</a>'
+            f'<a class="gh" href="{github_url}" aria-label="{_e(project.repository)} on GitHub">'
+            f"{GITHUB_ICON}GitHub</a></div>"
+        )
+    return (
+        '<div class="project-links">'
+        f'<a class="gh" href="{github_url}">{GITHUB_ICON}{_e(project.repository)} on GitHub</a>'
+        "</div>"
+    )
+
+
 def _panel(
     name: str,
     project: Project,
@@ -790,8 +832,7 @@ def _panel(
         f'<section class="panel{" is-hidden" if hidden else ""}" id="{_e(slug)}" '
         f'aria-labelledby="{_e(slug)}-title">'
         f'<div class="project"><div><h3 id="{_e(slug)}-title">{_e(title)}</h3>{about}'
-        f'<a class="gh" href="https://github.com/{_e(project.repository)}">{GITHUB_ICON}'
-        f"{_e(project.repository)} on GitHub</a></div>"
+        f"{_project_links(project)}</div>"
         f'<dl class="pkg">{tiles}</dl></div>'
         f'{quick}<ol class="steps">{"".join(items)}</ol></section>'
     )
@@ -817,6 +858,13 @@ def _tab(project: Project, *, selected: bool) -> str:
         f'class="{"is-selected" if selected else ""}" data-panel="{_e(slug)}">'
         f'<span class="t-name">{_e(title)}</span><span class="t-ver">{_e(versions)}</span></a></li>'
     )
+
+
+def _option(project: Project, *, selected: bool) -> str:
+    title, slug = _title(project)
+    versions = ", ".join(dict.fromkeys(version for _, version, _ in project.packages))
+    label = f"{title} ({versions})" if versions else title
+    return f'<option value="{_e(slug)}"{" selected" if selected else ""}>{_e(label)}</option>'
 
 
 def _hero_card(
@@ -904,23 +952,35 @@ def _document(
     )
     history = published.retained.accepted_history
     entries = (
-        nix_projects(published.retained, fallback) if name == "nix" else projects(history, fallback)
+        nix_projects(published.retained, fallback, published.homepages)
+        if name == "nix"
+        else projects(history, fallback, published.homepages)
     )
     refs = {ref.key for ref in published.objects}
     sizes = files(published.objects)
-    tabs = (
-        '<ul class="tablist" aria-label="Projects">'
-        + "".join(_tab(project, selected=i == 0) for i, project in enumerate(entries))
-        + "</ul>"
-        if len(entries) > 1
-        else ""
-    )
     raw_key = published.retained.metadata.get("public_key")
     public_key = raw_key if isinstance(raw_key, str) and raw_key else None
     panels = "".join(
         _panel(name, project, history, refs, fingerprint, hidden=i > 0, public_key=public_key)
         for i, project in enumerate(entries)
     ) or _empty(name)
+    if len(entries) > 1:
+        picker = (
+            '<label class="vh" for="project-select">Project</label>'
+            '<select id="project-select" class="project-select" aria-label="Project">'
+            + "".join(_option(project, selected=i == 0) for i, project in enumerate(entries))
+            + "</select>"
+        )
+        tabs = (
+            '<ul class="tablist" aria-label="Projects">'
+            + "".join(_tab(project, selected=i == 0) for i, project in enumerate(entries))
+            + "</ul>"
+        )
+        install_body = (
+            f'<div class="install-grid">{picker}{tabs}<div class="panels">{panels}</div></div>'
+        )
+    else:
+        install_body = panels
     caption, commands = remove(name, fingerprint)
     removal = (f"<p>{_e(caption)}</p>" if caption else "") + "".join(
         _code(command, variant) for variant, command in commands
@@ -982,8 +1042,7 @@ def _document(
 <section class="section" aria-labelledby="install-h">
 <div class="wrap">
 <h2 id="install-h">Install</h2>
-{tabs}
-{panels}
+{install_body}
 <details class="fold"><summary id="remove-h">{CHEVRON}Remove this repository\
 <span class="sub">Undo the steps above</span></summary>
 <div class="body">{removal}</div></details>

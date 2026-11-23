@@ -76,6 +76,52 @@ def repository_name(value: object) -> str:
     return value
 
 
+def homepage_url(value: object, repository: str) -> str | None:
+    """Normalise an HTTP(S) project homepage URL, or None when absent or equal to the GitHub repo."""
+    repository = repository_name(repository)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if (
+        not stripped
+        or any(unicodedata.category(c) in {"Cc", "Cf", "Cs"} for c in stripped)
+        or any(c.isspace() for c in stripped)
+    ):
+        return None
+    parsed = urlsplit(stripped)
+    scheme = parsed.scheme.lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    if (
+        parsed.hostname.lower() == "github.com"
+        and port is None
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.path.rstrip("/").lower() == f"/{repository.lower()}"
+    ):
+        return None
+    return f"{scheme}{stripped[len(scheme) :]}"
+
+
+def validate_homepages(value: object) -> dict[str, str]:
+    """Validate a public mapping of repository names to normalised HTTP(S) homepage URLs."""
+    if not isinstance(value, Mapping):
+        raise ValueError("Expected a homepages mapping")
+    result: dict[str, str] = {}
+    for key, item in cast(Mapping[object, object], value).items():
+        repo = repository_name(key)
+        raw = text(item, "homepage URL")
+        normalised = homepage_url(raw, repo)
+        if normalised is None or normalised != raw:
+            raise ValueError("Invalid homepage URL")
+        result[repo] = normalised
+    return dict(sorted(result.items()))
+
+
 def safe_key(value: object) -> str:
     value = text(value, "object key")
     if (
@@ -430,7 +476,9 @@ class WriteReceipt(Record):
 
 
 def public_inventory(
-    assets: Sequence[AdmittedAsset], objects: Sequence[ObjectRef]
+    assets: Sequence[AdmittedAsset],
+    objects: Sequence[ObjectRef],
+    homepages: Mapping[str, str] | None = None,
 ) -> dict[str, JSONValue]:
     entries: list[JSONValue] = []
     for asset in assets:
@@ -452,8 +500,12 @@ def public_inventory(
         )
     if any(ref.object_class in {"inventory", "lock", "page"} for ref in objects):
         raise ValueError("Inventory, lock, and page objects cannot appear in a public inventory")
-    return {
+    result: dict[str, JSONValue] = {
         "schema_version": SCHEMA_VERSION,
         "assets": entries,
         "objects": [json_value(ref) for ref in objects],
     }
+    validated = validate_homepages(homepages) if homepages is not None else {}
+    if validated:
+        result["homepages"] = dict(validated)
+    return result

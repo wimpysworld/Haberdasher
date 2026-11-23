@@ -41,6 +41,7 @@ class RecordedGitHub(Runtime):
         bodies = cast(dict[str, str], json.loads((FIXTURES / "downloads.json").read_bytes()))
         self.bodies = {name: body.encode() for name, body in bodies.items()}
         self.latest: dict[str, int] = {self.repository: 20}
+        self.repositories: dict[str, dict[str, object]] = {}
         self.calls: list[tuple[str, ...]] = []
         self.fail: str | None = None
         self.failure_mode = "nonzero"
@@ -92,6 +93,9 @@ class RecordedGitHub(Runtime):
                     body = b'{"message":"Not Found","status":"404"}'
                     return subprocess.CompletedProcess(argv, 1, body, b"gh: Not Found (HTTP 404)\n")
                 data = canonical_json(next(self.rows(self.latest[repository])))
+            elif endpoint.startswith("repos/") and endpoint.count("/") == 2:
+                repository = endpoint.removeprefix("repos/")
+                data = canonical_json(self.repositories.get(repository, {}))
             elif endpoint in self.pages:
                 data = canonical_json(self.pages[endpoint])
             elif "/tags/" in endpoint:
@@ -956,3 +960,28 @@ def test_compare_status_reports_how_latest_relates_to_the_release_tag(tmp_path: 
     assert discovery.compare_status("example/tool", "v1.0.0", head, runtime) == "ahead"
     with pytest.raises(DiscoveryFailure, match="invalid comparison"):
         discovery.compare_status("example/tool", "v2.0.0", head, runtime)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("  https://tool.example/  ", "https://tool.example/"),
+        ("http://tool.example/docs", "http://tool.example/docs"),
+        ("https://example.github.io/tool", "https://example.github.io/tool"),
+        ("https://github.com/example/tool/wiki", "https://github.com/example/tool/wiki"),
+        ("https://github.com/example/tool", None),
+        ("https://GITHUB.COM/Example/Tool/", None),
+        ("http://github.com/example/tool/", None),
+        ("", None),
+        ("   ", None),
+        (None, None),
+        ("javascript:alert(1)", None),
+        ("tool.example", None),
+    ],
+)
+def test_scan_captures_and_normalises_repository_homepages(
+    github: RecordedGitHub, raw: object, expected: str | None
+) -> None:
+    github.repositories["example/tool"] = {"homepage": raw}
+    result = scan(github)
+    assert result.homepages == (("example/tool", expected),)

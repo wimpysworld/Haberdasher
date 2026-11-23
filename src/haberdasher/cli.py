@@ -6,10 +6,11 @@ import argparse
 import stat
 import sys
 import tempfile
+import types
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -247,7 +248,14 @@ def show_plan(
         step(say, name, f"would copy {plural(count, 'object')} to current keys")
     images, pages = pending_pages(
         {
-            name: published[name]
+            name: replace(
+                published[name],
+                homepages=types.MappingProxyType(
+                    publish.merged_homepages(
+                        name, published[name].retained, published[name].homepages, scan
+                    )
+                ),
+            )
             for name in names
             if name in published and published[name].sha256 is not None
         },
