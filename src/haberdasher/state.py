@@ -285,6 +285,7 @@ class Published:
     record: dict[str, JSONValue] | None = None
     moved: Mapping[str, str] = types.MappingProxyType({})
     homepages: Mapping[str, str] = types.MappingProxyType({})
+    descriptions: Mapping[str, str] = types.MappingProxyType({})
 
     @property
     def bootstrap(self) -> tuple[ObjectRef, ...]:
@@ -393,7 +394,12 @@ def decode_published(name: str, data: bytes, etag: str | None) -> Published:
             tuple(ref for ref in objects if ref.key not in BOOTSTRAP_KEYS),
         )
         homepages = core.validate_homepages(value["homepages"]) if "homepages" in value else {}
-        if core.public_inventory(history, objects, homepages)["assets"] != value.get("assets"):
+        descriptions = (
+            core.validate_descriptions(value["descriptions"]) if "descriptions" in value else {}
+        )
+        if core.public_inventory(history, objects, homepages, descriptions)["assets"] != value.get(
+            "assets"
+        ):
             raise ValueError("Inventory assets differ from inventory state")
     except ValueError as error:
         raise StateError(f"The published {name} inventory is invalid: {error}") from error
@@ -408,6 +414,7 @@ def decode_published(name: str, data: bytes, etag: str | None) -> Published:
         record,
         moved,
         types.MappingProxyType(homepages),
+        types.MappingProxyType(descriptions),
     )
 
 
@@ -522,11 +529,15 @@ def inventory(
     bootstrap: tuple[ObjectRef, ...],
     published: Published,
     homepages: Mapping[str, str] | None = None,
+    descriptions: Mapping[str, str] | None = None,
 ) -> bytes:
     """Build the public inventory, the explicit allow-list plus the state that adapters need."""
     objects = (*prepared.referenced_objects, *bootstrap)
-    resolved = published.homepages if homepages is None else homepages
-    value = core.public_inventory(prepared.retained.accepted_history, objects, resolved)
+    resolved_homepages = published.homepages if homepages is None else homepages
+    resolved_descriptions = published.descriptions if descriptions is None else descriptions
+    value = core.public_inventory(
+        prepared.retained.accepted_history, objects, resolved_homepages, resolved_descriptions
+    )
     if not prepared.outputs and published.record is not None:
         record = dict(published.record)
         metadata = dict(mapping(record.get("metadata", {})))

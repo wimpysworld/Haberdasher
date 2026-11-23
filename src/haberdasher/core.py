@@ -122,6 +122,34 @@ def validate_homepages(value: object) -> dict[str, str]:
     return dict(sorted(result.items()))
 
 
+def repository_description(value: object) -> str | None:
+    """Normalise a repository description, or None when absent or invalid."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped or any(
+        c != "\u200d" and unicodedata.category(c) in {"Cc", "Cf", "Cs"} for c in stripped
+    ):
+        return None
+    return stripped
+
+
+def validate_descriptions(value: object) -> dict[str, str]:
+    """Validate a public mapping of repository names to normalised repository descriptions."""
+    if not isinstance(value, Mapping):
+        raise ValueError("Expected a descriptions mapping")
+    result: dict[str, str] = {}
+    for key, item in cast(Mapping[object, object], value).items():
+        repo = repository_name(key)
+        if not isinstance(item, str) or not item:
+            raise ValueError("Invalid repository description")
+        normalised = repository_description(item)
+        if normalised is None or normalised != item:
+            raise ValueError("Invalid repository description")
+        result[repo] = normalised
+    return dict(sorted(result.items()))
+
+
 def safe_key(value: object) -> str:
     value = text(value, "object key")
     if (
@@ -479,6 +507,7 @@ def public_inventory(
     assets: Sequence[AdmittedAsset],
     objects: Sequence[ObjectRef],
     homepages: Mapping[str, str] | None = None,
+    descriptions: Mapping[str, str] | None = None,
 ) -> dict[str, JSONValue]:
     entries: list[JSONValue] = []
     for asset in assets:
@@ -508,4 +537,7 @@ def public_inventory(
     validated = validate_homepages(homepages) if homepages is not None else {}
     if validated:
         result["homepages"] = dict(validated)
+    validated_descriptions = validate_descriptions(descriptions) if descriptions is not None else {}
+    if validated_descriptions:
+        result["descriptions"] = dict(validated_descriptions)
     return result

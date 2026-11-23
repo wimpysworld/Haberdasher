@@ -21,6 +21,7 @@ from haberdasher.core import (
     RetainedFormat,
     homepage_url,
     plural,
+    repository_description,
     size_text,
 )
 from haberdasher.formats import nix
@@ -450,40 +451,6 @@ def remove(name: str, fingerprint: str) -> tuple[str, list[Command]]:
             )
 
 
-def _field(pattern: str, value: object) -> str:
-    match = re.search(pattern, value, re.MULTILINE) if isinstance(value, str) else None
-    return " ".join(html.unescape(match[1]).split()) if match else ""
-
-
-def description(asset: AdmittedAsset) -> str:
-    """The one-line package description from native package metadata."""
-    metadata = asset.inspected.metadata
-    match asset.inspected.identity.format:
-        case "apt":
-            return _field(r"^Description: ?(.*)$", metadata.get("record"))
-        case "rpm":
-            return _field(r'<rpmTag name="Summary">\s*<string>([^<]*)', metadata.get("header_xml"))
-        case "arch":
-            return _field(r"^%DESC%\n(.*)$", metadata.get("desc"))
-        case "apk":
-            return _field(r"^T:(.*)$", metadata.get("stanza"))
-        case "brew" | "scoop":
-            return _field(r"(.+)", metadata.get("desc"))
-        case _:
-            return _field(r"(.+)", metadata.get("summary"))
-
-
-def descriptions(histories: Iterable[Sequence[AdmittedAsset]]) -> dict[str, str]:
-    """The newest description of each source repository, from the first history that has one."""
-    result: dict[str, str] = {}
-    for history in histories:
-        for asset in reversed(history):
-            text = description(asset)
-            if text:
-                result.setdefault(asset.inspected.verified.source.repository, text)
-    return result
-
-
 @dataclass(frozen=True)
 class Project:
     repository: str
@@ -503,15 +470,15 @@ def _package(asset: AdmittedAsset) -> tuple[str, str]:
 
 def projects(
     history: Sequence[AdmittedAsset],
-    fallback: Mapping[str, str],
+    descriptions: Mapping[str, str] | None = None,
     homepages: Mapping[str, str] | None = None,
 ) -> list[Project]:
     """One entry per source repository, with the packages of its newest published release."""
-    own = descriptions([history])
     releases: dict[str, int] = {}
     for asset in history:
         source = asset.inspected.verified.source
         releases[source.repository] = max(releases.get(source.repository, 0), source.release_id)
+    abouts = descriptions or {}
     links = homepages or {}
     result: list[Project] = []
     for repository in sorted(releases, key=str.lower):
@@ -525,7 +492,7 @@ def projects(
         result.append(
             Project(
                 repository,
-                own.get(repository) or fallback.get(repository, ""),
+                repository_description(abouts.get(repository)) or "",
                 tuple(
                     (name, version, tuple(sorted(architectures)))
                     for (name, version), architectures in sorted(packages.items())
@@ -538,13 +505,14 @@ def projects(
 
 def nix_projects(
     retained: RetainedFormat,
-    fallback: Mapping[str, str],
+    descriptions: Mapping[str, str] | None = None,
     homepages: Mapping[str, str] | None = None,
 ) -> list[Project]:
     """One entry per source repository, with the flake packages of its newest published tag."""
     items = nix.published(retained)
     tags = {item.repository: item.tag for item in items}
     flakes = nix.flake_references(retained)
+    abouts = descriptions or {}
     links = homepages or {}
     result: list[Project] = []
     for repository in sorted(tags, key=str.lower):
@@ -554,11 +522,10 @@ def nix_projects(
         systems: dict[tuple[str, str], set[str]] = {}
         for item in chosen:
             systems.setdefault((item.attribute, item.version), set()).add(item.system)
-        own = next((item.description for item in reversed(chosen) if item.description), "")
         result.append(
             Project(
                 repository,
-                own or fallback.get(repository, ""),
+                repository_description(abouts.get(repository)) or "",
                 tuple(
                     (attribute, version, tuple(sorted(found)))
                     for (attribute, version), found in sorted(systems.items())
@@ -923,7 +890,6 @@ def _document(
     published: state.Published,
     *,
     fingerprint: str,
-    fallback: Mapping[str, str],
     digest: str,
     now: datetime | None,
 ) -> str:
@@ -952,9 +918,9 @@ def _document(
     )
     history = published.retained.accepted_history
     entries = (
-        nix_projects(published.retained, fallback, published.homepages)
+        nix_projects(published.retained, published.descriptions, published.homepages)
         if name == "nix"
-        else projects(history, fallback, published.homepages)
+        else projects(history, published.descriptions, published.homepages)
     )
     refs = {ref.key for ref in published.objects}
     sizes = files(published.objects)
@@ -1065,15 +1031,12 @@ def page(
     published: state.Published,
     *,
     fingerprint: str,
-    fallback: Mapping[str, str],
     now: datetime,
 ) -> tuple[bytes, str]:
     """Return the page and the hash of its content without the publication date."""
 
     def document(digest: str, date: datetime | None) -> bytes:
-        return _document(
-            name, published, fingerprint=fingerprint, fallback=fallback, digest=digest, now=date
-        ).encode()
+        return _document(name, published, fingerprint=fingerprint, digest=digest, now=date).encode()
 
     digest = hashlib.sha256(document("", None)).hexdigest()
     return document(digest, now), digest

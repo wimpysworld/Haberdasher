@@ -27,6 +27,7 @@ from haberdasher.core import (
     integer,
     plural,
     quiet,
+    repository_description,
     repository_name,
     safe_key,
     safe_path,
@@ -159,6 +160,8 @@ class CompleteScan(Record):
     releases: tuple[tuple[str, str], ...] = ()
     # The normalised HTTP(S) homepage URL of each scanned repository, or None when absent.
     homepages: tuple[tuple[str, str | None], ...] = ()
+    # The normalised description of each scanned repository, or None when absent.
+    descriptions: tuple[tuple[str, str | None], ...] = ()
 
 
 def _asset_key(source: SourceAsset) -> tuple[str, int]:
@@ -542,6 +545,7 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
     assets: dict[tuple[str, int], SourceAsset] = {}
     groups: dict[str, tuple[str, tuple[SourceAsset, ...], bool] | None] = {}
     homepages: list[tuple[str, str | None]] = []
+    descriptions: list[tuple[str, str | None]] = []
     for repository in config.sources:
         value = _json_request(f"repos/{repository}/releases/latest", runtime, missing=_MISSING)
         if value is _MISSING:
@@ -552,6 +556,7 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
             raise DiscoveryFailure(f"{repository}: the latest release is a draft or pre-release")
         repo_meta = _mapping(_json_request(f"repos/{repository}", runtime))
         homepages.append((repository, homepage_url(repo_meta.get("homepage"), repository)))
+        descriptions.append((repository, repository_description(repo_meta.get("description"))))
         release_id = integer(release.get("id"), "release ID", 1)
         names: set[str] = set()
         release_assets: list[SourceAsset] = []
@@ -664,7 +669,12 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
         report(line)
     state = DiscoveryState(tuple(records), tuple(assets.values()), config.sources)
     return CompleteScan(
-        state, tuple(checksummed), tuple(pending), tuple(releases), tuple(homepages)
+        state,
+        tuple(checksummed),
+        tuple(pending),
+        tuple(releases),
+        tuple(homepages),
+        tuple(descriptions),
     )
 
 

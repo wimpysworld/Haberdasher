@@ -65,6 +65,7 @@ def published(
     history: tuple[AdmittedAsset, ...],
     objects: tuple[ObjectRef, ...] = (),
     homepages: Mapping[str, str] | None = None,
+    descriptions: Mapping[str, str] | None = None,
 ) -> state.Published:
     retained = RetainedFormat(name, history, (), {}, objects)
     return state.Published(
@@ -75,6 +76,7 @@ def published(
         retained,
         None,
         homepages=types.MappingProxyType(dict(homepages or {})),
+        descriptions=types.MappingProxyType(dict(descriptions or {})),
     )
 
 
@@ -103,7 +105,7 @@ def apt(
 
 
 def render(name: str, item: state.Published, now: datetime = NOW) -> str:
-    return site.page(name, item, fingerprint=FINGERPRINT, fallback={}, now=now)[0].decode()
+    return site.page(name, item, fingerprint=FINGERPRINT, now=now)[0].decode()
 
 
 def commands(page: str) -> list[str]:
@@ -114,7 +116,12 @@ def commands(page: str) -> list[str]:
 
 def test_page_escapes_every_package_value() -> None:
     hostile = '<script>alert("x")</script> & more'
-    item = published("apt", apt(hostile), (ref("apt", 'pool/a "b"/<c>.deb', 10),))
+    item = published(
+        "apt",
+        apt("Package metadata ignored"),
+        (ref("apt", 'pool/a "b"/<c>.deb', 10),),
+        descriptions={"wimpysworld/tool": hostile},
+    )
     page = render("apt", item)
     assert "<script>alert" not in page
     assert (
@@ -162,10 +169,10 @@ def test_projects_show_the_newest_release_with_its_architectures_and_command() -
     other = asset(
         "apt", "helper", "all", "3.0", {"record": "Package: helper\n"}, repository="w/Helper"
     )
-    entries = site.projects((*history, other), {"w/Helper": "From another format"})
+    entries = site.projects((*history, other), {"w/Helper": "From GitHub"})
     assert [(p.repository, p.description, p.packages) for p in entries] == [
-        ("w/Helper", "From another format", (("helper", "3.0", ("all",)),)),
-        ("wimpysworld/tool", "New text", (("tool", "2.0", ("amd64", "arm64")),)),
+        ("w/Helper", "From GitHub", (("helper", "3.0", ("all",)),)),
+        ("wimpysworld/tool", "", (("tool", "2.0", ("amd64", "arm64")),)),
     ]
     page = render("apt", published("apt", (*history, other)))
     assert "sudo apt-get install tool" in commands(page)
@@ -280,26 +287,38 @@ def test_long_tokens_break_only_before_slashes() -> None:
     assert '<span class="tok">--print-architecture)</span>' in page
 
 
-def test_descriptions_come_from_native_metadata() -> None:
+def test_descriptions_come_strictly_from_github_metadata() -> None:
     rpm = asset(
         "rpm",
         "tool",
         "x86_64",
         "1",
-        {"header_xml": '<rpmTag name="Summary">\n\t<string>A &amp; B</string>'},
+        {"header_xml": '<rpmTag name="Summary">\n\t<string>RPM text</string>'},
     )
     arch = asset("arch", "tool", "x86_64", "1-1", {"desc": "%NAME%\ntool\n\n%DESC%\nArch text\n"})
     apk = asset("apk", "tool", "x86_64", "1", {"stanza": "P:tool\nT:Alpine text\n"})
     flatpak = asset(
         "flatpak", "app/world.wimpys.tool/x86_64/stable", "x86_64", "1", {"summary": "Flat"}
     )
-    assert [site.description(item) for item in (rpm, arch, apk, flatpak)] == [
-        "A & B",
-        "Arch text",
-        "Alpine text",
-        "Flat",
-    ]
-    assert site.description(apt("APT text")[0]) == "APT text"
+    github_desc = "GitHub summary \U0001f9d1\u200d\U0001f4bb"
+    for item in (apt("APT text")[0], rpm, arch, apk, flatpak):
+        without = site.projects((item,), {})
+        assert without[0].description == ""
+        page_without = render(
+            item.inspected.identity.format, published(item.inspected.identity.format, (item,))
+        )
+        assert '<p class="desc">' not in page_without
+        with_desc = site.projects((item,), {"wimpysworld/tool": github_desc})
+        assert with_desc[0].description == github_desc
+        page_with = render(
+            item.inspected.identity.format,
+            published(
+                item.inspected.identity.format,
+                (item,),
+                descriptions={"wimpysworld/tool": github_desc},
+            ),
+        )
+        assert f'<p class="desc">{github_desc}</p>' in page_with
     entries = site.projects((flatpak,), {})
     assert entries[0].packages == (("world.wimpys.tool", "1", ("x86_64",)),)
     assert site.install("flatpak", ["world.wimpys.tool"]) == [
@@ -309,9 +328,9 @@ def test_descriptions_come_from_native_metadata() -> None:
 
 def test_content_hash_ignores_only_the_publication_date() -> None:
     item = published("rpm", apt("Text", name="rpm"))
-    first, digest = site.page("rpm", item, fingerprint=FINGERPRINT, fallback={}, now=NOW)
+    first, digest = site.page("rpm", item, fingerprint=FINGERPRINT, now=NOW)
     later, same = site.page(
-        "rpm", item, fingerprint=FINGERPRINT, fallback={}, now=datetime(2027, 1, 2, tzinfo=UTC)
+        "rpm", item, fingerprint=FINGERPRINT, now=datetime(2027, 1, 2, tzinfo=UTC)
     )
     assert digest == same and first != later
     assert site.content_hash(first) == digest
@@ -319,7 +338,7 @@ def test_content_hash_ignores_only_the_publication_date() -> None:
         first.decode()
     )
     assert '<time datetime="2027-01-02">2 January</time> <small>2027</small>' in later.decode()
-    changed = site.page("rpm", item, fingerprint="A" * 40, fallback={}, now=NOW)[1]
+    changed = site.page("rpm", item, fingerprint="A" * 40, now=NOW)[1]
     assert changed != digest
     assert site.content_hash(b"<html></html>") is None and site.content_hash(None) is None
 
@@ -493,10 +512,22 @@ def test_nix_page_trusts_the_cache_once_and_installs_from_each_flake() -> None:
         },
         objects,
     )
-    item = state.Published("nix", None, "d" * 64, objects, retained, None)
+    item = state.Published(
+        "nix",
+        None,
+        "d" * 64,
+        objects,
+        retained,
+        None,
+        descriptions=types.MappingProxyType({"wimpysworld/tailor": "GitHub Tailor description"}),
+    )
     page = render("nix", item)
     cmds = commands(page)
-    assert '<p class="desc">Nix tool</p>' in page and "0.5.0" not in page
+    assert '<p class="desc">GitHub Tailor description</p>' in page and "0.5.0" not in page
+    assert "Nix tool" not in page
+    assert '<p class="desc">' not in render(
+        "nix", state.Published("nix", None, "d" * 64, objects, retained, None)
+    )
     assert any('extra-substituters = [ "https://nix.wimpys.world" ];' in c for c in cmds)
     assert any(
         'extra-trusted-public-keys = [ "nix.wimpys.world-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" ];'
@@ -584,8 +615,29 @@ def test_project_links_prioritise_homepage_and_fall_back_to_github() -> None:
         '<div class="project-links"><a class="gh" href="https://github.com/example/other">'
     ) in page
     assert "example/other on GitHub</a></div>" in page
-    plain_digest = site.page(
-        "apt", published("apt", history), fingerprint=FINGERPRINT, fallback={}, now=NOW
-    )[1]
-    with_home_digest = site.page("apt", item, fingerprint=FINGERPRINT, fallback={}, now=NOW)[1]
+    plain_digest = site.page("apt", published("apt", history), fingerprint=FINGERPRINT, now=NOW)[1]
+    with_home_digest = site.page("apt", item, fingerprint=FINGERPRINT, now=NOW)[1]
     assert plain_digest != with_home_digest
+
+
+def test_themes_match_vendor_link_and_focus_colours_and_avoid_panel_tabindex() -> None:
+    expected = {
+        "apt": ("#C34113", "#E95420", "#F99B78"),
+        "rpm": ("#A60000", "#EE0000", "#FF7A7A"),
+        "scoop": ("#B52B6E", "#D9488F", "#F77FB5"),
+        "brew": ("#745626", "#A8700F", "#F7C96C"),
+        "arch": ("#005F96", "#1793D1", "#00B6F9"),
+        "apk": ("#0D597F", "#3D92C9", "#7FC0E3"),
+        "flatpak": ("#1A5FB4", "#4A90D9", "#99C1F1"),
+        "nix": ("#2D5299", "#5277C3", "#7EBAE4"),
+    }
+    for name, tokens in expected.items():
+        page = render(name, published(name, ()))
+        for token in tokens:
+            assert token.lower() in page.lower(), (name, token)
+        assert "tabIndex=0" not in page
+        assert ".panel{scroll-margin-top:1rem}" in page
+        assert "minmax(11.5rem,1.35fr) minmax(5.5rem,.65fr) minmax(11rem,1.2fr)" in page
+        if name == "flatpak":
+            assert "--hd-header-bg:var(--hd-bg)" in page
+            assert "--hd-header-bg:#1a1622" in page

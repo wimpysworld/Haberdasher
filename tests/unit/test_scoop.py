@@ -237,14 +237,12 @@ def test_manifest_gives_a_gui_app_a_shortcut(tmp_path: Path) -> None:
 
 
 def test_empty_page_shows_the_setup_command() -> None:
-    page, _ = site.page(
-        "scoop", state.unpublished("scoop"), fingerprint="A" * 40, fallback={}, now=NOW
-    )
+    page, _ = site.page("scoop", state.unpublished("scoop"), fingerprint="A" * 40, now=NOW)
     text = re.sub(r"<[^>]+>", "", page.decode())
     assert "No Windows packages are published yet." in text
     assert "https://scoop.wimpys.world/wimpysworld/bucket.git" in text
     assert "scoop bucket rm wimpysworld" in text
-    apt, _ = site.page("apt", state.unpublished("apt"), fingerprint="A" * 40, fallback={}, now=NOW)
+    apt, _ = site.page("apt", state.unpublished("apt"), fingerprint="A" * 40, now=NOW)
     assert 'href="https://scoop.wimpys.world/"' in apt.decode()
 
 

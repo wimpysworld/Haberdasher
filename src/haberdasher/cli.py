@@ -152,7 +152,6 @@ def pending_pages(
     published: Mapping[str, state.Published], urls: Mapping[str, str], fingerprint: str
 ) -> tuple[dict[str, list[str]], list[str]]:
     """Formats whose og.png or logo.svg, then whose index.html, is missing or differs from what publish writes."""
-    fallback = site.descriptions(item.retained.accepted_history for item in published.values())
     images: dict[str, list[str]] = {site.IMAGE_KEY: [], site.LOGO_KEY: []}
     pending: list[str] = []
     for name, item in published.items():
@@ -165,7 +164,7 @@ def pending_pages(
                 if image != data:
                     step(say, name, f"would write {ref.key}")
                     images[ref.key].append(name)
-        _, digest = site.page(name, item, fingerprint=fingerprint, fallback=fallback, now=utc_now())
+        _, digest = site.page(name, item, fingerprint=fingerprint, now=utc_now())
         try:
             current = read_page(urls[name])
         except (OSError, ValueError) as error:
@@ -253,6 +252,11 @@ def show_plan(
                 homepages=types.MappingProxyType(
                     publish.merged_homepages(
                         name, published[name].retained, published[name].homepages, scan
+                    )
+                ),
+                descriptions=types.MappingProxyType(
+                    publish.merged_descriptions(
+                        name, published[name].retained, published[name].descriptions, scan
                     )
                 ),
             )

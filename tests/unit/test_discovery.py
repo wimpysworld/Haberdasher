@@ -985,3 +985,23 @@ def test_scan_captures_and_normalises_repository_homepages(
     github.repositories["example/tool"] = {"homepage": raw}
     result = scan(github)
     assert result.homepages == (("example/tool", expected),)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("  Fast packaging tool  ", "Fast packaging tool"),
+        ("Build tools \U0001f9d1\u200d\U0001f4bb", "Build tools \U0001f9d1\u200d\U0001f4bb"),
+        ("", None),
+        ("   ", None),
+        (None, None),
+        ("line1\nline2", None),
+        ("bad\x00description", None),
+    ],
+)
+def test_scan_captures_and_normalises_repository_descriptions(
+    github: RecordedGitHub, raw: object, expected: str | None
+) -> None:
+    github.repositories["example/tool"] = {"description": raw}
+    result = scan(github)
+    assert result.descriptions == (("example/tool", expected),)

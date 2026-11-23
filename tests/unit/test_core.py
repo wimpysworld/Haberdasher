@@ -23,10 +23,12 @@ from haberdasher.core import (
     canonical_json,
     homepage_url,
     public_inventory,
+    repository_description,
     safe_key,
     safe_path,
     sha256_file,
     utc_now,
+    validate_descriptions,
     validate_homepages,
 )
 
@@ -229,3 +231,34 @@ def test_homepage_validation_and_public_inventory_allow_list(tmp_path: Path) -> 
     assert with_home["homepages"] == {"owner/repo": "https://tool.example/"}
     with pytest.raises(ValueError):
         public_inventory([asset], [ref()], {"owner/repo": "ftp://tool.example/"})
+
+
+def test_description_validation_and_public_inventory_allow_list(tmp_path: Path) -> None:
+    zwj = "Build tools \U0001f9d1\u200d\U0001f4bb"
+    assert repository_description(f"  {zwj}  ") == zwj
+    for ignored in (None, "", "   ", 42, "line1\nline2", "bad\x00text", "bad\x7ftext", "a\u202eb"):
+        assert repository_description(ignored) is None
+    assert validate_descriptions({"z/repo": "Second", "a/repo": zwj}) == {
+        "a/repo": zwj,
+        "z/repo": "Second",
+    }
+    for bad in (
+        ["not-a-mapping"],
+        {"bad repo": "Valid text"},
+        {"owner/repo": 123},
+        {"owner/repo": ""},
+        {"owner/repo": " padded "},
+        {"owner/repo": "line1\nline2"},
+        {"owner/repo": "bad\x00text"},
+        {"owner/repo": "bad\u200btext"},
+        {"owner/repo": "bad\u202etext"},
+    ):
+        with pytest.raises(ValueError):
+            validate_descriptions(bad)
+    asset = admitted(tmp_path / "pkg.deb")
+    without = public_inventory([asset], [ref()])
+    assert "descriptions" not in without
+    with_desc = public_inventory([asset], [ref()], descriptions={"owner/repo": zwj})
+    assert with_desc["descriptions"] == {"owner/repo": zwj}
+    with pytest.raises(ValueError):
+        public_inventory([asset], [ref()], descriptions={"owner/repo": "bad\x00text"})

@@ -203,6 +203,7 @@ class Releases:
         self.next_id = 1
         self.fail = False
         self.homepages: dict[str, str | None] = {}
+        self.descriptions: dict[str, str | None] = {}
 
     def new_release(self) -> None:
         """Mark a new release as the latest, so that discovery no longer reads the old one."""
@@ -254,7 +255,12 @@ class Releases:
             records, (*(source for source, _ in self.assets), sums), config.sources
         )
         return discovery.CompleteScan(
-            scanned, records, (), (), tuple(sorted(self.homepages.items()))
+            scanned,
+            records,
+            (),
+            (),
+            tuple(sorted(self.homepages.items())),
+            tuple(sorted(self.descriptions.items())),
         )
 
     def verify(
@@ -968,5 +974,65 @@ def test_homepages_update_inventory_and_page_without_rebuilding_packages(
 
     tampered = fixture.inventory()
     tampered["homepages"] = {"test/project": "javascript:alert(1)"}
+    with pytest.raises(state.StateError, match="inventory is invalid"):
+        state.decode_published("arch", core.canonical_json(tampered), None)
+
+
+def test_descriptions_update_inventory_and_page_without_rebuilding_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    legacy = fixture.inventory()
+    assert "descriptions" not in legacy
+    assert state.decode_published("arch", core.canonical_json(legacy), None).descriptions == {}
+    assert '<p class="desc">' not in fixture.path("arch", site.PAGE_KEY).read_text()
+    counts = (fixture.adapter.inspections, fixture.adapter.prepares)
+
+    about = "GitHub description \U0001f9d1\u200d\U0001f4bb"
+    fixture.releases.descriptions = {
+        "test/project": about,
+        "other/unused": "Unused description",
+    }
+    raw_inventory = fixture.path("arch", state.INVENTORY_KEY).read_bytes()
+    raw_page = fixture.path("arch", site.PAGE_KEY).read_bytes()
+    raw_image = fixture.path("arch", site.IMAGE_KEY).read_bytes()
+    raw_logo = fixture.path("arch", site.LOGO_KEY).read_bytes()
+
+    def answer(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        if request.full_url.endswith(site.IMAGE_KEY):
+            return io.BytesIO(raw_image)
+        if request.full_url.endswith(site.LOGO_KEY):
+            return io.BytesIO(raw_logo)
+        return io.BytesIO(raw_page if request.full_url.endswith(site.PAGE_KEY) else raw_inventory)
+
+    scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
+    with patch.object(urllib.request, "urlopen", side_effect=answer):
+        cli.show_plan(
+            scan, fixture.config, fixture.runtime, {"arch": "https://pkg.example"}, FINGERPRINT
+        )
+    assert "arch  would write index.html" in capsys.readouterr().out
+
+    result = fixture.run()
+    assert result.changed and result.repositories == ("arch",) and result.pages == ("arch",)
+    assert fixture.store.writes == [
+        "arch/haberdasher.lock",
+        "arch/haberdasher.json",
+        "arch/index.html",
+    ]
+    assert (fixture.adapter.inspections, fixture.adapter.prepares) == counts
+    assert fixture.inventory()["descriptions"] == {"test/project": about}
+    assert f'<p class="desc">{about}</p>' in fixture.path("arch", site.PAGE_KEY).read_text()
+    assert fixture.run() == publish.RunResult(False, 0, 0)
+
+    fixture.releases.descriptions = {"test/project": None}
+    cleared = fixture.run()
+    assert cleared.changed and cleared.repositories == ("arch",) and cleared.pages == ("arch",)
+    assert "descriptions" not in fixture.inventory()
+    assert '<p class="desc">' not in fixture.path("arch", site.PAGE_KEY).read_text()
+
+    tampered = fixture.inventory()
+    tampered["descriptions"] = {"test/project": "bad\x00description"}
     with pytest.raises(state.StateError, match="inventory is invalid"):
         state.decode_published("arch", core.canonical_json(tampered), None)

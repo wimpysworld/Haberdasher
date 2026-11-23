@@ -282,15 +282,12 @@ def write_page(
     published: Published,
     *,
     fingerprint: str,
-    fallback: Mapping[str, str],
     now: datetime,
     report: Report = quiet,
 ) -> int:
     """Write a format's images and index.html when each is missing or differs. Count the writes."""
     count = write_images(store, published.format, report=report)
-    data, digest = site.page(
-        published.format, published, fingerprint=fingerprint, fallback=fallback, now=now
-    )
+    data, digest = site.page(published.format, published, fingerprint=fingerprint, now=now)
     current = store.read(published.format, site.PAGE_KEY, max_bytes=site.MAX_PAGE_BYTES)
     if current is not None and site.content_hash(current[0]) == digest:
         return count
@@ -324,6 +321,25 @@ def _bucket_repositories(name: str, retained: RetainedFormat) -> set[str]:
     return {asset.inspected.verified.source.repository for asset in retained.accepted_history}
 
 
+def _merge_repository_values(
+    name: str,
+    retained: RetainedFormat,
+    prior: Mapping[str, str],
+    scanned_pairs: Sequence[tuple[str, str | None]],
+) -> dict[str, str]:
+    repositories = _bucket_repositories(name, retained)
+    scanned = dict(scanned_pairs)
+    result: dict[str, str] = {}
+    for repository in sorted(repositories):
+        if repository in scanned:
+            value = scanned[repository]
+            if value is not None:
+                result[repository] = value
+        elif repository in prior:
+            result[repository] = prior[repository]
+    return result
+
+
 def merged_homepages(
     name: str,
     retained: RetainedFormat,
@@ -331,17 +347,17 @@ def merged_homepages(
     scan: discovery.CompleteScan,
 ) -> dict[str, str]:
     """The current repository homepages for the projects published in one bucket."""
-    repositories = _bucket_repositories(name, retained)
-    scanned = dict(scan.homepages)
-    result: dict[str, str] = {}
-    for repository in sorted(repositories):
-        if repository in scanned:
-            url = scanned[repository]
-            if url is not None:
-                result[repository] = url
-        elif repository in prior:
-            result[repository] = prior[repository]
-    return result
+    return _merge_repository_values(name, retained, prior, scan.homepages)
+
+
+def merged_descriptions(
+    name: str,
+    retained: RetainedFormat,
+    prior: Mapping[str, str],
+    scan: discovery.CompleteScan,
+) -> dict[str, str]:
+    """The current repository descriptions for the projects published in one bucket."""
+    return _merge_repository_values(name, retained, prior, scan.descriptions)
 
 
 def _with_rejected(retained: RetainedFormat, digests: set[str]) -> RetainedFormat:
@@ -504,10 +520,12 @@ def _reconcile(
                 if name == "nix":
                     retained = nix.with_references(retained, targets)
                 homepages = merged_homepages(name, retained, current.homepages, scan)
+                descriptions = merged_descriptions(name, retained, current.descriptions, scan)
                 if (
                     all_rejected == prior_rejected
                     and retained is current.retained
                     and homepages == dict(current.homepages)
+                    and descriptions == dict(current.descriptions)
                     and not current.moved
                 ):
                     step(report, name, "unchanged")
@@ -518,7 +536,13 @@ def _reconcile(
                     (),
                     current.retained.objects,
                 )
-                data = state.inventory(item, current.bootstrap, current, homepages=homepages)
+                data = state.inventory(
+                    item,
+                    current.bootstrap,
+                    current,
+                    homepages=homepages,
+                    descriptions=descriptions,
+                )
                 state.write_inventory(store, current, data)
                 step(report, name, f"wrote {state.INVENTORY_KEY}")
                 count += 1
@@ -528,15 +552,11 @@ def _reconcile(
                 return RunResult(
                     bool(count), count, len(scan.pending), repositories=tuple(repositories)
                 )
-            fallback = site.descriptions(
-                item.retained.accepted_history for item in updated.values()
-            )
             writes = {
                 name: write_page(
                     store,
                     updated[name],
                     fingerprint=fingerprint,
-                    fallback=fallback,
                     now=now,
                     report=report,
                 )
@@ -628,12 +648,16 @@ def _reconcile(
         packages = 0
         repositories = []
         written: list[str] = []
-        fallback = site.descriptions(item.retained.accepted_history for item in prepared)
         for item in prepared:
             current = published[item.format]
             bootstrap = tuple(ref for ref in bootstrap_objects if ref.bucket_role == item.format)
             homepages = merged_homepages(item.format, item.retained, current.homepages, scan)
-            data = state.inventory(item, bootstrap, current, homepages=homepages)
+            descriptions = merged_descriptions(
+                item.format, item.retained, current.descriptions, scan
+            )
+            data = state.inventory(
+                item, bootstrap, current, homepages=homepages, descriptions=descriptions
+            )
             outputs = (
                 *(output for output in bootstrap_outputs if output.ref.bucket_role == item.format),
                 *item.outputs,
@@ -643,7 +667,6 @@ def _reconcile(
                     store,
                     current,
                     fingerprint=fingerprint,
-                    fallback=fallback,
                     now=now,
                     report=report,
                 ):
@@ -660,7 +683,6 @@ def _reconcile(
                 store,
                 state.decode_published(item.format, data, None),
                 fingerprint=fingerprint,
-                fallback=fallback,
                 now=now,
                 report=report,
             ):
