@@ -552,8 +552,8 @@ def check_page(bucket: Path, name: str, fingerprint: str) -> str:
         ) in page
     assert fingerprint in page and state.INVENTORY_KEY not in page
     assert f'href="{site.PAGE_KEY}"' not in page and "nofficial" not in page
+    assert '<p class="desc">Disposable pipeline fixture</p>' in page
     if name == "flatpak":
-        assert '<p class="desc">Local data only test</p>' in page
         assert 'objects/<span class="meta">' in page and "content-addressed" in page
     assert (bucket / site.IMAGE_KEY).read_bytes() == site.image(name)
     assert f'content="{PUBLIC[name][1]}/{site.IMAGE_KEY}"' in page
