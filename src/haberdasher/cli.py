@@ -149,13 +149,16 @@ def read_page(url: str, key: str = site.PAGE_KEY, limit: int = site.MAX_PAGE_BYT
 
 
 def pending_pages(
-    published: Mapping[str, state.Published], urls: Mapping[str, str], fingerprint: str
+    published: Mapping[str, state.Published],
+    urls: Mapping[str, str],
+    fingerprint: str,
+    scan: discovery.CompleteScan | None = None,
 ) -> tuple[dict[str, list[str]], list[str]]:
-    """Formats whose og.png or logo.svg, then whose index.html, is missing or differs from what publish writes."""
-    images: dict[str, list[str]] = {site.IMAGE_KEY: [], site.LOGO_KEY: []}
+    """Formats whose images, icons, or index.html are missing or differ from what publish writes."""
+    images: dict[str, list[str]] = {site.IMAGE_KEY: [], site.LOGO_KEY: [], site.ICON_PREFIX: []}
     pending: list[str] = []
     for name, item in published.items():
-        for ref, data in site.images(name):
+        for ref, data in (*site.images(name), *publish.icon_objects(name, item, scan)):
             try:
                 image = read_page(urls[name], ref.key, site.MAX_IMAGE_BYTES)
             except (OSError, ValueError) as error:
@@ -163,7 +166,10 @@ def pending_pages(
             else:
                 if image != data:
                     step(say, name, f"would write {ref.key}")
-                    images[ref.key].append(name)
+                    if ref.key.startswith(site.ICON_PREFIX):
+                        images[site.ICON_PREFIX].append(f"{name}/{ref.key}")
+                    else:
+                        images[ref.key].append(name)
         _, digest = site.page(name, item, fingerprint=fingerprint, now=utc_now())
         try:
             current = read_page(urls[name])
@@ -259,12 +265,18 @@ def show_plan(
                         name, published[name].retained, published[name].descriptions, scan
                     )
                 ),
+                icons=types.MappingProxyType(
+                    publish.merged_icons(
+                        name, published[name].retained, published[name].icons, scan
+                    )
+                ),
             )
             for name in names
             if name in published and published[name].sha256 is not None
         },
         urls,
         fingerprint,
+        scan,
     )
     rows = [("Format", "Repository", "Published", "New")]
     for name in names:
@@ -295,6 +307,8 @@ def show_plan(
         summary += f" {plural(len(images[site.IMAGE_KEY]), 'preview image')} to write."
     if images[site.LOGO_KEY]:
         summary += f" {plural(len(images[site.LOGO_KEY]), 'logo')} to write."
+    if images[site.ICON_PREFIX]:
+        summary += f" {plural(len(images[site.ICON_PREFIX]), 'project icon')} to write."
     if moving:
         summary += f" {_repositories(len(moving))} to move to current keys."
     summary += " Nothing written."

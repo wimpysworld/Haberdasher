@@ -286,6 +286,7 @@ class Published:
     moved: Mapping[str, str] = types.MappingProxyType({})
     homepages: Mapping[str, str] = types.MappingProxyType({})
     descriptions: Mapping[str, str] = types.MappingProxyType({})
+    icons: Mapping[str, str] = types.MappingProxyType({})
 
     @property
     def bootstrap(self) -> tuple[ObjectRef, ...]:
@@ -397,9 +398,10 @@ def decode_published(name: str, data: bytes, etag: str | None) -> Published:
         descriptions = (
             core.validate_descriptions(value["descriptions"]) if "descriptions" in value else {}
         )
-        if core.public_inventory(history, objects, homepages, descriptions)["assets"] != value.get(
+        icons = core.validate_icons(value["icons"]) if "icons" in value else {}
+        if core.public_inventory(history, objects, homepages, descriptions, icons)[
             "assets"
-        ):
+        ] != value.get("assets"):
             raise ValueError("Inventory assets differ from inventory state")
     except ValueError as error:
         raise StateError(f"The published {name} inventory is invalid: {error}") from error
@@ -415,6 +417,7 @@ def decode_published(name: str, data: bytes, etag: str | None) -> Published:
         moved,
         types.MappingProxyType(homepages),
         types.MappingProxyType(descriptions),
+        types.MappingProxyType(icons),
     )
 
 
@@ -530,13 +533,19 @@ def inventory(
     published: Published,
     homepages: Mapping[str, str] | None = None,
     descriptions: Mapping[str, str] | None = None,
+    icons: Mapping[str, str] | None = None,
 ) -> bytes:
     """Build the public inventory, the explicit allow-list plus the state that adapters need."""
     objects = (*prepared.referenced_objects, *bootstrap)
     resolved_homepages = published.homepages if homepages is None else homepages
     resolved_descriptions = published.descriptions if descriptions is None else descriptions
+    resolved_icons = published.icons if icons is None else icons
     value = core.public_inventory(
-        prepared.retained.accepted_history, objects, resolved_homepages, resolved_descriptions
+        prepared.retained.accepted_history,
+        objects,
+        resolved_homepages,
+        resolved_descriptions,
+        resolved_icons,
     )
     if not prepared.outputs and published.record is not None:
         record = dict(published.record)

@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+import struct
+import zlib
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,6 +10,9 @@ from pathlib import Path
 import pytest
 
 from haberdasher.core import (
+    MAX_PROJECT_PNG_BYTES,
+    MAX_PROJECT_SVG_BYTES,
+    TAILOR_PLACEHOLDER_SVG,
     AdmittedAsset,
     InspectedAsset,
     NativeIdentity,
@@ -22,14 +27,19 @@ from haberdasher.core import (
     atomic_write,
     canonical_json,
     homepage_url,
+    icon_key,
     public_inventory,
     repository_description,
     safe_key,
     safe_path,
     sha256_file,
+    size_text,
     utc_now,
     validate_descriptions,
     validate_homepages,
+    validate_icons,
+    validate_project_png,
+    validate_project_svg,
 )
 
 HASH = "a" * 64
@@ -262,3 +272,127 @@ def test_description_validation_and_public_inventory_allow_list(tmp_path: Path) 
     assert with_desc["descriptions"] == {"owner/repo": zwj}
     with pytest.raises(ValueError):
         public_inventory([asset], [ref()], descriptions={"owner/repo": "bad\x00text"})
+
+
+def _png(width: int, height: int, *, bad_crc: bool = False, chunk_type: bytes = b"IHDR") -> bytes:
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    crc = zlib.crc32(chunk_type + ihdr) & 0xFFFFFFFF
+    if bad_crc:
+        crc ^= 0xFF
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", len(ihdr))
+        + chunk_type
+        + ihdr
+        + struct.pack(">I", crc)
+    )
+
+
+def test_icon_validation_and_public_inventory_allow_list(tmp_path: Path) -> None:
+    assert icon_key("icons/tailor.svg") == "icons/tailor.svg"
+    assert icon_key("icons/jive-vocals.png") == "icons/jive-vocals.png"
+    assert icon_key("icons/tool_1.0.svg") == "icons/tool_1.0.svg"
+    for bad_key in (
+        "",
+        "icons/UPPER.svg",
+        "icons/.hidden.svg",
+        "icons/..svg",
+        "icons/sub/tool.svg",
+        "icons/tool.gif",
+        "other/tool.svg",
+        "../icons/tool.svg",
+        "icons/tool.svg\n",
+        123,
+    ):
+        with pytest.raises(ValueError):
+            icon_key(bad_key)
+    assert validate_icons({"z/repo": "icons/z.png", "a/repo": "icons/a.svg"}) == {
+        "a/repo": "icons/a.svg",
+        "z/repo": "icons/z.png",
+    }
+    for bad_map in (
+        ["not-a-mapping"],
+        {"bad repo": "icons/a.svg"},
+        {"owner/repo": "icons/UPPER.svg"},
+        {"owner/repo": "../escape.svg"},
+    ):
+        with pytest.raises(ValueError):
+            validate_icons(bad_map)
+    asset = admitted(tmp_path / "pkg.deb")
+    without = public_inventory([asset], [ref()])
+    assert "icons" not in without
+    with_icons = public_inventory([asset], [ref()], icons={"owner/repo": "icons/repo.svg"})
+    assert with_icons["icons"] == {"owner/repo": "icons/repo.svg"}
+    with pytest.raises(ValueError):
+        public_inventory([asset], [ref()], icons={"owner/repo": "bad/repo.svg"})
+
+
+def test_validate_project_svg() -> None:
+    good = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+        b'viewBox="0 0 64 64"><defs><linearGradient id="g"/></defs>'
+        b'<rect width="64" height="64" fill="url(#g)"/><use xlink:href="#g"/></svg>'
+    )
+    assert validate_project_svg(good) == good
+    assert validate_project_svg(TAILOR_PLACEHOLDER_SVG.encode()) is None
+    assert validate_project_svg(f"  {TAILOR_PLACEHOLDER_SVG}\n".encode()) is None
+    for rejected in (
+        b"",
+        b"\xff\xfe",
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1">'
+        + b"a" * MAX_PROJECT_SVG_BYTES
+        + b"</svg>",
+        b'<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>',
+        b'<svg viewBox="0 0 1 1"/>',
+        b'<svg xmlns="http://www.w3.org/2000/svg"/>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="   "/>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><script>alert(1)</script></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><foreignObject/></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><image href="#a"/></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><animate/></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><set/></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" onload="alert(1)"/>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1">'
+        b'<a href="https://example.invalid"><rect width="1" height="1"/></a></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1">'
+        b'<a href="http://example.invalid"><rect width="1" height="1"/></a></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1">'
+        b'<a href="javascript:alert(1)"><rect width="1" height="1"/></a></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1">'
+        b'<a href="file:///etc/passwd"><rect width="1" height="1"/></a></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1">'
+        b'<a href="data:text/html,hi"><rect width="1" height="1"/></a></svg>',
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1">'
+        b"<style>@import url('https://example.invalid/a.css');</style></svg>",
+        b"<not-xml",
+    ):
+        assert validate_project_svg(rejected) is None, rejected
+
+
+def test_validate_project_png() -> None:
+    good = _png(128, 128)
+    assert validate_project_png(good) == good
+    for rejected in (
+        b"",
+        good[:32],
+        b"not-a-png" + good[9:],
+        _png(128, 64),
+        _png(0, 0),
+        _png(64, 64, bad_crc=True),
+        _png(64, 64, chunk_type=b"IDAT"),
+        good + b"\x00" * (MAX_PROJECT_PNG_BYTES - len(good) + 1),
+    ):
+        assert validate_project_png(rejected) is None
+
+
+def test_size_text_steps_through_decimal_units_to_gigabytes() -> None:
+    assert size_text(0) == "0 B"
+    assert size_text(999) == "999 B"
+    assert size_text(1_000) == "1 KB"
+    assert size_text(2_500) == "2 KB"
+    assert size_text(1_000_000) == "1 MB"
+    assert size_text(999_000_000) == "999 MB"
+    assert size_text(1_011_000_000) == "1.0 GB"
+    assert size_text(1_334_000_000) == "1.3 GB"
+    assert size_text(1_813_000_000) == "1.8 GB"

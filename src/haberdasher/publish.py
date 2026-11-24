@@ -283,10 +283,11 @@ def write_page(
     *,
     fingerprint: str,
     now: datetime,
+    icons: Sequence[tuple[ObjectRef, bytes]] = (),
     report: Report = quiet,
 ) -> int:
     """Write a format's images and index.html when each is missing or differs. Count the writes."""
-    count = write_images(store, published.format, report=report)
+    count = write_images(store, published.format, extra=icons, report=report)
     data, digest = site.page(published.format, published, fingerprint=fingerprint, now=now)
     current = store.read(published.format, site.PAGE_KEY, max_bytes=site.MAX_PAGE_BYTES)
     if current is not None and site.content_hash(current[0]) == digest:
@@ -297,10 +298,16 @@ def write_page(
     return count + 1
 
 
-def write_images(store: Store, name: str, *, report: Report = quiet) -> int:
-    """Write a format's og.png and logo.svg when each is missing or its bytes differ."""
+def write_images(
+    store: Store,
+    name: str,
+    *,
+    extra: Sequence[tuple[ObjectRef, bytes]] = (),
+    report: Report = quiet,
+) -> int:
+    """Write a format's og.png, logo.svg, and project icons when missing or bytes differ."""
     count = 0
-    for ref, data in site.images(name):
+    for ref, data in (*site.images(name), *extra):
         current = store.read(name, ref.key, max_bytes=site.MAX_IMAGE_BYTES)
         if current is not None and current[0] == data:
             continue
@@ -358,6 +365,48 @@ def merged_descriptions(
 ) -> dict[str, str]:
     """The current repository descriptions for the projects published in one bucket."""
     return _merge_repository_values(name, retained, prior, scan.descriptions)
+
+
+def merged_icons(
+    name: str,
+    retained: RetainedFormat,
+    prior: Mapping[str, str],
+    scan: discovery.CompleteScan,
+) -> dict[str, str]:
+    """The current project icon keys for the projects published in one bucket."""
+    scanned = [
+        (
+            repository,
+            None
+            if icon is None
+            else f"{site.ICON_PREFIX}{site.project_title(repository)[1]}.{icon.extension}",
+        )
+        for repository, icon in scan.icons
+    ]
+    return _merge_repository_values(name, retained, prior, scanned)
+
+
+def icon_objects(
+    name: str,
+    published: Published,
+    scan: discovery.CompleteScan | None,
+) -> tuple[tuple[ObjectRef, bytes], ...]:
+    """The project icon objects to write beside the page of one format."""
+    if scan is None or not published.icons:
+        return ()
+    scanned = {repository: icon for repository, icon in scan.icons if icon is not None}
+    result: list[tuple[ObjectRef, bytes]] = []
+    seen: set[str] = set()
+    for repository, key in sorted(published.icons.items(), key=lambda pair: pair[1]):
+        icon = scanned.get(repository)
+        if icon is None or key in seen:
+            continue
+        expected = f"{site.ICON_PREFIX}{site.project_title(repository)[1]}.{icon.extension}"
+        if key != expected:
+            continue
+        seen.add(key)
+        result.append((site.icon_ref(name, key, icon.content_type, icon.data), icon.data))
+    return tuple(result)
 
 
 def _with_rejected(retained: RetainedFormat, digests: set[str]) -> RetainedFormat:
@@ -521,11 +570,13 @@ def _reconcile(
                     retained = nix.with_references(retained, targets)
                 homepages = merged_homepages(name, retained, current.homepages, scan)
                 descriptions = merged_descriptions(name, retained, current.descriptions, scan)
+                icons = merged_icons(name, retained, current.icons, scan)
                 if (
                     all_rejected == prior_rejected
                     and retained is current.retained
                     and homepages == dict(current.homepages)
                     and descriptions == dict(current.descriptions)
+                    and icons == dict(current.icons)
                     and not current.moved
                 ):
                     step(report, name, "unchanged")
@@ -542,6 +593,7 @@ def _reconcile(
                     current,
                     homepages=homepages,
                     descriptions=descriptions,
+                    icons=icons,
                 )
                 state.write_inventory(store, current, data)
                 step(report, name, f"wrote {state.INVENTORY_KEY}")
@@ -558,6 +610,7 @@ def _reconcile(
                     updated[name],
                     fingerprint=fingerprint,
                     now=now,
+                    icons=icon_objects(name, updated[name], scan),
                     report=report,
                 )
                 for name in names
@@ -655,8 +708,14 @@ def _reconcile(
             descriptions = merged_descriptions(
                 item.format, item.retained, current.descriptions, scan
             )
+            icons = merged_icons(item.format, item.retained, current.icons, scan)
             data = state.inventory(
-                item, bootstrap, current, homepages=homepages, descriptions=descriptions
+                item,
+                bootstrap,
+                current,
+                homepages=homepages,
+                descriptions=descriptions,
+                icons=icons,
             )
             outputs = (
                 *(output for output in bootstrap_outputs if output.ref.bucket_role == item.format),
@@ -668,6 +727,7 @@ def _reconcile(
                     current,
                     fingerprint=fingerprint,
                     now=now,
+                    icons=icon_objects(item.format, current, scan),
                     report=report,
                 ):
                     written.append(item.format)
@@ -679,11 +739,13 @@ def _reconcile(
             count += 1
             repositories.append(item.format)
             packages += _added(item, current)
+            decoded = state.decode_published(item.format, data, None)
             if wrote := write_page(
                 store,
-                state.decode_published(item.format, data, None),
+                decoded,
                 fingerprint=fingerprint,
                 now=now,
+                icons=icon_objects(item.format, decoded, scan),
                 report=report,
             ):
                 written.append(item.format)

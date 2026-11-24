@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import re
 import tempfile
 import time
+import urllib.request
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from haberdasher.config import Config, load_yaml
 from haberdasher.core import (
+    MAX_PROJECT_PNG_BYTES,
+    MAX_PROJECT_SVG_BYTES,
     Record,
     Report,
     SourceAsset,
@@ -34,11 +38,14 @@ from haberdasher.core import (
     sha256_file,
     step,
     text,
+    validate_project_png,
+    validate_project_svg,
 )
 from haberdasher.runtime import Runtime, transfer_timeout
 
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_SECONDS = 2
+ICON_TIMEOUT = 30
 MAX_PAGE_BYTES = 8 * 1024 * 1024
 MAX_PAGES = 10_000
 MAX_ITEMS = 100_000
@@ -152,6 +159,24 @@ class DiscoveryState(Record):
 
 
 @dataclass(frozen=True)
+class ProjectIcon(Record):
+    extension: str
+    content_type: str
+    data: bytes
+    sha256: str
+
+    def __post_init__(self) -> None:
+        expected = {"svg": "image/svg+xml", "png": "image/png"}.get(self.extension)
+        if expected is None or self.content_type != expected:
+            raise ValueError("Invalid project icon format")
+        if not isinstance(self.data, bytes) or not self.data:
+            raise ValueError("Invalid project icon data")
+        digest(self.sha256)
+        if hashlib.sha256(self.data).hexdigest() != self.sha256:
+            raise ValueError("Project icon digest differs from its bytes")
+
+
+@dataclass(frozen=True)
 class CompleteScan(Record):
     state: DiscoveryState
     checksummed: tuple[DiscoveredAsset, ...]
@@ -162,6 +187,8 @@ class CompleteScan(Record):
     homepages: tuple[tuple[str, str | None], ...] = ()
     # The normalised description of each scanned repository, or None when absent.
     descriptions: tuple[tuple[str, str | None], ...] = ()
+    # The validated project icon of each scanned repository, or None when absent.
+    icons: tuple[tuple[str, ProjectIcon | None], ...] = ()
 
 
 def _asset_key(source: SourceAsset) -> tuple[str, int]:
@@ -540,12 +567,76 @@ def _installers(
     return {url for url in urls if isinstance(url, str)}
 
 
+def _download_icon(url: str, limit: int) -> bytes | None:
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    request = urllib.request.Request(url, headers={"User-Agent": "haberdasher"})
+    try:
+        with urllib.request.urlopen(request, timeout=ICON_TIMEOUT) as response:
+            data = response.read(limit + 1)
+    except OSError:
+        return None
+    return data if data and len(data) <= limit else None
+
+
+def _content_bytes(repository: str, path: str, runtime: Runtime, limit: int) -> bytes | None:
+    """Fetch a regular file from the GitHub Contents API, or None when absent or non-file."""
+    value = _json_request(f"repos/{repository}/contents/{path}", runtime, missing=_MISSING)
+    if value is _MISSING or not isinstance(value, dict):
+        return None
+    row = cast(dict[str, object], value)
+    if row.get("type") != "file":
+        return None
+    size = row.get("size")
+    if type(size) is int and (size <= 0 or size > limit):
+        return None
+    encoding = row.get("encoding")
+    content = row.get("content")
+    if encoding == "base64" and isinstance(content, str) and content.strip():
+        try:
+            raw = base64.b64decode("".join(content.split()), validate=True)
+        except ValueError:
+            return None
+        return raw if raw and len(raw) <= limit else None
+    download_url = row.get("download_url")
+    if isinstance(download_url, str) and download_url:
+        return _download_icon(download_url, limit)
+    return None
+
+
+def _project_icon(repository: str, runtime: Runtime) -> ProjectIcon | None:
+    """Fetch and validate pages/icon.svg, falling back to pages/icon.png."""
+    svg_raw = _content_bytes(repository, "pages/icon.svg", runtime, MAX_PROJECT_SVG_BYTES)
+    if svg_raw is not None:
+        valid_svg = validate_project_svg(svg_raw)
+        if valid_svg is not None:
+            return ProjectIcon(
+                "svg",
+                "image/svg+xml",
+                valid_svg,
+                hashlib.sha256(valid_svg).hexdigest(),
+            )
+    png_raw = _content_bytes(repository, "pages/icon.png", runtime, MAX_PROJECT_PNG_BYTES)
+    if png_raw is not None:
+        valid_png = validate_project_png(png_raw)
+        if valid_png is not None:
+            return ProjectIcon(
+                "png",
+                "image/png",
+                valid_png,
+                hashlib.sha256(valid_png).hexdigest(),
+            )
+    return None
+
+
 def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -> CompleteScan:
     """Scan the GitHub "Latest" release of each source. Any failed request raises."""
     assets: dict[tuple[str, int], SourceAsset] = {}
     groups: dict[str, tuple[str, tuple[SourceAsset, ...], bool] | None] = {}
     homepages: list[tuple[str, str | None]] = []
     descriptions: list[tuple[str, str | None]] = []
+    icons: list[tuple[str, ProjectIcon | None]] = []
     for repository in config.sources:
         value = _json_request(f"repos/{repository}/releases/latest", runtime, missing=_MISSING)
         if value is _MISSING:
@@ -557,6 +648,7 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
         repo_meta = _mapping(_json_request(f"repos/{repository}", runtime))
         homepages.append((repository, homepage_url(repo_meta.get("homepage"), repository)))
         descriptions.append((repository, repository_description(repo_meta.get("description"))))
+        icons.append((repository, _project_icon(repository, runtime)))
         release_id = integer(release.get("id"), "release ID", 1)
         names: set[str] = set()
         release_assets: list[SourceAsset] = []
@@ -675,6 +767,7 @@ def scan_releases(config: Config, *, runtime: Runtime, report: Report = quiet) -
         tuple(releases),
         tuple(homepages),
         tuple(descriptions),
+        tuple(icons),
     )
 
 

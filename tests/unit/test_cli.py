@@ -479,3 +479,84 @@ def test_publish_summary_names_refreshed_metadata(
     ):
         assert cli.main(["publish", "--local-root", str(tmp_path / "store")]) == 0
     assert capsys.readouterr().out.splitlines()[-1] == summary
+
+
+def test_pending_pages_reports_missing_and_changed_project_icons(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import hashlib
+    import io
+    import types
+
+    from haberdasher import site
+    from haberdasher.core import (
+        AdmittedAsset,
+        InspectedAsset,
+        NativeIdentity,
+        RetainedFormat,
+        VerifiedAsset,
+    )
+
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><circle r="30"/></svg>'
+    icon = discovery.ProjectIcon("svg", "image/svg+xml", svg, hashlib.sha256(svg).hexdigest())
+    source = SourceAsset(
+        "synthetic/test", 1, 1, "app.deb", 1, "2026-01-01T00:00:00Z", "https://example.invalid/a"
+    )
+    verified = VerifiedAsset(source, Path("unavailable"), "a" * 64, 1, 2, "b" * 64)
+    inspected = InspectedAsset(
+        verified, NativeIdentity("apt", "app", "amd64", "1.0"), {"record": ""}, {}, "unsigned"
+    )
+    asset = AdmittedAsset(inspected, "preserve", "apt:app:amd64:1.0")
+    retained = RetainedFormat("apt", (asset,), (inspected.identity,), {}, ())
+    item = state.Published(
+        "apt",
+        None,
+        "c" * 64,
+        (),
+        retained,
+        None,
+        icons=types.MappingProxyType({"synthetic/test": "icons/test.svg"}),
+    )
+    scan = discovery.CompleteScan(
+        discovery.DiscoveryState(),
+        (),
+        (),
+        icons=(("synthetic/test", icon),),
+    )
+    page_bytes, _ = site.page("apt", item, fingerprint=PRODUCTION_FINGERPRINT, now=cli.utc_now())
+    stored: dict[str, bytes] = {
+        site.IMAGE_KEY: site.image("apt"),
+        site.LOGO_KEY: site.logo("apt"),
+        site.PAGE_KEY: page_bytes,
+    }
+
+    def answer(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        key = request.full_url.removeprefix("https://apt.example.invalid/")
+        if key not in stored:
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
+        return io.BytesIO(stored[key])
+
+    with patch.object(urllib.request, "urlopen", side_effect=answer):
+        images, pages = cli.pending_pages(
+            {"apt": item}, {"apt": "https://apt.example.invalid"}, PRODUCTION_FINGERPRINT, scan
+        )
+    assert images[site.ICON_PREFIX] == ["apt/icons/test.svg"]
+    assert not pages
+    assert "apt   would write icons/test.svg" in capsys.readouterr().out
+
+    stored["icons/test.svg"] = svg
+    with patch.object(urllib.request, "urlopen", side_effect=answer):
+        images, pages = cli.pending_pages(
+            {"apt": item}, {"apt": "https://apt.example.invalid"}, PRODUCTION_FINGERPRINT, scan
+        )
+    assert not images[site.ICON_PREFIX]
+    assert not pages
+    assert capsys.readouterr().out == ""
+
+    stored["icons/test.svg"] = b"<svg/>"
+    with patch.object(urllib.request, "urlopen", side_effect=answer):
+        images, pages = cli.pending_pages(
+            {"apt": item}, {"apt": "https://apt.example.invalid"}, PRODUCTION_FINGERPRINT, scan
+        )
+    assert images[site.ICON_PREFIX] == ["apt/icons/test.svg"]
+    assert "apt   would write icons/test.svg" in capsys.readouterr().out

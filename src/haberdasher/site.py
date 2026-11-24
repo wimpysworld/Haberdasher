@@ -20,6 +20,7 @@ from haberdasher.core import (
     ObjectRef,
     RetainedFormat,
     homepage_url,
+    icon_key,
     plural,
     repository_description,
     size_text,
@@ -49,6 +50,7 @@ MAX_PAGE_BYTES = 4 * 1024 * 1024
 IMAGE_KEY = "og.png"
 MAX_IMAGE_BYTES = 1024 * 1024
 LOGO_KEY = "logo.svg"
+ICON_PREFIX = "icons/"
 OWNER = "Martin Wimpress"
 OWNER_URL = "https://github.com/flexiondotorg"
 SOURCE = "https://github.com/wimpysworld/Haberdasher"
@@ -458,6 +460,16 @@ class Project:
     packages: tuple[tuple[str, str, tuple[str, ...]], ...]
     flake: str = ""
     homepage: str | None = None
+    icon: str = ""
+
+
+def _icon(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return icon_key(value)
+    except ValueError:
+        return ""
 
 
 def _package(asset: AdmittedAsset) -> tuple[str, str]:
@@ -472,6 +484,7 @@ def projects(
     history: Sequence[AdmittedAsset],
     descriptions: Mapping[str, str] | None = None,
     homepages: Mapping[str, str] | None = None,
+    icons: Mapping[str, str] | None = None,
 ) -> list[Project]:
     """One entry per source repository, with the packages of its newest published release."""
     releases: dict[str, int] = {}
@@ -480,6 +493,7 @@ def projects(
         releases[source.repository] = max(releases.get(source.repository, 0), source.release_id)
     abouts = descriptions or {}
     links = homepages or {}
+    marks = icons or {}
     result: list[Project] = []
     for repository in sorted(releases, key=str.lower):
         packages: dict[tuple[str, str], set[str]] = {}
@@ -498,6 +512,7 @@ def projects(
                     for (name, version), architectures in sorted(packages.items())
                 ),
                 homepage=homepage_url(links.get(repository), repository),
+                icon=_icon(marks.get(repository)),
             )
         )
     return result
@@ -507,6 +522,7 @@ def nix_projects(
     retained: RetainedFormat,
     descriptions: Mapping[str, str] | None = None,
     homepages: Mapping[str, str] | None = None,
+    icons: Mapping[str, str] | None = None,
 ) -> list[Project]:
     """One entry per source repository, with the flake packages of its newest published tag."""
     items = nix.published(retained)
@@ -514,6 +530,7 @@ def nix_projects(
     flakes = nix.flake_references(retained)
     abouts = descriptions or {}
     links = homepages or {}
+    marks = icons or {}
     result: list[Project] = []
     for repository in sorted(tags, key=str.lower):
         chosen = [
@@ -532,6 +549,7 @@ def nix_projects(
                 ),
                 flakes.get(repository, f"github:{repository}"),
                 homepage=homepage_url(links.get(repository), repository),
+                icon=_icon(marks.get(repository)),
             )
         )
     return result
@@ -605,9 +623,13 @@ def _breakable(name: str) -> str:
 
 
 def files(objects: Sequence[ObjectRef]) -> dict[str, int]:
-    """The size of every published package repository file, without the inventory, page, image, or logo."""
+    """The size of every published package repository file, without the inventory, page, images, or icons."""
     hidden = (state.INVENTORY_KEY, PAGE_KEY, IMAGE_KEY, LOGO_KEY)
-    return {ref.key: ref.size for ref in objects if ref.key not in hidden}
+    return {
+        ref.key: ref.size
+        for ref in objects
+        if ref.key not in hidden and not ref.key.startswith(ICON_PREFIX)
+    }
 
 
 # The top-level directories that each format shows on one row, and the description of their files.
@@ -708,12 +730,16 @@ _MAC_PROCESSORS = {
 }
 
 
+def _architectures(name: str, architectures: Iterable[str]) -> list[str]:
+    items = sorted(set(architectures))
+    if name == "brew":
+        return sorted({label for a in items for label in _MAC_PROCESSORS.get(a, (a,))})
+    return items
+
+
 def architecture_labels(name: str, architectures: Iterable[str]) -> str:
     """The architectures as the page shows them: Homebrew's by processor, the others as named."""
-    items = sorted(architectures)
-    if name == "brew":
-        items = sorted({label for a in items for label in _MAC_PROCESSORS.get(a, (a,))})
-    return ", ".join(items)
+    return ", ".join(_architectures(name, architectures))
 
 
 def _homepage_label(url: str) -> str:
@@ -795,11 +821,17 @@ def _panel(
             head = f'<div class="step-head">{head}{_switch(slug)}</div>'
         items.append(f"<li>{head}{note}{blocks}{check}</li>")
     about = f'<p class="desc">{_e(project.description)}</p>' if project.description else ""
+    icon = (
+        f'<img class="project-icon" src="{_e(project.icon)}" alt="" width="124" height="124" '
+        'decoding="async">'
+        if project.icon
+        else ""
+    )
     return (
         f'<section class="panel{" is-hidden" if hidden else ""}" id="{_e(slug)}" '
         f'aria-labelledby="{_e(slug)}-title">'
-        f'<div class="project"><div><h3 id="{_e(slug)}-title">{_e(title)}</h3>{about}'
-        f"{_project_links(project)}</div>"
+        f'<div class="project"><div class="project-head"><h3 id="{_e(slug)}-title">{_e(title)}</h3>'
+        f"{about}{_project_links(project)}{icon}</div>"
         f'<dl class="pkg">{tiles}</dl></div>'
         f'{quick}<ol class="steps">{"".join(items)}</ol></section>'
     )
@@ -834,31 +866,42 @@ def _option(project: Project, *, selected: bool) -> str:
     return f'<option value="{_e(slug)}"{" selected" if selected else ""}>{_e(label)}</option>'
 
 
+def _verification(name: str) -> str:
+    """The verification method that clients check for one repository format."""
+    match name:
+        case "apk":
+            return "RSA-256"
+        case "nix":
+            return "Ed25519"
+        case "brew" | "scoop":
+            return "SHA-256"
+        case _:
+            return "OpenPGP"
+
+
 def _hero_card(
     name: str, entries: Sequence[Project], sizes: Mapping[str, int], now: datetime | None
 ) -> str:
-    architectures = architecture_labels(
+    architectures = _architectures(
         name, {a for p in entries for _, _, items in p.packages for a in items}
     )
-    packages = sum(len(project.packages) for project in entries)
     date = (
         ""
         if now is None
-        else f'<time datetime="{now.date().isoformat()}">{now.day} {now:%B}</time> '
-        f"<small>{now.year}</small>"
+        else f'<time datetime="{now.date().isoformat()}">{now.day} {now:%B %Y}</time>'
     )
     return (
         '<aside class="hero-card" aria-labelledby="hero-card-h">'
+        '<div class="hero-card-head">'
         '<h2 id="hero-card-h">In this repository</h2>'
-        f"<dl><div><dt>Projects</dt><dd>{len(entries)}</dd></div>"
-        f"<div><dt>Packages</dt><dd>{packages} <small>{_e(architectures)}</small></dd></div>"
-        + (
-            ""
-            if name == "nix"
-            else f"<div><dt>Files</dt><dd>{len(sizes)} "
-            f"<small>{size_text(sum(sizes.values()))}</small></dd></div>"
-        )
-        + f"<div><dt>Published</dt><dd>{date}</dd></div></dl></aside>"
+        f'<span class="hero-pill">{_verification(name)}</span>'
+        "</div>"
+        f"<dl><div><dt>Projects</dt><dd>{len(entries):,}</dd></div>"
+        f"<div><dt>Architectures</dt><dd>{len(architectures):,}</dd></div>"
+        f"<div><dt>Files</dt><dd>{len(sizes):,}</dd></div>"
+        f"<div><dt>Size</dt><dd>{size_text(sum(sizes.values()))}</dd></div></dl>"
+        f'<p class="hero-foot">Published {date}</p>'
+        "</aside>"
     )
 
 
@@ -918,9 +961,11 @@ def _document(
     )
     history = published.retained.accepted_history
     entries = (
-        nix_projects(published.retained, published.descriptions, published.homepages)
+        nix_projects(
+            published.retained, published.descriptions, published.homepages, published.icons
+        )
         if name == "nix"
-        else projects(history, published.descriptions, published.homepages)
+        else projects(history, published.descriptions, published.homepages, published.icons)
     )
     refs = {ref.key for ref in published.objects}
     sizes = files(published.objects)
@@ -930,6 +975,15 @@ def _document(
         _panel(name, project, history, refs, fingerprint, hidden=i > 0, public_key=public_key)
         for i, project in enumerate(entries)
     ) or _empty(name)
+    caption, commands = remove(name, fingerprint)
+    removal = (f"<p>{_e(caption)}</p>" if caption else "") + "".join(
+        _code(command, variant) for variant, command in commands
+    )
+    fold = (
+        f'<details class="fold"><summary id="remove-h">{CHEVRON}Remove this repository'
+        '<span class="sub">Undo the steps above</span></summary>'
+        f'<div class="body">{removal}</div></details>'
+    )
     if len(entries) > 1:
         picker = (
             '<label class="vh" for="project-select">Project</label>'
@@ -943,14 +997,12 @@ def _document(
             + "</ul>"
         )
         install_body = (
-            f'<div class="install-grid">{picker}{tabs}<div class="panels">{panels}</div></div>'
+            '<div class="install-grid"><div class="install-nav">'
+            f'<h2 id="install-h">Install</h2>{picker}{tabs}</div>'
+            f'<div class="install-main"><div class="panels">{panels}</div>{fold}</div></div>'
         )
     else:
-        install_body = panels
-    caption, commands = remove(name, fingerprint)
-    removal = (f"<p>{_e(caption)}</p>" if caption else "") + "".join(
-        _code(command, variant) for variant, command in commands
-    )
+        install_body = f'<h2 id="install-h">Install</h2>{panels}{fold}'
     published_on = (
         ""
         if now is None
@@ -1007,11 +1059,7 @@ def _document(
 <main id="main">
 <section class="section" aria-labelledby="install-h">
 <div class="wrap">
-<h2 id="install-h">Install</h2>
 {install_body}
-<details class="fold"><summary id="remove-h">{CHEVRON}Remove this repository\
-<span class="sub">Undo the steps above</span></summary>
-<div class="body">{removal}</div></details>
 </div>
 </section>
 {listing}</main>
@@ -1078,6 +1126,19 @@ def logo(name: str) -> bytes:
         f"<style>path{{fill:{light}}}@media (prefers-color-scheme:dark){{path{{fill:{dark}}}}}</style>"
         f'<path d="{theme.icon}"/></svg>\n'
     ).encode()
+
+
+def icon_ref(name: str, key: str, content_type: str, data: bytes) -> ObjectRef:
+    """One project icon object written beside the page of one format."""
+    return ObjectRef(
+        name,
+        key,
+        "page",
+        len(data),
+        hashlib.sha256(data).hexdigest(),
+        content_type,
+        "public, max-age=86400",
+    )
 
 
 def images(name: str) -> tuple[tuple[ObjectRef, bytes], ...]:

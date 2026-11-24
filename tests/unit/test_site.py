@@ -66,6 +66,7 @@ def published(
     objects: tuple[ObjectRef, ...] = (),
     homepages: Mapping[str, str] | None = None,
     descriptions: Mapping[str, str] | None = None,
+    icons: Mapping[str, str] | None = None,
 ) -> state.Published:
     retained = RetainedFormat(name, history, (), {}, objects)
     return state.Published(
@@ -77,6 +78,7 @@ def published(
         None,
         homepages=types.MappingProxyType(dict(homepages or {})),
         descriptions=types.MappingProxyType(dict(descriptions or {})),
+        icons=types.MappingProxyType(dict(icons or {})),
     )
 
 
@@ -195,7 +197,11 @@ def test_several_projects_render_tabs_with_the_first_selected() -> None:
         *apt("Alpha text", "1.5", 1, package="alpha", repository="other/alpha", name="rpm"),
     )
     page = render("rpm", published("rpm", history))
-    assert '<div class="install-grid">' in page
+    assert (
+        '<div class="install-grid"><div class="install-nav"><h2 id="install-h">Install</h2>' in page
+    )
+    assert '<div class="install-main"><div class="panels">' in page
+    assert '</div><details class="fold"><summary id="remove-h">' in page
     assert '<select id="project-select" class="project-select" aria-label="Project">' in page
     assert '<option value="alpha" selected>Alpha (1.5)</option>' in page
     assert '<option value="zed">Zed (2.0)</option>' in page
@@ -226,11 +232,17 @@ def test_hero_card_counts_the_published_package_files() -> None:
     )
     page = render("apt", published("apt", history, objects))
     card = page[page.index('<aside class="hero-card"') : page.index("</aside>")]
+    assert '<span class="hero-pill">OpenPGP</span>' in card
     assert "<dt>Projects</dt><dd>2</dd>" in card
-    assert "<dt>Packages</dt><dd>2 <small>all, amd64, arm64</small></dd>" in card
-    assert "<dt>Files</dt><dd>2 <small>2 KB</small></dd>" in card
-    assert '<time datetime="2026-11-09">9 November</time> <small>2026</small>' in card
-    assert card.endswith("</dl>") and "<a " not in card and commands(card) == []
+    assert "<dt>Architectures</dt><dd>3</dd>" in card
+    assert "<dt>Packages</dt>" not in card and "<small>" not in card
+    assert "<dt>Files</dt><dd>2</dd>" in card
+    assert "<dt>Size</dt><dd>2 KB</dd>" in card
+    assert (
+        '<p class="hero-foot">Published <time datetime="2026-11-09">9 November 2026</time></p>'
+        in card
+    )
+    assert card.endswith("</p>") and "<a " not in card and commands(card) == []
     assert "<strong>2 files</strong> in this repository" in page
     assert "<strong>2 KB</strong> total" in page
     assert "haberdasher.json" not in page and 'href="index.html"' not in page
@@ -337,7 +349,10 @@ def test_content_hash_ignores_only_the_publication_date() -> None:
     assert '<p>Last published <time datetime="2026-11-09">9 November 2026</time>.</p>' in (
         first.decode()
     )
-    assert '<time datetime="2027-01-02">2 January</time> <small>2027</small>' in later.decode()
+    assert (
+        '<p class="hero-foot">Published <time datetime="2027-01-02">2 January 2027</time></p>'
+        in later.decode()
+    )
     changed = site.page("rpm", item, fingerprint="A" * 40, now=NOW)[1]
     assert changed != digest
     assert site.content_hash(b"<html></html>") is None and site.content_hash(None) is None
@@ -543,7 +558,12 @@ def test_nix_page_trusts_the_cache_once_and_installs_from_each_flake() -> None:
     assert "sudo sed -i '/nix\\.wimpys\\.world/d' /etc/nix/nix.conf" in cmds
     assert "packages.git" not in page
     card = page[page.index('<aside class="hero-card"') : page.index("</aside>")]
-    assert "<dt>Files</dt>" not in card and 'id="files-h"' not in page and "nar/" not in page
+    assert '<span class="hero-pill">Ed25519</span>' in card
+    assert "<dt>Projects</dt><dd>1</dd>" in card
+    assert "<dt>Architectures</dt><dd>1</dd>" in card
+    assert "<dt>Files</dt><dd>4</dd>" in card
+    assert "<dt>Size</dt><dd>9 KB</dd>" in card
+    assert 'id="files-h"' not in page and "nar/" not in page
     assert page.count("only while the default branch matches the release") == 1
 
     latest = "github:wimpysworld/tailor/latest"
@@ -584,7 +604,16 @@ def test_brew_pages_name_mac_processors_and_other_pages_keep_architectures() -> 
     )
     page = render("brew", published("brew", history, (ref("brew", "Casks/tailor.rb", 900),)))
     assert "<dt>Architectures</dt><dd>Apple Silicon, Intel</dd>" in page
-    assert "<small>Apple Silicon, Intel</small>" in page and 'id="files-h"' in page
+    card = page[page.index('<aside class="hero-card"') : page.index("</aside>")]
+    assert '<span class="hero-pill">SHA-256</span>' in card
+    assert "<dt>Architectures</dt><dd>2</dd>" in card
+    assert "<small>" not in card and 'id="files-h"' in page
+    universal = (
+        asset("brew", "tailor", "universal", "1", {"desc": "Tool"}, repository="o/tailor"),
+    )
+    uni_page = render("brew", published("brew", universal))
+    uni_card = uni_page[uni_page.index('<aside class="hero-card"') : uni_page.index("</aside>")]
+    assert "<dt>Architectures</dt><dd>2</dd>" in uni_card
 
 
 def test_project_links_prioritise_homepage_and_fall_back_to_github() -> None:
@@ -641,3 +670,99 @@ def test_themes_match_vendor_link_and_focus_colours_and_avoid_panel_tabindex() -
         if name == "flatpak":
             assert "--hd-header-bg:var(--hd-bg)" in page
             assert "--hd-header-bg:#1a1622" in page
+
+
+def test_project_icons_render_in_project_head_and_stay_out_of_file_tree() -> None:
+    history = (
+        *apt("Tool text", "1.0", 1, package="tool", repository="wimpysworld/tool"),
+        *apt("Other text", "1.0", 1, package="other", repository="example/other"),
+    )
+    objects = (
+        ref("apt", "pool/tool.deb", 2_000),
+        ref("apt", "icons/tool.svg", 512),
+        ref("apt", "icons/other.png", 4_096),
+    )
+    assert site.files(objects) == {"pool/tool.deb": 2_000}
+    item = published(
+        "apt",
+        history,
+        objects,
+        descriptions={"wimpysworld/tool": "Tool summary"},
+        icons={"wimpysworld/tool": "icons/tool.svg"},
+    )
+    page = render("apt", item)
+    assert (
+        '<div class="project"><div class="project-head">'
+        '<h3 id="tool-title">Tool</h3><p class="desc">Tool summary</p>'
+        '<div class="project-links"><a class="gh" href="https://github.com/wimpysworld/tool">'
+    ) in page
+    assert (
+        "wimpysworld/tool on GitHub</a></div>"
+        '<img class="project-icon" src="icons/tool.svg" alt="" width="124" height="124" '
+        'decoding="async"></div><dl class="pkg">'
+    ) in page
+    assert (
+        '<div class="project"><div class="project-head"><h3 id="other-title">Other</h3>'
+    ) in page
+    assert page.count('class="project-icon"') == 1
+    assert 'href="icons/tool.svg"' not in page
+    assert "<strong>1 file</strong> in this repository" in page
+    plain_digest = site.page(
+        "apt", published("apt", history, objects), fingerprint=FINGERPRINT, now=NOW
+    )[1]
+    icon_digest = site.page("apt", item, fingerprint=FINGERPRINT, now=NOW)[1]
+    assert plain_digest != icon_digest
+
+    store = "/nix/store/" + "0" * 32
+    pkg = nix.Package(
+        "wimpysworld/tailor",
+        "v0.6.0",
+        "github:wimpysworld/tailor/v0.6.0",
+        "tailor",
+        "tailor",
+        "0.6.0",
+        "x86_64-linux",
+        f"{store}-tailor-0.6.0",
+        "Nix tool",
+    )
+    retained = RetainedFormat("nix", (), (pkg.identity,), {"packages": [pkg.record()]}, ())
+    nix_item = state.Published(
+        "nix",
+        None,
+        "d" * 64,
+        (),
+        retained,
+        None,
+        icons=types.MappingProxyType({"wimpysworld/tailor": "icons/tailor.png"}),
+    )
+    nix_page = render("nix", nix_item)
+    assert (
+        '<img class="project-icon" src="icons/tailor.png" alt="" width="124" height="124" '
+        'decoding="async">'
+    ) in nix_page
+
+
+def test_hero_card_verification_pills_formatting_and_responsive_dossier() -> None:
+    expected_pills = {
+        "apt": "OpenPGP",
+        "rpm": "OpenPGP",
+        "arch": "OpenPGP",
+        "flatpak": "OpenPGP",
+        "apk": "RSA-256",
+        "nix": "Ed25519",
+        "brew": "SHA-256",
+        "scoop": "SHA-256",
+    }
+    for name, pill in expected_pills.items():
+        page = render(name, published(name, ()))
+        card = page[page.index('<aside class="hero-card"') : page.index("</aside>")]
+        assert f'<span class="hero-pill">{pill}</span>' in card
+        assert "box-shadow:var(--hd-card-shadow" in page
+        assert "@media (max-width:480px){" in page
+        assert ".hero-card{display:none}" not in page
+    many = tuple(ref("nix", f"nar/{i:04d}.nar.zst", 1_500_000) for i in range(1_234))
+    nix_page = render("nix", published("nix", (), many))
+    nix_card = nix_page[nix_page.index('<aside class="hero-card"') : nix_page.index("</aside>")]
+    assert "<dt>Files</dt><dd>1,234</dd>" in nix_card
+    assert "<dt>Size</dt><dd>1.9 GB</dd>" in nix_card
+    assert 'id="files-h"' not in nix_page and "nar/" not in nix_page

@@ -42,6 +42,7 @@ class RecordedGitHub(Runtime):
         self.bodies = {name: body.encode() for name, body in bodies.items()}
         self.latest: dict[str, int] = {self.repository: 20}
         self.repositories: dict[str, dict[str, object]] = {}
+        self.contents: dict[str, dict[str, object] | list[object]] = {}
         self.calls: list[tuple[str, ...]] = []
         self.fail: str | None = None
         self.failure_mode = "nonzero"
@@ -96,6 +97,11 @@ class RecordedGitHub(Runtime):
             elif endpoint.startswith("repos/") and endpoint.count("/") == 2:
                 repository = endpoint.removeprefix("repos/")
                 data = canonical_json(self.repositories.get(repository, {}))
+            elif "/contents/" in endpoint:
+                if endpoint not in self.contents:
+                    body = b'{"message":"Not Found","status":"404"}'
+                    return subprocess.CompletedProcess(argv, 1, body, b"gh: Not Found (HTTP 404)\n")
+                data = canonical_json(self.contents[endpoint])
             elif endpoint in self.pages:
                 data = canonical_json(self.pages[endpoint])
             elif "/tags/" in endpoint:
@@ -1005,3 +1011,113 @@ def test_scan_captures_and_normalises_repository_descriptions(
     github.repositories["example/tool"] = {"description": raw}
     result = scan(github)
     assert result.descriptions == (("example/tool", expected),)
+
+
+def _square_png(size: int = 64) -> bytes:
+    import struct
+    import zlib
+
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    crc = zlib.crc32(b"IHDR" + ihdr) & 0xFFFFFFFF
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", len(ihdr))
+        + b"IHDR"
+        + ihdr
+        + struct.pack(">I", crc)
+    )
+
+
+def _content_entry(
+    data: bytes, *, file_type: str = "file", encoding: str = "base64", download_url: str = ""
+) -> dict[str, object]:
+    import base64
+
+    entry: dict[str, object] = {"type": file_type, "size": len(data), "encoding": encoding}
+    if encoding == "base64":
+        raw = base64.b64encode(data).decode()
+        entry["content"] = "\n".join(raw[i : i + 60] for i in range(0, len(raw), 60)) + "\n"
+    else:
+        entry["content"] = ""
+    if download_url:
+        entry["download_url"] = download_url
+    return entry
+
+
+def test_scan_discovers_project_svg_without_fetching_png(github: RecordedGitHub) -> None:
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><circle r="30"/></svg>'
+    github.contents["repos/example/tool/contents/pages/icon.svg"] = _content_entry(svg)
+    github.contents["repos/example/tool/contents/pages/icon.png"] = _content_entry(_square_png())
+    result = scan(github)
+    assert result.icons == (
+        (
+            "example/tool",
+            discovery.ProjectIcon("svg", "image/svg+xml", svg, hashlib.sha256(svg).hexdigest()),
+        ),
+    )
+    endpoints = [call[-1] for call in github.calls if call[1] == "api"]
+    assert "repos/example/tool/contents/pages/icon.svg" in endpoints
+    assert "repos/example/tool/contents/pages/icon.png" not in endpoints
+
+
+def test_scan_falls_back_from_tailor_placeholder_symlink_or_invalid_svg_to_png(
+    github: RecordedGitHub,
+) -> None:
+    from haberdasher.core import TAILOR_PLACEHOLDER_SVG
+
+    png = _square_png(128)
+    github.contents["repos/example/tool/contents/pages/icon.png"] = _content_entry(png)
+    expected = (
+        (
+            "example/tool",
+            discovery.ProjectIcon("png", "image/png", png, hashlib.sha256(png).hexdigest()),
+        ),
+    )
+    for bad_svg in (
+        _content_entry(f"{TAILOR_PLACEHOLDER_SVG}\n".encode()),
+        _content_entry(
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>', file_type="symlink"
+        ),
+        _content_entry(
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><script/></svg>'
+        ),
+    ):
+        github.contents["repos/example/tool/contents/pages/icon.svg"] = bad_svg
+        assert scan(github).icons == expected
+
+    github.contents["repos/example/tool/contents/pages/icon.png"] = _content_entry(
+        png, file_type="symlink"
+    )
+    assert scan(github).icons == (("example/tool", None),)
+
+    github.contents.clear()
+    assert scan(github).icons == (("example/tool", None),)
+
+
+def test_scan_uses_download_url_fallback_for_large_regular_files_only(
+    github: RecordedGitHub,
+) -> None:
+    import io
+    import urllib.request
+    from unittest.mock import patch
+
+    png = _square_png(256)
+    url = "https://raw.githubusercontent.com/example/tool/main/pages/icon.png"
+    github.contents["repos/example/tool/contents/pages/icon.png"] = _content_entry(
+        png, encoding="none", download_url=url
+    )
+    with patch.object(urllib.request, "urlopen", return_value=io.BytesIO(png)) as mocked:
+        result = scan(github)
+    mocked.assert_called_once()
+    assert result.icons == (
+        (
+            "example/tool",
+            discovery.ProjectIcon("png", "image/png", png, hashlib.sha256(png).hexdigest()),
+        ),
+    )
+
+    github.contents["repos/example/tool/contents/pages/icon.png"] = _content_entry(
+        png, file_type="symlink", encoding="none", download_url=url
+    )
+    with patch.object(urllib.request, "urlopen", side_effect=AssertionError("downloaded symlink")):
+        assert scan(github).icons == (("example/tool", None),)

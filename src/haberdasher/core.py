@@ -6,18 +6,34 @@ import hashlib
 import json
 import os
 import re
+import struct
 import tempfile
 import unicodedata
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar, cast
 from urllib.parse import urlsplit
+from xml.etree import ElementTree
 
 SCHEMA_VERSION = 1
 FORMATS = frozenset({"apt", "rpm", "arch", "apk", "flatpak", "brew", "scoop", "nix"})
 OBJECT_CLASSES = frozenset({"package", "dependency", "entry", "inventory", "lock", "page"})
+MAX_PROJECT_SVG_BYTES = 256 * 1024
+MAX_PROJECT_PNG_BYTES = 1024 * 1024
+TAILOR_PLACEHOLDER_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">'
+    '<rect x="2" y="2" width="36" height="36" rx="9" fill="#0172ad"/>'
+    '<path d="m16 12-8 8 8 8m8-16 8 8-8 8" fill="none" stroke="#fff" '
+    'stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+)
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_SVG_ROOT = "{http://www.w3.org/2000/svg}svg"
+_FORBIDDEN_SVG_TAGS = frozenset({"script", "foreignobject", "image", "animate", "set"})
+_FORBIDDEN_SVG_URL = re.compile(r"(?:https?://|(?:javascript|file|data)\s*:)", re.IGNORECASE)
+_SVG_DOCTYPE = re.compile(r"<!(?:doctype|entity)\b", re.IGNORECASE)
 type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 type Report = Callable[[str], None]
 
@@ -40,6 +56,8 @@ def plural(count: int, noun: str) -> str:
 
 
 def size_text(size: int) -> str:
+    if size >= 1_000_000_000:
+        return f"{size / 1_000_000_000:.1f} GB"
     if size >= 1_000_000:
         return f"{size / 1_000_000:.0f} MB"
     return f"{size / 1_000:.0f} KB" if size >= 1_000 else f"{size} B"
@@ -148,6 +166,79 @@ def validate_descriptions(value: object) -> dict[str, str]:
             raise ValueError("Invalid repository description")
         result[repo] = normalised
     return dict(sorted(result.items()))
+
+
+def icon_key(value: object) -> str:
+    """Validate a public project icon object key."""
+    key = safe_key(value)
+    if re.fullmatch(r"icons/[a-z0-9][a-z0-9._-]*\.(?:svg|png)", key) is None:
+        raise ValueError("Invalid icon key")
+    return key
+
+
+def validate_icons(value: object) -> dict[str, str]:
+    """Validate a public mapping of repository names to project icon object keys."""
+    if not isinstance(value, Mapping):
+        raise ValueError("Expected an icons mapping")
+    result: dict[str, str] = {}
+    for key, item in cast(Mapping[object, object], value).items():
+        result[repository_name(key)] = icon_key(item)
+    return dict(sorted(result.items()))
+
+
+def validate_project_svg(data: bytes) -> bytes | None:
+    """Return SVG bytes when safe, under 256 KiB, and not Tailor's default placeholder."""
+    if not data or len(data) > MAX_PROJECT_SVG_BYTES:
+        return None
+    try:
+        decoded = data.decode("utf-8")
+    except UnicodeError:
+        return None
+    stripped = decoded.strip()
+    if not stripped or stripped == TAILOR_PLACEHOLDER_SVG:
+        return None
+    if _SVG_DOCTYPE.search(decoded):
+        return None
+    try:
+        root = ElementTree.fromstring(decoded)
+    except ElementTree.ParseError:
+        return None
+    if root.tag != _SVG_ROOT:
+        return None
+    view_box = root.get("viewBox")
+    if not view_box or not view_box.strip():
+        return None
+    for element in root.iter():
+        local_tag = element.tag.rsplit("}", 1)[-1].lower()
+        if local_tag in _FORBIDDEN_SVG_TAGS:
+            return None
+        if local_tag == "style" and element.text:
+            if _FORBIDDEN_SVG_URL.search(element.text) or "@import" in element.text.lower():
+                return None
+        for attr_name, attr_value in element.attrib.items():
+            local_attr = attr_name.rsplit("}", 1)[-1].lower()
+            if local_attr.startswith("on"):
+                return None
+            if _FORBIDDEN_SVG_URL.search(attr_value):
+                return None
+    return data
+
+
+def validate_project_png(data: bytes) -> bytes | None:
+    """Return PNG bytes when under 1 MiB with a valid square IHDR chunk, else None."""
+    if len(data) < 33 or len(data) > MAX_PROJECT_PNG_BYTES:
+        return None
+    if not data.startswith(_PNG_SIGNATURE):
+        return None
+    length, chunk_type = struct.unpack(">I4s", data[8:16])
+    if length != 13 or chunk_type != b"IHDR":
+        return None
+    if (zlib.crc32(data[12:29]) & 0xFFFFFFFF) != struct.unpack(">I", data[29:33])[0]:
+        return None
+    width, height = struct.unpack(">II", data[16:24])
+    if width <= 0 or width != height:
+        return None
+    return data
 
 
 def safe_key(value: object) -> str:
@@ -508,6 +599,7 @@ def public_inventory(
     objects: Sequence[ObjectRef],
     homepages: Mapping[str, str] | None = None,
     descriptions: Mapping[str, str] | None = None,
+    icons: Mapping[str, str] | None = None,
 ) -> dict[str, JSONValue]:
     entries: list[JSONValue] = []
     for asset in assets:
@@ -540,4 +632,7 @@ def public_inventory(
     validated_descriptions = validate_descriptions(descriptions) if descriptions is not None else {}
     if validated_descriptions:
         result["descriptions"] = dict(validated_descriptions)
+    validated_icons = validate_icons(icons) if icons is not None else {}
+    if validated_icons:
+        result["icons"] = dict(validated_icons)
     return result

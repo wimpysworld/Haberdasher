@@ -204,6 +204,7 @@ class Releases:
         self.fail = False
         self.homepages: dict[str, str | None] = {}
         self.descriptions: dict[str, str | None] = {}
+        self.icons: dict[str, discovery.ProjectIcon | None] = {}
 
     def new_release(self) -> None:
         """Mark a new release as the latest, so that discovery no longer reads the old one."""
@@ -261,6 +262,7 @@ class Releases:
             (),
             tuple(sorted(self.homepages.items())),
             tuple(sorted(self.descriptions.items())),
+            tuple(sorted(self.icons.items())),
         )
 
     def verify(
@@ -1034,5 +1036,123 @@ def test_descriptions_update_inventory_and_page_without_rebuilding_packages(
 
     tampered = fixture.inventory()
     tampered["descriptions"] = {"test/project": "bad\x00description"}
+    with pytest.raises(state.StateError, match="inventory is invalid"):
+        state.decode_published("arch", core.canonical_json(tampered), None)
+
+
+def test_icons_upload_conditionally_and_update_inventory_and_page_without_rebuilding_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import struct
+    import zlib
+
+    def make_png(size: int) -> bytes:
+        ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+        crc = zlib.crc32(b"IHDR" + ihdr) & 0xFFFFFFFF
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + struct.pack(">I", len(ihdr))
+            + b"IHDR"
+            + ihdr
+            + struct.pack(">I", crc)
+        )
+
+    fixture = Fixture(tmp_path, monkeypatch, ("arch",))
+    fixture.releases.add("tool", "1")
+    fixture.run()
+    legacy = fixture.inventory()
+    assert "icons" not in legacy
+    assert state.decode_published("arch", core.canonical_json(legacy), None).icons == {}
+    assert 'class="project-icon"' not in fixture.path("arch", site.PAGE_KEY).read_text()
+    counts = (fixture.adapter.inspections, fixture.adapter.prepares)
+
+    svg_v1 = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><circle r="20"/></svg>'
+    svg_v2 = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64"/></svg>'
+    png_v1 = make_png(64)
+    icon_v1 = discovery.ProjectIcon(
+        "svg", "image/svg+xml", svg_v1, hashlib.sha256(svg_v1).hexdigest()
+    )
+    unused_icon = discovery.ProjectIcon(
+        "svg", "image/svg+xml", svg_v2, hashlib.sha256(svg_v2).hexdigest()
+    )
+    fixture.releases.icons = {"test/project": icon_v1, "other/unused": unused_icon}
+
+    def serve(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        key = request.full_url.removeprefix("https://pkg.example/")
+        path = fixture.path("arch", key)
+        if not path.is_file():
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", Message(), None)
+        return io.BytesIO(path.read_bytes())
+
+    scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
+    with patch.object(urllib.request, "urlopen", side_effect=serve):
+        cli.show_plan(
+            scan, fixture.config, fixture.runtime, {"arch": "https://pkg.example"}, FINGERPRINT
+        )
+    plan_out = capsys.readouterr().out
+    assert "arch  would write icons/project.svg" in plan_out
+    assert "arch  would write index.html" in plan_out
+    assert "1 project icon to write." in plan_out
+
+    result = fixture.run()
+    assert result.changed and result.repositories == ("arch",) and result.pages == ("arch",)
+    assert fixture.store.writes == [
+        "arch/haberdasher.lock",
+        "arch/haberdasher.json",
+        "arch/icons/project.svg",
+        "arch/index.html",
+    ]
+    assert (fixture.adapter.inspections, fixture.adapter.prepares) == counts
+    assert fixture.inventory()["icons"] == {"test/project": "icons/project.svg"}
+    assert fixture.path("arch", "icons/project.svg").read_bytes() == svg_v1
+    assert not fixture.path("arch", "icons/unused.svg").exists()
+    assert (
+        '<img class="project-icon" src="icons/project.svg" alt="" width="124" height="124" '
+        'decoding="async">'
+    ) in fixture.path("arch", site.PAGE_KEY).read_text()
+    assert fixture.run() == publish.RunResult(False, 0, 0)
+    assert fixture.store.writes == ["arch/haberdasher.lock"]
+
+    icon_v2 = discovery.ProjectIcon(
+        "svg", "image/svg+xml", svg_v2, hashlib.sha256(svg_v2).hexdigest()
+    )
+    fixture.releases.icons = {"test/project": icon_v2}
+    scan = fixture.releases.scan(fixture.config, runtime=fixture.runtime)
+    with patch.object(urllib.request, "urlopen", side_effect=serve):
+        cli.show_plan(
+            scan, fixture.config, fixture.runtime, {"arch": "https://pkg.example"}, FINGERPRINT
+        )
+    plan_updated = capsys.readouterr().out
+    assert "arch  would write icons/project.svg" in plan_updated
+    assert "arch  would write index.html" not in plan_updated
+
+    updated = fixture.run()
+    assert updated.changed and updated.repositories == () and updated.pages == ("arch",)
+    assert fixture.store.writes == ["arch/haberdasher.lock", "arch/icons/project.svg"]
+    assert fixture.path("arch", "icons/project.svg").read_bytes() == svg_v2
+    assert fixture.run() == publish.RunResult(False, 0, 0)
+
+    png_icon = discovery.ProjectIcon("png", "image/png", png_v1, hashlib.sha256(png_v1).hexdigest())
+    fixture.releases.icons = {"test/project": png_icon}
+    switched = fixture.run()
+    assert switched.changed and switched.repositories == ("arch",) and switched.pages == ("arch",)
+    assert fixture.store.writes == [
+        "arch/haberdasher.lock",
+        "arch/haberdasher.json",
+        "arch/icons/project.png",
+        "arch/index.html",
+    ]
+    assert fixture.inventory()["icons"] == {"test/project": "icons/project.png"}
+    assert fixture.path("arch", "icons/project.png").read_bytes() == png_v1
+    assert 'src="icons/project.png"' in fixture.path("arch", site.PAGE_KEY).read_text()
+
+    fixture.releases.icons = {"test/project": None}
+    cleared = fixture.run()
+    assert cleared.changed and cleared.repositories == ("arch",) and cleared.pages == ("arch",)
+    assert "icons" not in fixture.inventory()
+    assert 'class="project-icon"' not in fixture.path("arch", site.PAGE_KEY).read_text()
+
+    tampered = fixture.inventory()
+    tampered["icons"] = {"test/project": "../escape.svg"}
     with pytest.raises(state.StateError, match="inventory is invalid"):
         state.decode_published("arch", core.canonical_json(tampered), None)
