@@ -82,7 +82,7 @@ class RecordedGitHub(Runtime):
                 raise RuntimeFailure("injected launch, time or output failure")
             return subprocess.CompletedProcess(argv, 1, b"", b"injected error")
         if argv[1] == "api":
-            assert "--hostname" in argv and "github.com" in argv
+            assert "--hostname" in argv and argv[argv.index("--hostname") + 1] == "github.com"
             assert "--method" in argv and "GET" in argv
             assert "--paginate" not in argv
             endpoint = argv[-1]
