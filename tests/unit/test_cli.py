@@ -338,7 +338,10 @@ def test_publish_workflow_gates_and_github_command_environment(tmp_path: Path) -
     workflow = state.mapping(
         yaml.load(Path(".github/workflows/publish.yml").read_text(), Loader=yaml.BaseLoader)
     )
-    assert workflow["on"] == {"workflow_dispatch": ""}
+    assert workflow["on"] == {
+        "schedule": [{"cron": "17 */6 * * *"}],
+        "workflow_dispatch": "",
+    }
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {
         "group": "haberdasher-publisher",

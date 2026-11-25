@@ -18,7 +18,10 @@ def workflow() -> dict[str, Any]:
 
 def test_publish_gates_and_step_inputs(workflow: dict[str, Any]) -> None:
     job = workflow["jobs"]["publish"]
-    assert workflow["on"] == {"workflow_dispatch": ""}
+    assert workflow["on"] == {
+        "schedule": [{"cron": "17 */6 * * *"}],
+        "workflow_dispatch": "",
+    }
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {
         "group": "haberdasher-publisher",
