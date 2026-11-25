@@ -16,7 +16,7 @@ repository:
   has_wiki: false
   has_discussions: false
   has_projects: false
-  has_issues: true
+  has_issues: false
   allow_merge_commit: false
   allow_squash_merge: true
   allow_rebase_merge: true
