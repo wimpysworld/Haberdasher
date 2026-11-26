@@ -484,6 +484,72 @@ def test_publish_summary_names_refreshed_metadata(
     assert capsys.readouterr().out.splitlines()[-1] == summary
 
 
+@pytest.mark.parametrize(
+    ("result", "expected_warning", "expected_final"),
+    [
+        (
+            publish.RunResult(
+                True,
+                5,
+                0,
+                2,
+                ("apt", "rpm"),
+                (),
+                ("wimpysworld/tailor v0.7.0 tailor",),
+            ),
+            "Warning: skipped 1 failed Nix build: wimpysworld/tailor v0.7.0 tailor.",
+            "Published 2 packages to 2 repositories.",
+        ),
+        (
+            publish.RunResult(
+                False,
+                0,
+                0,
+                0,
+                (),
+                (),
+                ("wimpysworld/a v1.0.0 a", "wimpysworld/b v2.0.0 b"),
+            ),
+            "Warning: skipped 2 failed Nix builds: wimpysworld/a v1.0.0 a, wimpysworld/b v2.0.0 b.",
+            "Nothing changed in 1 repository.",
+        ),
+    ],
+)
+def test_publish_summary_warns_about_skipped_nix_builds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    result: publish.RunResult,
+    expected_warning: str,
+    expected_final: str,
+) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    with (
+        patch.object(cli, "load_config", return_value=Config(("synthetic/test",))),
+        patch.object(discovery, "scan_releases", return_value=scan_with("app.deb")),
+        patch.object(cli, "LocalStore"),
+        patch.object(signing, "key_fingerprint", return_value="A" * 40),
+        patch.object(publish, "reconcile", return_value=result),
+    ):
+        assert cli.main(["publish", "--local-root", str(tmp_path / "store")]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-2:] == [expected_warning, expected_final]
+    assert not any(line.startswith("::warning::") for line in lines)
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    with (
+        patch.object(cli, "load_config", return_value=Config(("synthetic/test",))),
+        patch.object(discovery, "scan_releases", return_value=scan_with("app.deb")),
+        patch.object(cli, "LocalStore"),
+        patch.object(signing, "key_fingerprint", return_value="A" * 40),
+        patch.object(publish, "reconcile", return_value=result),
+    ):
+        assert cli.main(["publish", "--local-root", str(tmp_path / "store")]) == 0
+    ci_lines = capsys.readouterr().out.splitlines()
+    annotation = f"::warning::Haberdasher {expected_warning.removeprefix('Warning: ')}"
+    assert ci_lines[-3:] == [expected_warning, annotation, expected_final]
+
+
 def test_pending_pages_reports_missing_and_changed_project_icons(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

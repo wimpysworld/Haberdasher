@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import stat
 import sys
 import tempfile
@@ -367,6 +368,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if result.pending_assets:
                 say(f"Skipped {plural(result.pending_assets, 'package')} without a checksum.")
+            if result.skipped_nix_builds:
+                summary = (
+                    f"skipped {plural(len(result.skipped_nix_builds), 'failed Nix build')}: "
+                    f"{', '.join(result.skipped_nix_builds)}."
+                )
+                say(f"Warning: {summary}")
+                if os.environ.get("GITHUB_ACTIONS") == "true":
+                    say(f"::warning::Haberdasher {summary.replace('%', '%25')}")
             if result.packages:
                 say(
                     f"Published {plural(result.packages, 'package')} to "

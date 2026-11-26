@@ -36,6 +36,8 @@ CACHE_INFO_KEY = "nix-cache-info"
 CACHE_INFO = b"StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 41\n"
 IMMUTABLE = "public, max-age=31536000, immutable"
 BUILD_TIMEOUT = 3600
+MAX_BUILD_ERROR_LINES = 20
+MAX_BUILD_ERROR_LINE_CHARS = 400
 # The flake repository that earlier releases generated. Its objects stay in the bucket.
 LEGACY_REPO = "packages.git/"
 _NIX32 = "[0-9a-df-np-sv-z]"
@@ -456,6 +458,27 @@ def _export(
     _nix(runtime, *verify, public_value, *paths)
 
 
+def _build_error_lines(stderr: bytes) -> list[str]:
+    """Return bounded non-empty tail lines from failed `nix build` stderr."""
+    lines = [line.rstrip() for line in stderr.decode(errors="replace").splitlines() if line.strip()]
+    if not lines:
+        return []
+    omitted = len(lines) - MAX_BUILD_ERROR_LINES
+    tail = lines[-MAX_BUILD_ERROR_LINES:]
+    bounded = [
+        f"{line[: MAX_BUILD_ERROR_LINE_CHARS - 3]}..."
+        if len(line) > MAX_BUILD_ERROR_LINE_CHARS
+        else line
+        for line in tail
+    ]
+    if omitted > 0:
+        return [
+            f"... (showing last {MAX_BUILD_ERROR_LINES} of {len(lines)} stderr lines)",
+            *bounded,
+        ]
+    return bounded
+
+
 def prepare(
     new: Sequence[Package],
     retained: RetainedFormat,
@@ -464,11 +487,12 @@ def prepare(
     signer: SigningSession,
     out: Path,
     report: Report = quiet,
+    skipped: list[str] | None = None,
 ) -> PreparedFormat:
     """Build each new package, then sign the store paths that cache.nixos.org does not serve.
 
-    A package whose build fails is skipped with one line. Without a built package, the
-    retained state is returned unchanged.
+    A package whose build fails is skipped with its bounded stderr diagnostics, and the run
+    continues. Without a built package, the retained state is returned unchanged.
     """
     state = current(retained)
     validate_retained(state)
@@ -492,7 +516,20 @@ def prepare(
         )
         if result.returncode or item.path not in result.stdout.decode(errors="replace").split():
             label = f"{item.repository} {item.tag} {item.attribute}"
+            if skipped is not None:
+                skipped.append(label)
             step(report, "nix", f"skipped {label}: the build failed")
+            details = _build_error_lines(result.stderr)
+            if not result.returncode:
+                step(report, "nix", f"| build did not produce {item.path}")
+            elif not details:
+                step(
+                    report,
+                    "nix",
+                    f"| nix build exited with status {result.returncode} without stderr output",
+                )
+            for line in details:
+                step(report, "nix", f"| {line}")
             continue
         built.append(item)
         paths, entries = _closure(runtime, item.path, set(old_refs))

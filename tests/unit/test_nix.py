@@ -390,6 +390,7 @@ def test_prepare_skips_failed_builds_and_uploads_only_own_store_paths(tmp_path: 
             case _:
                 return None
 
+    skipped: list[str] = []
     with private_workspace(tmp_path) as runtime:
         fake(runtime, handler)
         signer = Signer(runtime.root)
@@ -402,6 +403,7 @@ def test_prepare_skips_failed_builds_and_uploads_only_own_store_paths(tmp_path: 
             signer=cast(SigningSession, signer),
             out=runtime.root / "first",
             report=lines.append,
+            skipped=skipped,
         )
         assert unchanged.retained is empty and not unchanged.outputs
         prepared = nix.prepare(
@@ -411,12 +413,73 @@ def test_prepare_skips_failed_builds_and_uploads_only_own_store_paths(tmp_path: 
             signer=cast(SigningSession, signer),
             out=runtime.root / "second",
             report=lines.append,
+            skipped=skipped,
         )
         nix.validate_prepared(prepared)
-    assert lines == ["nix   skipped wimpysworld/tool v1.0.0 broken: the build failed"] * 2
+    assert skipped == ["wimpysworld/tool v1.0.0 broken"] * 2
+    expected = [
+        "nix   skipped wimpysworld/tool v1.0.0 broken: the build failed",
+        "nix   | error: hash mismatch",
+    ]
+    assert lines == expected * 2
     assert sorted(copied) == [TOOL, f"/nix/store/{HELPER}"]
     keys = [output.ref.key for output in prepared.outputs]
     assert keys[-1] == nix.CACHE_INFO_KEY and keys[0].startswith("nar/")
     assert f"{GLIBC[:32]}.narinfo" not in keys
     assert prepared.retained.metadata["packages"] == [package().record()]
     assert prepared.retained.active_identities == (package().identity,)
+
+
+def test_prepare_reports_bounded_build_failure_diagnostics(tmp_path: Path) -> None:
+    empty = RetainedFormat("nix", (), (), {}, ())
+    mismatch = (
+        b"error: hash mismatch in fixed-output derivation '/nix/store/x-tailor-go-modules.drv':\n"
+        b"         specified: sha256-OLD=\n"
+        b"            got:    sha256-NEW=\n"
+        b"error: 1 dependencies of derivation '/nix/store/x-tailor.drv' failed to build\n"
+    )
+    noisy_lines = [f"line-{index}" for index in range(1, nix.MAX_BUILD_ERROR_LINES + 6)]
+    noisy_lines[-1] = "X" * (nix.MAX_BUILD_ERROR_LINE_CHARS + 50)
+    noisy = ("\n".join(noisy_lines) + "\n").encode()
+    responses: dict[str, subprocess.CompletedProcess[bytes]] = {
+        "mismatch": done([], code=1, stderr=mismatch),
+        "noisy": done([], code=1, stderr=noisy),
+        "silent": done([], code=2, stderr=b"   \n\n"),
+        "wrong-path": done([], stdout=f"{OTHER}\n".encode(), code=0, stderr=b""),
+    }
+
+    def handler(argv: Sequence[str]) -> subprocess.CompletedProcess[bytes] | None:
+        if argv[0] != "build":
+            return None
+        attribute = argv[-1].rsplit(".", 1)[-1]
+        return responses.get(attribute)
+
+    items = [replace(package(), attribute=attr) for attr in responses]
+    lines: list[str] = []
+    skipped: list[str] = []
+    with private_workspace(tmp_path) as runtime:
+        fake(runtime, handler)
+        signer = Signer(runtime.root)
+        result = nix.prepare(
+            items,
+            empty,
+            runtime=runtime,
+            signer=cast(SigningSession, signer),
+            out=runtime.root / "out",
+            report=lines.append,
+            skipped=skipped,
+        )
+    assert result.retained is empty and not result.outputs
+    assert skipped == [f"wimpysworld/tool v1.0.0 {attr}" for attr in responses]
+    assert "nix   |          specified: sha256-OLD=" in lines
+    assert "nix   |             got:    sha256-NEW=" in lines
+    assert (
+        f"nix   | ... (showing last {nix.MAX_BUILD_ERROR_LINES} of "
+        f"{nix.MAX_BUILD_ERROR_LINES + 5} stderr lines)"
+    ) in lines
+    assert "nix   | line-1" not in lines
+    assert "nix   | line-6" in lines
+    truncated = f"nix   | {'X' * (nix.MAX_BUILD_ERROR_LINE_CHARS - 3)}..."
+    assert truncated in lines
+    assert "nix   | nix build exited with status 2 without stderr output" in lines
+    assert f"nix   | build did not produce {TOOL}" in lines

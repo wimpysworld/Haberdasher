@@ -109,6 +109,7 @@ class RunResult:
     packages: int = 0
     repositories: tuple[str, ...] = ()
     pages: tuple[str, ...] = ()
+    skipped_nix_builds: tuple[str, ...] = ()
 
 
 def provided(scan: discovery.CompleteScan) -> set[str]:
@@ -626,6 +627,7 @@ def _reconcile(
             )
         if fingerprint is None:
             raise ValueError("Publication requires the expected signing fingerprint")
+        skipped_nix: list[str] = []
         prepared: list[PreparedFormat] = []
         with signing_session(runtime, expected_fingerprint=fingerprint) as signer:
             for name in names:
@@ -641,7 +643,15 @@ def _reconcile(
                         signer=signer,
                         out=root / name,
                         report=report,
+                        skipped=skipped_nix,
                     )
+                    if skipped_nix:
+                        step(
+                            report,
+                            name,
+                            f"warning: skipped {plural(len(skipped_nix), 'failed build')}: "
+                            f"{', '.join(skipped_nix)}",
+                        )
                     if built.retained is not retained:
                         _check_writes(retained, built)
                         prepared.append(built)
@@ -751,7 +761,13 @@ def _reconcile(
                 written.append(item.format)
                 count += wrote
         return RunResult(
-            True, count, len(scan.pending), packages, tuple(repositories), tuple(written)
+            bool(count),
+            count,
+            len(scan.pending),
+            packages,
+            tuple(repositories),
+            tuple(written),
+            tuple(skipped_nix),
         )
 
 

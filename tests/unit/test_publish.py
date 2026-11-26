@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import socket
+import subprocess
 import urllib.error
 import urllib.request
 from collections.abc import Generator, Sequence
@@ -34,6 +35,7 @@ from haberdasher.core import (
     VerifiedAsset,
     WriteReceipt,
 )
+from haberdasher.formats import nix
 from haberdasher.runtime import Runtime
 from haberdasher.signing import SigningSession
 from haberdasher.storage import LocalStore
@@ -1156,3 +1158,77 @@ def test_icons_upload_conditionally_and_update_inventory_and_page_without_rebuil
     tampered["icons"] = {"test/project": "../escape.svg"}
     with pytest.raises(state.StateError, match="inventory is invalid"):
         state.decode_published("arch", core.canonical_json(tampered), None)
+
+
+def test_failed_nix_build_warns_without_blocking_other_formats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = Fixture(tmp_path, monkeypatch, ("arch", "nix"))
+    fixture.releases.add("tool", "1")
+    broken = nix.Package(
+        "wimpysworld/tailor",
+        "v0.7.0",
+        "github:wimpysworld/tailor/v0.7.0",
+        "tailor",
+        "tailor",
+        "0.7.0",
+        "x86_64-linux",
+        f"/nix/store/{'9' * 32}-tailor-0.7.0",
+        "Tailor",
+    )
+
+    def fake_targets(releases: Sequence[tuple[str, str]], *, runtime: Runtime) -> list[nix.Target]:
+        return [nix.Target("wimpysworld/tailor", "v0.7.0", broken.flake, False)]
+
+    def fake_pending(
+        targets: Sequence[nix.Target],
+        retained: RetainedFormat,
+        *,
+        runtime: Runtime,
+        report: core.Report = core.quiet,
+    ) -> list[nix.Package]:
+        return [broken]
+
+    stderr = (
+        b"error: hash mismatch in fixed-output derivation '/nix/store/x-tailor-go-modules.drv':\n"
+        b"         specified: sha256-OLD=\n"
+        b"            got:    sha256-NEW=\n"
+    )
+
+    def fake_run(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(list(argv), 1, b"", stderr)
+
+    monkeypatch.setattr(nix, "targets", fake_targets)
+    monkeypatch.setattr(nix, "pending", fake_pending)
+    monkeypatch.setattr(fixture.runtime, "run", fake_run)
+
+    lines: list[str] = []
+    result = fixture.run(lines.append)
+    assert result.changed is True
+    assert result.packages == 1
+    assert result.repositories == ("arch", "nix")
+    assert result.skipped_nix_builds == ("wimpysworld/tailor v0.7.0 tailor",)
+    assert "nix   skipped wimpysworld/tailor v0.7.0 tailor: the build failed" in lines
+    assert "nix   |          specified: sha256-OLD=" in lines
+    assert "nix   |             got:    sha256-NEW=" in lines
+    assert "nix   warning: skipped 1 failed build: wimpysworld/tailor v0.7.0 tailor" in lines
+    assert fixture.path("arch", "x86_64/db").read_text() == "tool-1\n"
+
+    # A follow-up run with no other changes still reports the failed Nix build and unchanged state.
+    lines.clear()
+    second = fixture.run(lines.append)
+    assert second.changed is False
+    assert second.published_objects == 0
+    assert second.repositories == ()
+    assert second.skipped_nix_builds == ("wimpysworld/tailor v0.7.0 tailor",)
+    assert "nix   warning: skipped 1 failed build: wimpysworld/tailor v0.7.0 tailor" in lines
+
+    # Once bootstrapped, an unrelated arch release publishes while the broken Nix build is skipped.
+    fixture.releases.add("other", "2")
+    lines.clear()
+    third = fixture.run(lines.append)
+    assert third.changed is True
+    assert third.packages == 1
+    assert third.repositories == ("arch",)
+    assert third.skipped_nix_builds == ("wimpysworld/tailor v0.7.0 tailor",)
+    assert fixture.path("arch", "x86_64/db").read_text() == "other-2\ntool-1\n"

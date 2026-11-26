@@ -103,7 +103,7 @@ Haberdasher publishes prebuilt packages from the GitHub releases of the owner's 
   When `latest` moves ahead again within the same release, rebuild and replace the package record of that identity. Keep the earlier cache objects.
   Ignore a `default` package that duplicates a named package. Take the identity from the derivation `pname`, the release tag without a leading `v`, and the system.
   A flake cannot see its tag, so keep the derivation `version` in the inventory as well.
-  Skip a project without a flake or host packages, a package whose `meta.platforms` excludes the host, and a package whose build fails, with one line each. Do not fail the run.
+  Skip a project without a flake or host packages and a package whose `meta.platforms` excludes the host with one line each. Skip a package whose build fails with its bounded stderr diagnostics and report it in the publish summary. Do not fail the run.
   Upload only the store paths that `cache.nixos.org` does not sign. Record the tag and flake of each package in the inventory, so unchanged reruns build nothing.
   Show `github:<owner>/<repo>/latest` on the page when the packages of the release are built from the commit that `latest` names, and `github:<owner>/<repo>` otherwise. Resolve `latest` on each run and record the reference in the inventory.
   Do not generate flakes or recipes, and do not serve a flake repository. Nix fetches locked Git revisions with shallow fetches, which dumb HTTP cannot serve.

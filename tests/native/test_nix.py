@@ -113,12 +113,17 @@ def test_flake_packages_substitute_from_the_signed_cache_and_reruns_do_nothing(
         # 1. Publish the named package once, and skip a failed build and sources without packages.
         first, lines, _ = reconcile("v1.0.0")
         assert first.changed and first.packages == 1
+        assert first.skipped_nix_builds == ("wimpysworld/hd-tool v1.0.0 hd-broken",)
         for line in (
             "nix   skipped wimpysworld/bare v1: no flake",
             "nix   skipped wimpysworld/empty v1: no packages for x86_64-linux",
             "nix   skipped wimpysworld/hd-tool v1.0.0 hd-broken: the build failed",
+            "nix   warning: skipped 1 failed build: wimpysworld/hd-tool v1.0.0 hd-broken",
         ):
             assert line in lines
+        assert any(
+            line.startswith("nix   | ") and "failed with exit code 1" in line for line in lines
+        )
         published = state.read(store, "nix")
         [tool_v1] = nix.published(published.retained)
         assert (tool_v1.attribute, tool_v1.name, tool_v1.version) == ("hd-tool", "hd-tool", "1.0.0")
