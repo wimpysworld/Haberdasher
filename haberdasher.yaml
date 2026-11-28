@@ -1,1 +1,2 @@
-sources: [wimpysworld/tailor, wimpysworld/sidra, wimpysworld/WonKey, linuxmatters/jive-vocals, linuxmatters/jive-encoder, linuxmatters/jive-visualiser, wimpysworld/ia-get, wimpysworld/nyala, wimpysworld/hue-jackman, wimpysworld/stream-sprout, wimpysworld/vectorator]
+sources: [wimpysworld/tailor, wimpysworld/sidra, wimpysworld/WonKey, linuxmatters/jive-vocals, linuxmatters/jive-encoder, linuxmatters/jive-visualiser, wimpysworld/ia-get, wimpysworld/nyala, wimpysworld/hue-jackman, wimpysworld/stream-sprout, 
+wimpysworld/vectorator, linuxmatters/ffmpeg-statigo]
